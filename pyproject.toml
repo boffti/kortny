@@ -3,7 +3,7 @@ name = "kortny"
 version = "0.1.0"
 description = "Self-hosted AI coworker for teams who live in Slack."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "Kortny Contributors" }]
 dependencies = [
@@ -33,7 +33,7 @@ default-groups = ["dev"]
 
 [tool.ruff]
 line-length = 88
-target-version = "py310"
+target-version = "py311"
 extend-exclude = [
     ".venv",
     "build",
@@ -59,7 +59,7 @@ indent-style = "space"
 line-ending = "auto"
 
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.11"
 check_untyped_defs = true
 disallow_untyped_defs = true
 no_implicit_optional = true

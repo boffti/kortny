@@ -54,7 +54,8 @@ class SlackChannelHistoryTool:
         "Reads recent Slack conversation history from the current task channel or "
         "a provided Slack channel ID. Use it before summarizing channel context, "
         "answering questions about recent Slack discussion, or grounding follow-up "
-        "work in channel messages."
+        "work in channel messages. Includes compact Slack file metadata when "
+        "messages have file attachments."
     )
     parameters: JsonSchema = {
         "type": "object",
@@ -361,7 +362,54 @@ def _format_message(
     subtype = _optional_message_string(message.get("subtype"))
     if subtype is not None:
         formatted["subtype"] = subtype
+    files = _format_files(message.get("files"))
+    if files:
+        formatted["files"] = files
     return formatted
+
+
+def _format_files(raw_files: object) -> list[JsonObject]:
+    if not isinstance(raw_files, list):
+        return []
+
+    files: list[JsonObject] = []
+    for raw_file in raw_files:
+        if not isinstance(raw_file, Mapping):
+            continue
+        file_id = _optional_message_string(raw_file.get("id"))
+        if file_id is None:
+            continue
+
+        file: JsonObject = {"id": file_id}
+        for source_key, target_key in (
+            ("name", "name"),
+            ("title", "title"),
+            ("mimetype", "mimetype"),
+            ("filetype", "filetype"),
+            ("user", "user"),
+        ):
+            value = _optional_message_string(raw_file.get(source_key))
+            if value is not None:
+                file[target_key] = value
+
+        size = _optional_positive_int(raw_file.get("size"))
+        if size is not None:
+            file["size_bytes"] = size
+        created = _optional_positive_int(raw_file.get("created"))
+        if created is not None:
+            file["created"] = created
+
+        files.append(file)
+
+    return files
+
+
+def _optional_positive_int(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int) and value >= 0:
+        return value
+    return None
 
 
 def _optional_message_string(value: object) -> str | None:

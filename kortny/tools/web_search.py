@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import threading
+import time
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any, Protocol
 
 import httpx
@@ -15,6 +17,10 @@ from kortny.tools.types import JsonObject, JsonSchema, ToolResult
 BRAVE_WEB_SEARCH_ENDPOINT = "https://api.search.brave.com/res/v1/web/search"
 DEFAULT_RESULT_COUNT = 5
 MAX_RESULT_COUNT = 20
+DEFAULT_MIN_REQUEST_INTERVAL_SECONDS = 1.05
+RECOVERABLE_HTTP_STATUS_CODES = {429, 500, 502, 503, 504}
+_GLOBAL_RATE_LIMIT_LOCK = threading.Lock()
+_GLOBAL_LAST_REQUEST_AT: float | None = None
 
 
 class TaskEventSink(Protocol):
@@ -62,11 +68,16 @@ class WebSearchTool:
         endpoint: str = BRAVE_WEB_SEARCH_ENDPOINT,
         timeout: float = 10.0,
         transport: httpx.BaseTransport | None = None,
+        min_request_interval_seconds: float = DEFAULT_MIN_REQUEST_INTERVAL_SECONDS,
+        monotonic: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         if not api_key.strip():
             raise ValueError("BRAVE_SEARCH_API_KEY is required for web_search")
         if (task_service is None) != (task_id is None):
             raise ValueError("task_service and task_id must be provided together")
+        if min_request_interval_seconds < 0:
+            raise ValueError("min_request_interval_seconds cannot be negative")
 
         self.api_key = api_key
         self.task_service = task_service
@@ -74,6 +85,9 @@ class WebSearchTool:
         self.endpoint = endpoint
         self.timeout = timeout
         self.transport = transport
+        self.min_request_interval_seconds = min_request_interval_seconds
+        self.monotonic = monotonic
+        self.sleep = sleep
 
     @classmethod
     def from_settings(
@@ -95,7 +109,19 @@ class WebSearchTool:
         request_payload = {"query": query, "count": count}
 
         self._append_event(TaskEventType.tool_call, request_payload)
-        response_payload = self._search(query=query, count=count)
+        try:
+            response_payload = self._search(query=query, count=count)
+        except httpx.HTTPStatusError as exc:
+            output = _recoverable_http_error_output(query=query, response=exc.response)
+            if output is None:
+                raise
+            self._append_error_result_event(query=query, error=output["error"])
+            return ToolResult(output=output)
+        except httpx.RequestError as exc:
+            output = _recoverable_request_error_output(query=query, error=exc)
+            self._append_error_result_event(query=query, error=output["error"])
+            return ToolResult(output=output)
+
         results = _parse_results(response_payload)
         output = {
             "provider": "brave",
@@ -126,6 +152,7 @@ class WebSearchTool:
         }
 
         with httpx.Client(transport=self.transport, timeout=self.timeout) as client:
+            self._pace_request()
             response = client.get(self.endpoint, headers=headers, params=params)
             response.raise_for_status()
             payload = response.json()
@@ -133,6 +160,23 @@ class WebSearchTool:
         if not isinstance(payload, dict):
             raise ValueError("Brave Search response must be a JSON object")
         return payload
+
+    def _pace_request(self) -> None:
+        global _GLOBAL_LAST_REQUEST_AT
+
+        if self.min_request_interval_seconds <= 0:
+            return
+
+        with _GLOBAL_RATE_LIMIT_LOCK:
+            now = self.monotonic()
+            if _GLOBAL_LAST_REQUEST_AT is not None:
+                delay = self.min_request_interval_seconds - (
+                    now - _GLOBAL_LAST_REQUEST_AT
+                )
+                if delay > 0:
+                    self.sleep(delay)
+                    now = self.monotonic()
+            _GLOBAL_LAST_REQUEST_AT = now
 
     def _append_event(self, event_type: TaskEventType, payload: JsonObject) -> None:
         if self.task_service is None or self.task_id is None:
@@ -142,6 +186,16 @@ class WebSearchTool:
             self.task_id,
             event_type,
             {"tool": self.name, **payload},
+        )
+
+    def _append_error_result_event(self, *, query: str, error: object) -> None:
+        self._append_event(
+            TaskEventType.tool_result,
+            {
+                "query": query,
+                "result_count": 0,
+                "error": error,
+            },
         )
 
 
@@ -190,6 +244,59 @@ def _parse_results(payload: JsonObject) -> list[JsonObject]:
         )
 
     return results
+
+
+def _recoverable_http_error_output(
+    *,
+    query: str,
+    response: httpx.Response,
+) -> JsonObject | None:
+    if response.status_code not in RECOVERABLE_HTTP_STATUS_CODES:
+        return None
+
+    retry_after = _optional_string(response.headers.get("Retry-After"))
+    error: JsonObject = {
+        "code": "rate_limited"
+        if response.status_code == httpx.codes.TOO_MANY_REQUESTS
+        else "upstream_unavailable",
+        "message": _recoverable_http_error_message(response.status_code),
+        "recoverable": True,
+        "status_code": response.status_code,
+    }
+    if retry_after is not None:
+        error["retry_after"] = retry_after
+
+    return _error_output(query=query, error=error)
+
+
+def _recoverable_request_error_output(
+    *,
+    query: str,
+    error: httpx.RequestError,
+) -> JsonObject:
+    return _error_output(
+        query=query,
+        error={
+            "code": "request_failed",
+            "message": f"Brave Search request failed temporarily: {type(error).__name__}",
+            "recoverable": True,
+        },
+    )
+
+
+def _error_output(*, query: str, error: JsonObject) -> JsonObject:
+    return {
+        "provider": "brave",
+        "query": query,
+        "results": [],
+        "error": error,
+    }
+
+
+def _recoverable_http_error_message(status_code: int) -> str:
+    if status_code == httpx.codes.TOO_MANY_REQUESTS:
+        return "Brave Search rate limit was reached for this request."
+    return f"Brave Search returned a temporary HTTP {status_code} response."
 
 
 def _optional_string(value: object) -> str | None:

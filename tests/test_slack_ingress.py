@@ -216,6 +216,37 @@ def test_thread_follow_up_creates_task_without_visible_ack(
     assert message_event_count == 0
 
 
+def test_app_mention_includes_attached_slack_file_ids_in_task_input(
+    db_session: Session,
+) -> None:
+    client = FakeSlackClient()
+
+    result = SlackIngress(session=db_session, client=client).handle_app_mention(
+        body=app_mention_body(event_id="EvMentionFile"),
+        event=app_mention_event(
+            text="<@UBOT> summarize this file",
+            files=[
+                {
+                    "id": "F123",
+                    "name": "report.pdf",
+                    "mimetype": "application/pdf",
+                    "size": 2048,
+                }
+            ],
+        ),
+    )
+
+    assert result.task.input == (
+        "summarize this file\n\n"
+        "<slack_files>\n"
+        "- id: F123\n"
+        "  name: report.pdf\n"
+        "  mimetype: application/pdf\n"
+        "  size_bytes: 2048\n"
+        "</slack_files>"
+    )
+
+
 def test_app_mention_ack_generation_failure_uses_fallback(
     db_session: Session,
 ) -> None:
@@ -322,14 +353,14 @@ def test_dm_creates_task_without_visible_ack(db_session: Session) -> None:
     )
 
     assert result.created is True
-    assert result.thread_ts == "1716500000.000001"
+    assert result.thread_ts == "D123"
     assert result.acknowledgement_ts is None
     assert installation is not None
     assert installation.slack_team_id == "T123"
     assert task is not None
     assert task.slack_event_id == "EvDm1"
     assert task.slack_channel_id == "D123"
-    assert task.slack_thread_ts == "1716500000.000001"
+    assert task.slack_thread_ts == "D123"
     assert task.slack_message_ts == "1716500000.000001"
     assert task.slack_user_id == "U123"
     assert task.input == "<@UBOT> research private context"
@@ -413,6 +444,27 @@ def test_redelivered_dm_is_idempotent(db_session: Session) -> None:
     assert client.calls == []
 
 
+def test_dm_messages_share_conversation_context_key(db_session: Session) -> None:
+    client = FakeSlackClient()
+    ingress = SlackIngress(session=db_session, client=client)
+
+    first = ingress.handle_dm(
+        body=message_body(event_id="EvDmFirst"),
+        event=dm_event(text="summarize this report", ts="1716500000.000001"),
+    )
+    second = ingress.handle_dm(
+        body=message_body(event_id="EvDmSecond"),
+        event=dm_event(text="extend that report", ts="1716500010.000001"),
+    )
+
+    assert first is not None
+    assert second is not None
+    assert first.task.slack_thread_ts == "D123"
+    assert second.task.slack_thread_ts == "D123"
+    assert first.task.slack_message_ts == "1716500000.000001"
+    assert second.task.slack_message_ts == "1716500010.000001"
+
+
 def cleanup_database(session: Session) -> None:
     for model in (
         Artifact,
@@ -445,8 +497,9 @@ def app_mention_event(
     text: str = "<@UBOT> research a topic",
     ts: str = "1716400000.000001",
     thread_ts: str | None = None,
+    files: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    event = {
+    event: dict[str, Any] = {
         "type": "app_mention",
         "channel": "C123",
         "user": "U123",
@@ -455,6 +508,8 @@ def app_mention_event(
     }
     if thread_ts is not None:
         event["thread_ts"] = thread_ts
+    if files is not None:
+        event["files"] = files
     return event
 
 
@@ -468,7 +523,7 @@ def dm_event(
     subtype: str | None = None,
     bot_id: str | None = None,
 ) -> dict[str, Any]:
-    event = {
+    event: dict[str, Any] = {
         "type": "message",
         "channel": channel,
         "channel_type": channel_type,

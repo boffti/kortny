@@ -2,7 +2,7 @@
     "display_information": {
         "name": "Kortny",
         "description": "Your AI coworker",
-        "background_color": "#1a1a2e"
+        "background_color": "#10396e"
     },
     "features": {
         "bot_user": {
@@ -35,7 +35,8 @@
                 "team:read",
                 "metadata.message:read"
             ]
-        }
+        },
+        "pkce_enabled": false
     },
     "settings": {
         "event_subscriptions": {
@@ -53,6 +54,7 @@
         },
         "org_deploy_enabled": false,
         "socket_mode_enabled": true,
-        "token_rotation_enabled": false
+        "token_rotation_enabled": false,
+        "is_mcp_enabled": false
     }
 }

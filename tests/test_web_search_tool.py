@@ -54,6 +54,7 @@ def test_web_search_tool_calls_brave_and_returns_structured_results() -> None:
     tool = WebSearchTool(
         api_key="brave-key",
         transport=httpx.MockTransport(handler),
+        min_request_interval_seconds=0,
     )
 
     result = tool.invoke({"query": "python tempfile", "count": 2})
@@ -102,6 +103,7 @@ def test_web_search_tool_emits_task_events() -> None:
                 },
             )
         ),
+        min_request_interval_seconds=0,
     )
 
     tool.invoke({"query": "kortny"})
@@ -162,7 +164,122 @@ def test_web_search_tool_raises_for_http_errors() -> None:
         transport=httpx.MockTransport(
             lambda request: httpx.Response(401, json={"error": "unauthorized"})
         ),
+        min_request_interval_seconds=0,
     )
 
     with pytest.raises(httpx.HTTPStatusError):
         tool.invoke({"query": "kortny"})
+
+
+def test_web_search_tool_returns_recoverable_rate_limit_error() -> None:
+    task_id = uuid.uuid4()
+    task_service = RecordingTaskService()
+    tool = WebSearchTool(
+        api_key="brave-key",
+        task_service=task_service,
+        task_id=task_id,
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                429,
+                headers={"Retry-After": "60"},
+                json={"error": "rate_limited"},
+            )
+        ),
+        min_request_interval_seconds=0,
+    )
+
+    result = tool.invoke({"query": "PayPal company profile", "count": 2})
+
+    assert result == ToolResult(
+        output={
+            "provider": "brave",
+            "query": "PayPal company profile",
+            "results": [],
+            "error": {
+                "code": "rate_limited",
+                "message": "Brave Search rate limit was reached for this request.",
+                "recoverable": True,
+                "status_code": 429,
+                "retry_after": "60",
+            },
+        }
+    )
+    assert task_service.events[-1] == (
+        task_id,
+        TaskEventType.tool_result,
+        {
+            "tool": "web_search",
+            "query": "PayPal company profile",
+            "result_count": 0,
+            "error": {
+                "code": "rate_limited",
+                "message": "Brave Search rate limit was reached for this request.",
+                "recoverable": True,
+                "status_code": 429,
+                "retry_after": "60",
+            },
+        },
+    )
+
+
+def test_web_search_tool_returns_recoverable_request_error() -> None:
+    tool = WebSearchTool(
+        api_key="brave-key",
+        transport=httpx.MockTransport(
+            lambda request: (_ for _ in ()).throw(
+                httpx.ConnectError("temporary network issue", request=request)
+            )
+        ),
+        min_request_interval_seconds=0,
+    )
+
+    result = tool.invoke({"query": "PayPal company profile"})
+
+    assert result.output == {
+        "provider": "brave",
+        "query": "PayPal company profile",
+        "results": [],
+        "error": {
+            "code": "request_failed",
+            "message": "Brave Search request failed temporarily: ConnectError",
+            "recoverable": True,
+        },
+    }
+
+
+def test_web_search_tool_paces_multiple_requests_from_same_process() -> None:
+    current_time = 10.0
+    sleeps: list[float] = []
+
+    def monotonic() -> float:
+        return current_time
+
+    def sleep(seconds: float) -> None:
+        nonlocal current_time
+        sleeps.append(seconds)
+        current_time += seconds
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal current_time
+        current_time += 0.2
+        return httpx.Response(200, json={})
+
+    first_tool = WebSearchTool(
+        api_key="brave-key",
+        transport=httpx.MockTransport(handler),
+        min_request_interval_seconds=1.0,
+        monotonic=monotonic,
+        sleep=sleep,
+    )
+    second_tool = WebSearchTool(
+        api_key="brave-key",
+        transport=httpx.MockTransport(handler),
+        min_request_interval_seconds=1.0,
+        monotonic=monotonic,
+        sleep=sleep,
+    )
+
+    first_tool.invoke({"query": "first"})
+    second_tool.invoke({"query": "second"})
+
+    assert sleeps == [pytest.approx(0.8)]

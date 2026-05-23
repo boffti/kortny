@@ -43,6 +43,10 @@ class Settings(BaseSettings):
     brave_search_api_key: str | None = Field(
         default=None, validation_alias="BRAVE_SEARCH_API_KEY"
     )
+    slack_file_read_max_bytes: int = Field(
+        default=25 * 1024 * 1024,
+        validation_alias="SLACK_FILE_READ_MAX_BYTES",
+    )
 
     postgres_url: str = Field(validation_alias="POSTGRES_URL", min_length=1)
 
@@ -51,6 +55,13 @@ class Settings(BaseSettings):
     def _blank_optional_strings_to_none(cls, value: Any) -> Any:
         if isinstance(value, str) and value.strip() == "":
             return None
+        return value
+
+    @field_validator("slack_file_read_max_bytes")
+    @classmethod
+    def _positive_file_read_limit(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("SLACK_FILE_READ_MAX_BYTES must be at least 1")
         return value
 
 

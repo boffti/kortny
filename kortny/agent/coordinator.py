@@ -7,6 +7,7 @@ OpenAI/OpenRouter chat completions so they can be adapted to ADK later.
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
@@ -30,10 +31,22 @@ DEFAULT_MAX_TURNS = 6
 DEFAULT_THREAD_CONTEXT_MAX_CHARS = 12_000
 DEFAULT_THREAD_CONTEXT_RECENT_TASKS = 3
 DEFAULT_THREAD_TRANSCRIPT_LIMIT = 30
+IMMEDIATE_PRIOR_INPUT_MAX_CHARS = 500
+IMMEDIATE_PRIOR_RESULT_MAX_CHARS = 1_800
+SLACK_FILES_BLOCK_RE = re.compile(r"<slack_files>\s*(.*?)\s*</slack_files>", re.S)
+SLACK_FILE_ID_RE = re.compile(r"^\s*-\s+id:\s*(\S+)\s*$", re.M)
 DEFAULT_SYSTEM_PROMPT = (
     "You are Kortny, a Slack-native AI coworker. Use the available tools when "
     "they are needed to complete the user's request. If the user asks for "
     "research and a PDF, search first and then generate the PDF artifact. "
+    "If the user asks about an attached Slack file and the task input or prior "
+    "context includes Slack file IDs, call slack_file_read before answering. "
+    "If the current Slack message is a short answer to your immediately "
+    "previous question, continue that pending task using the answer instead of "
+    "treating it as a new standalone request. "
+    "If a tool result includes error.recoverable=true, keep working with the "
+    "context and tool results already available instead of failing the task or "
+    "repeating the same tool call. "
     "When answering with text, format for Slack mrkdwn rather than GitHub "
     "Markdown: use *bold*, <https://example.com|label> links, simple line-break "
     "lists, and avoid Markdown headings."
@@ -407,6 +420,8 @@ class AgentCoordinator:
             return ()
         if not task.slack_thread_ts:
             return ()
+        if _is_dm_conversation_context_key(task.slack_channel_id, task.slack_thread_ts):
+            return ()
 
         try:
             return self.thread_transcript_provider.fetch_thread_messages(
@@ -430,17 +445,30 @@ class AgentCoordinator:
         include_events: bool,
         compacted: bool,
     ) -> str:
-        lines = [
-            "<prior_context>",
-            "This task is a follow-up in the same Slack thread. Use this context "
-            'to resolve references like "it", "that", "the PDF", and '
-            '"your source". Do not treat it as cross-thread memory.',
-        ]
+        if compacted:
+            lines = [
+                "<prior_context>",
+                "Compacted follow-up context. Resolve references from these "
+                "summaries; reuse Slack file IDs with slack_file_read.",
+            ]
+        else:
+            lines = [
+                "<prior_context>",
+                "This task is a follow-up in the same Slack thread. Use this context "
+                'to resolve references like "it", "that", "the PDF", and '
+                '"your source". If prior context includes Slack file IDs, you can '
+                "reuse those IDs with slack_file_read. Do not treat this as "
+                "cross-thread memory. If the current message is a short reply to "
+                "the immediately previous assistant question, treat it as the "
+                "answer to that question and continue the pending task.",
+            ]
         if compacted:
             lines.append(
                 "Context was compacted to stay within the configured token budget; "
                 "older task event details were omitted."
             )
+
+        lines.extend(_immediate_previous_exchange_lines(prior_tasks[-1]))
 
         if include_events:
             older_tasks = prior_tasks[: -self.thread_context_recent_tasks]
@@ -472,6 +500,11 @@ class AgentCoordinator:
 
     def _prior_task_detail_lines(self, index: int, task: Task) -> list[str]:
         lines = [_task_summary_line(index, task)]
+        slack_files_block = _slack_files_block(task.input)
+        if slack_files_block is not None:
+            lines.append("  attached Slack files from original request:")
+            for line in slack_files_block.splitlines():
+                lines.append(f"  {line}")
         events = self._context_events(task)
         if events:
             lines.append("  events:")
@@ -516,16 +549,50 @@ def _tasks_before(thread_tasks: Sequence[Task], current_task: Task) -> list[Task
     return [task for task in thread_tasks if task.id != current_task.id]
 
 
+def _immediate_previous_exchange_lines(task: Task) -> list[str]:
+    lines = [
+        "",
+        "Immediate previous exchange:",
+        f"- user: {_quote(_shorten(task.input, max_chars=IMMEDIATE_PRIOR_INPUT_MAX_CHARS))}",
+        "- assistant: "
+        f"{_quote(_shorten(task.result_summary or '(no result summary yet)', max_chars=IMMEDIATE_PRIOR_RESULT_MAX_CHARS))}",
+    ]
+    slack_file_ids = _slack_file_ids(task.input)
+    if slack_file_ids:
+        lines.append(f"- attached_slack_file_ids: {','.join(slack_file_ids)}")
+    return lines
+
+
 def _task_summary_line(index: int, task: Task) -> str:
     result = task.result_summary or "(no result summary yet)"
     line = (
         f"- {index}. task_id={task.id} status={task.status.value} input={_quote(_shorten(task.input, max_chars=240))} "
         f"result={_quote(_shorten(result, max_chars=360))} cost_usd={task.total_cost_usd}"
     )
+    slack_file_ids = _slack_file_ids(task.input)
+    if slack_file_ids:
+        line = f"{line} slack_file_ids={','.join(slack_file_ids)}"
     error = _error_summary(task.error)
     if error:
         line = f"{line} error={_quote(_shorten(error, max_chars=240))}"
     return line
+
+
+def _slack_files_block(input_text: str) -> str | None:
+    match = SLACK_FILES_BLOCK_RE.search(input_text)
+    if match is None:
+        return None
+    content = match.group(1).strip()
+    if not content:
+        return None
+    return content
+
+
+def _slack_file_ids(input_text: str) -> list[str]:
+    block = _slack_files_block(input_text)
+    if block is None:
+        return []
+    return SLACK_FILE_ID_RE.findall(block)
 
 
 def _error_summary(error: dict | None) -> str | None:
@@ -566,6 +633,12 @@ def _quote(value: str) -> str:
 
 def _single_line(value: str) -> str:
     return " ".join(value.split())
+
+
+def _is_dm_conversation_context_key(
+    channel_id: str | None, thread_ts: str | None
+) -> bool:
+    return bool(channel_id and channel_id.startswith("D") and thread_ts == channel_id)
 
 
 def _json_dumps(payload: object) -> str:

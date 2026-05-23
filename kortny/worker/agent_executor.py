@@ -31,6 +31,7 @@ from kortny.tasks import TaskService
 from kortny.tools import (
     PdfGeneratorTool,
     SlackChannelHistoryTool,
+    SlackFileReadTool,
     Tool,
     ToolRegistry,
     WebSearchTool,
@@ -201,12 +202,25 @@ class AgentTaskExecutor:
             self._build_slack_history_client(settings),
             default_channel_id=task.slack_channel_id,
         )
-        return ToolRegistry([web_search, pdf_generator, slack_channel_history])
+        slack_file_read = SlackFileReadTool(
+            client=self._build_slack_file_client(settings),
+            bot_token=settings.slack_bot_token,
+            working_dir=working_dir,
+            max_file_size_bytes=settings.slack_file_read_max_bytes,
+        )
+        return ToolRegistry(
+            [web_search, pdf_generator, slack_channel_history, slack_file_read]
+        )
 
     def _build_slack_history_client(self, settings: Settings) -> Any:
         if self.slack_client is not None and hasattr(
             self.slack_client, "conversations_history"
         ):
+            return self.slack_client
+        return WebClient(token=settings.slack_bot_token)
+
+    def _build_slack_file_client(self, settings: Settings) -> Any:
+        if self.slack_client is not None and hasattr(self.slack_client, "files_info"):
             return self.slack_client
         return WebClient(token=settings.slack_bot_token)
 

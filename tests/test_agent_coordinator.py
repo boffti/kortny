@@ -306,8 +306,9 @@ def test_coordinator_orders_three_turn_thread_context(db_session: Session) -> No
     ).run(third)
 
     context = llm.calls[0][1][0].content or ""
+    recent_context = context.split("Recent prior task details:", maxsplit=1)[1]
 
-    assert context.index("research FastAPI deployment") < context.index(
+    assert recent_context.index("research FastAPI deployment") < recent_context.index(
         "turn that into a PDF"
     )
     assert "what was the key takeaway?" not in context
@@ -359,6 +360,121 @@ def test_coordinator_includes_failed_prior_task_context(db_session: Session) -> 
     assert "status=failed" in context
     assert "ValueError: source unavailable" in context
     assert "try a different source" not in context
+
+
+def test_coordinator_preserves_prior_slack_file_ids_for_follow_up(
+    db_session: Session,
+) -> None:
+    installation = create_installation(db_session)
+    long_preview = "This document preview is long. " * 20
+    first = create_task(
+        db_session,
+        input_text=(
+            f"Give me a summary of this report\n{long_preview}\n\n"
+            "<slack_files>\n"
+            "- id: F123\n"
+            "  name: pypl_report.pdf\n"
+            "  mimetype: application/pdf\n"
+            "  size_bytes: 2048\n"
+            "</slack_files>"
+        ),
+        installation=installation,
+        slack_event_id="EvDmReport",
+        slack_channel_id="D123",
+        slack_thread_ts="D123",
+        slack_message_ts="1716500000.000001",
+        created_at=datetime(2026, 5, 23, 13, 30, tzinfo=UTC),
+    )
+    first.result_summary = "The report summarizes PayPal Holdings."
+    current = create_task(
+        db_session,
+        input_text="Can you extend this report with more context?",
+        installation=installation,
+        slack_event_id="EvDmReportFollowUp",
+        slack_channel_id="D123",
+        slack_thread_ts="D123",
+        slack_message_ts="1716500010.000001",
+        created_at=datetime(2026, 5, 23, 13, 31, tzinfo=UTC),
+    )
+    llm = FakeLLM(
+        [
+            Completion(
+                content="I can reuse file F123.",
+                tool_calls=(),
+                usage=TokenUsage(input_tokens=80, output_tokens=15),
+            )
+        ]
+    )
+
+    AgentCoordinator(
+        session=db_session,
+        llm=llm,
+        registry=ToolRegistry(),
+    ).run(current)
+
+    context = llm.calls[0][1][0].content or ""
+
+    assert "slack_file_ids=F123" in context
+    assert "attached Slack files from original request" in context
+    assert "pypl_report.pdf" in context
+    assert "Can you extend this report" not in context
+
+
+def test_coordinator_highlights_immediate_previous_exchange_for_short_follow_up(
+    db_session: Session,
+) -> None:
+    installation = create_installation(db_session)
+    previous = create_task(
+        db_session,
+        input_text="Try now",
+        installation=installation,
+        slack_event_id="EvDmTryNow",
+        slack_channel_id="D123",
+        slack_thread_ts="D123",
+        slack_message_ts="1716500020.000001",
+        created_at=datetime(2026, 5, 23, 13, 32, tzinfo=UTC),
+    )
+    previous.result_summary = (
+        "I've accessed the PDF file, which is a report on PayPal Holdings, Inc. "
+        "(PYPL). Now, I'll extend this report to include more context and make "
+        "it at least 3 pages long. Do you have any specific topics or additional "
+        "details you want included, or should I proceed with general research?"
+    )
+    current = create_task(
+        db_session,
+        input_text="general research and market sentiment",
+        installation=installation,
+        slack_event_id="EvDmMarketSentiment",
+        slack_channel_id="D123",
+        slack_thread_ts="D123",
+        slack_message_ts="1716500030.000001",
+        created_at=datetime(2026, 5, 23, 13, 33, tzinfo=UTC),
+    )
+    transcript_provider = FakeThreadTranscriptProvider(())
+    llm = FakeLLM(
+        [
+            Completion(
+                content="I'll expand the PYPL report with general research and market sentiment.",
+                tool_calls=(),
+                usage=TokenUsage(input_tokens=100, output_tokens=18),
+            )
+        ]
+    )
+
+    AgentCoordinator(
+        session=db_session,
+        llm=llm,
+        registry=ToolRegistry(),
+        thread_transcript_provider=transcript_provider,
+    ).run(current)
+
+    context = llm.calls[0][1][0].content or ""
+
+    assert "Immediate previous exchange:" in context
+    assert "Do you have any specific topics" in context
+    assert "should I proceed with general research?" in context
+    assert "general research and market sentiment" not in context
+    assert transcript_provider.calls == []
 
 
 def test_coordinator_compacts_prior_context_when_over_budget(

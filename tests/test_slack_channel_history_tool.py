@@ -117,6 +117,55 @@ def test_slack_channel_history_paginates_with_cursor() -> None:
     ]
 
 
+def test_slack_channel_history_includes_root_message_file_metadata() -> None:
+    client = FakeSlackHistoryClient(
+        history_pages=[
+            {
+                "ok": True,
+                "messages": [
+                    {
+                        "ts": "10.000000",
+                        "user": "U1",
+                        "text": "Please review this report",
+                        "files": [
+                            {
+                                "id": "F123",
+                                "name": "report.pdf",
+                                "title": "Q2 report",
+                                "mimetype": "application/pdf",
+                                "filetype": "pdf",
+                                "size": 2048,
+                                "created": 1779562349,
+                                "user": "U1",
+                                "url_private_download": "https://files.slack.com/private",
+                            }
+                        ],
+                    }
+                ],
+                "response_metadata": {"next_cursor": ""},
+            }
+        ]
+    )
+
+    result = SlackChannelHistoryTool(client, default_channel_id="C123").invoke(
+        {"limit": 1}
+    )
+
+    assert result.output["messages"][0]["files"] == [
+        {
+            "id": "F123",
+            "name": "report.pdf",
+            "title": "Q2 report",
+            "mimetype": "application/pdf",
+            "filetype": "pdf",
+            "user": "U1",
+            "size_bytes": 2048,
+            "created": 1779562349,
+        }
+    ]
+    assert "url_private_download" not in result.output["messages"][0]["files"][0]
+
+
 def test_slack_channel_history_fans_out_active_threads() -> None:
     client = FakeSlackHistoryClient(
         history_pages=[
@@ -155,6 +204,15 @@ def test_slack_channel_history_fans_out_active_threads() -> None:
                             "bot_id": "B1",
                             "text": "Second reply",
                             "thread_ts": "10.000000",
+                            "files": [
+                                {
+                                    "id": "F456",
+                                    "name": "reply.csv",
+                                    "mimetype": "text/csv",
+                                    "filetype": "csv",
+                                    "size": 512,
+                                }
+                            ],
                         },
                     ],
                     "response_metadata": {"next_cursor": ""},
@@ -189,6 +247,15 @@ def test_slack_channel_history_fans_out_active_threads() -> None:
             "thread_ts": "10.000000",
             "reply_count": 0,
             "bot_id": "B1",
+            "files": [
+                {
+                    "id": "F456",
+                    "name": "reply.csv",
+                    "mimetype": "text/csv",
+                    "filetype": "csv",
+                    "size_bytes": 512,
+                }
+            ],
         },
     ]
     assert client.reply_calls == [

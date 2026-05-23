@@ -40,6 +40,7 @@ def test_settings_loads_required_environment(monkeypatch: pytest.MonkeyPatch) ->
     assert settings.slack_app_token == "xapp-test"
     assert settings.llm_provider is LLMProvider.openrouter
     assert settings.postgres_url == "postgresql://kortny:kortny@localhost/kortny"
+    assert settings.slack_file_read_max_bytes == 25 * 1024 * 1024
 
 
 def test_settings_loads_optional_environment(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -47,11 +48,13 @@ def test_settings_loads_optional_environment(monkeypatch: pytest.MonkeyPatch) ->
     set_required_settings_env(monkeypatch)
     monkeypatch.setenv("COMPOSIO_API_KEY", "composio-key")
     monkeypatch.setenv("BRAVE_SEARCH_API_KEY", "brave-key")
+    monkeypatch.setenv("SLACK_FILE_READ_MAX_BYTES", "1024")
 
     settings = load_settings(env_file=None)
 
     assert settings.composio_api_key == "composio-key"
     assert settings.brave_search_api_key == "brave-key"
+    assert settings.slack_file_read_max_bytes == 1024
 
 
 def test_blank_optional_environment_values_are_none(

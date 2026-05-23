@@ -140,12 +140,13 @@ class SlackIngress:
             return AppMentionResult(
                 task=existing,
                 created=False,
-                thread_ts=existing.slack_thread_ts or _event_thread_ts(event),
+                thread_ts=existing.slack_thread_ts
+                or _context_thread_ts(event, source=source, channel_id=channel_id),
             )
 
         team_id = _team_id(body, event)
         user_id = _required_str(event, "user")
-        thread_ts = _event_thread_ts(event)
+        thread_ts = _context_thread_ts(event, source=source, channel_id=channel_id)
         installation = self._get_or_create_installation(team_id)
 
         task = self.task_service.create_task(
@@ -276,6 +277,20 @@ def _event_thread_ts(event: Mapping[str, Any]) -> str:
     return thread_ts
 
 
+def _context_thread_ts(
+    event: Mapping[str, Any],
+    *,
+    source: str,
+    channel_id: str,
+) -> str:
+    # DMs are linear conversations in the product. We still post replies as
+    # normal unthreaded DM messages, but group task context by DM channel so
+    # follow-ups can resolve "this report" and prior attached files.
+    if source == "dm":
+        return channel_id
+    return _event_thread_ts(event)
+
+
 def _is_thread_follow_up(event: Mapping[str, Any]) -> bool:
     thread_ts = event.get("thread_ts")
     message_ts = event.get("ts")
@@ -315,7 +330,52 @@ def _task_input(
     stripped = text.strip()
     if strip_leading_mention:
         stripped = LEADING_MENTION_RE.sub("", text, count=1).strip()
-    return stripped or text.strip()
+    return _append_file_context(stripped or text.strip(), event)
+
+
+def _append_file_context(input_text: str, event: Mapping[str, Any]) -> str:
+    files = _event_files(event)
+    if not files:
+        return input_text
+
+    file_lines: list[str] = []
+    for file in files:
+        file_id = _optional_file_string(file.get("id"))
+        if file_id is None:
+            continue
+        file_lines.append(f"- id: {file_id}")
+        for key, label in (
+            ("name", "name"),
+            ("title", "title"),
+            ("mimetype", "mimetype"),
+            ("size", "size_bytes"),
+        ):
+            value = file.get(key)
+            if isinstance(value, str) and value.strip():
+                file_lines.append(f"  {label}: {value.strip()}")
+            elif (
+                key == "size" and isinstance(value, int) and not isinstance(value, bool)
+            ):
+                file_lines.append(f"  {label}: {value}")
+    if not file_lines:
+        return input_text
+
+    lines = [input_text, "", "<slack_files>", *file_lines]
+    lines.append("</slack_files>")
+    return "\n".join(lines)
+
+
+def _event_files(event: Mapping[str, Any]) -> tuple[Mapping[str, Any], ...]:
+    raw_files = event.get("files")
+    if not isinstance(raw_files, list):
+        return ()
+    return tuple(file for file in raw_files if isinstance(file, Mapping))
+
+
+def _optional_file_string(value: object) -> str | None:
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
 
 
 def _optional_response_ts(response: Mapping[str, Any]) -> str | None:

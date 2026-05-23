@@ -7,6 +7,7 @@ from kortny.tools.slack_channel_history import (
     SlackChannelHistoryError,
     SlackChannelHistoryTool,
 )
+from kortny.tools.slack_file_read import SlackFileReadError, SlackFileReadTool
 from kortny.tools.types import JsonObject, JsonSchema, Tool, ToolArtifact, ToolResult
 from kortny.tools.web_search import WebSearchTool
 
@@ -18,6 +19,8 @@ __all__ = [
     "PdfGeneratorTool",
     "SlackChannelHistoryError",
     "SlackChannelHistoryTool",
+    "SlackFileReadError",
+    "SlackFileReadTool",
     "Tool",
     "ToolArtifact",
     "ToolNotFoundError",

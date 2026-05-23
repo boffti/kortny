@@ -51,8 +51,10 @@ class LLMService:
 
         completion = self.provider.complete(messages, tools)
         model = completion.model or self.provider.model
-        pricing = self.get_pricing(model)
-        cost_usd = calculate_cost_usd(completion.usage, pricing)
+        cost_usd = completion.cost_usd
+        if cost_usd is None:
+            pricing = self.get_pricing(model)
+            cost_usd = calculate_cost_usd(completion.usage, pricing)
 
         self.task_service.record_llm_usage(
             task_id,

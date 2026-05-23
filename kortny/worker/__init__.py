@@ -1,15 +1,23 @@
 """Durable task worker entrypoints."""
 
+from kortny.worker.agent_executor import (
+    AgentTaskExecutor,
+    TaskExecutionResult,
+    TaskExecutor,
+    WalkingSkeletonExecutor,
+)
 from kortny.worker.service import (
-    TaskHandler,
     TaskWorker,
     WorkerRunResult,
     walking_skeleton_handler,
 )
 
 __all__ = [
-    "TaskHandler",
+    "AgentTaskExecutor",
+    "TaskExecutionResult",
+    "TaskExecutor",
     "TaskWorker",
+    "WalkingSkeletonExecutor",
     "WorkerRunResult",
     "walking_skeleton_handler",
 ]

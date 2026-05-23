@@ -1,0 +1,263 @@
+"""Default worker executor that runs the agent coordinator."""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Protocol, cast
+
+from slack_sdk import WebClient
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from kortny.agent import AgentCoordinator
+from kortny.agent.coordinator import DEFAULT_SYSTEM_PROMPT
+from kortny.config import Settings, load_settings
+from kortny.db.models import Artifact, Task
+from kortny.db.models import LLMProvider as DbLLMProvider
+from kortny.execution import task_workspace
+from kortny.llm import LLMProvider, LLMService, create_llm_provider
+from kortny.slack import SlackPoster, SlackThread
+from kortny.slack.posting import SlackPostingClient
+from kortny.tasks import TaskService
+from kortny.tools import PdfGeneratorTool, Tool, ToolRegistry, WebSearchTool
+
+GENERIC_FAILURE_TEXT = (
+    "Something went wrong while I was working on this. Please try again soon."
+)
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class TaskExecutionResult:
+    """Result returned by a worker task executor."""
+
+    result_summary: str
+
+
+class TaskExecutor(Protocol):
+    """Executes one already-claimed task."""
+
+    def execute(
+        self,
+        *,
+        session: Session,
+        task: Task,
+        task_service: TaskService,
+    ) -> TaskExecutionResult:
+        """Run the task and return a result summary."""
+
+
+class AgentTaskExecutor:
+    """Runs the real MVP agent flow for a task and posts outputs to Slack."""
+
+    def __init__(
+        self,
+        *,
+        settings: Settings | None = None,
+        llm_provider: LLMProvider | None = None,
+        provider_name: DbLLMProvider | str | None = None,
+        web_search_tool: Tool | None = None,
+        slack_client: SlackPostingClient | None = None,
+        workspace_base_dir: Path | str | None = None,
+        system_prompt: str | None = DEFAULT_SYSTEM_PROMPT,
+    ) -> None:
+        self.settings = settings
+        self.llm_provider = llm_provider
+        self.provider_name = DbLLMProvider(provider_name) if provider_name else None
+        self.web_search_tool = web_search_tool
+        self.slack_client = slack_client
+        self.workspace_base_dir = workspace_base_dir
+        self.system_prompt = system_prompt
+
+    def execute(
+        self,
+        *,
+        session: Session,
+        task: Task,
+        task_service: TaskService,
+    ) -> TaskExecutionResult:
+        settings = self.settings or load_settings()
+        try:
+            logger.info("agent executor started task_id=%s", task.id)
+            with task_workspace(task.id, base_dir=self.workspace_base_dir) as workspace:
+                llm = self._build_llm(
+                    settings=settings,
+                    session=session,
+                    task_service=task_service,
+                )
+                registry = self._build_registry(
+                    settings=settings,
+                    session=session,
+                    task=task,
+                    task_service=task_service,
+                    working_dir=workspace.path,
+                )
+                logger.info(
+                    "agent executor registry ready task_id=%s tools=%s",
+                    task.id,
+                    ",".join(registry.names()),
+                )
+                agent_result = AgentCoordinator(
+                    session=session,
+                    llm=llm,
+                    registry=registry,
+                    task_service=task_service,
+                    system_prompt=self.system_prompt,
+                ).run(task)
+                self._post_outputs(
+                    settings=settings,
+                    session=session,
+                    task=task,
+                    task_service=task_service,
+                    result_summary=agent_result.result_summary,
+                )
+                logger.info(
+                    "agent executor completed task_id=%s artifact_count=%s",
+                    task.id,
+                    agent_result.artifact_count,
+                )
+                return TaskExecutionResult(result_summary=agent_result.result_summary)
+        except Exception:
+            logger.exception("agent executor failed task_id=%s", task.id)
+            self._post_failure_notice(
+                settings=settings,
+                session=session,
+                task=task,
+                task_service=task_service,
+            )
+            raise
+
+    def _build_llm(
+        self,
+        *,
+        settings: Settings,
+        session: Session,
+        task_service: TaskService,
+    ) -> LLMService:
+        provider = self.llm_provider or create_llm_provider(settings)
+        provider_name = self.provider_name or DbLLMProvider(settings.llm_provider.value)
+        return LLMService(
+            session=session,
+            provider=provider,
+            provider_name=provider_name,
+            task_service=task_service,
+        )
+
+    def _build_registry(
+        self,
+        *,
+        settings: Settings,
+        session: Session,
+        task: Task,
+        task_service: TaskService,
+        working_dir: Path,
+    ) -> ToolRegistry:
+        web_search = self.web_search_tool or WebSearchTool.from_settings(settings)
+        pdf_generator = PdfGeneratorTool(
+            working_dir=working_dir,
+            session=session,
+            task_id=task.id,
+            task_service=task_service,
+        )
+        return ToolRegistry([web_search, pdf_generator])
+
+    def _post_outputs(
+        self,
+        *,
+        settings: Settings,
+        session: Session,
+        task: Task,
+        task_service: TaskService,
+        result_summary: str,
+    ) -> None:
+        client = self.slack_client
+        if client is None:
+            client = cast(
+                SlackPostingClient,
+                WebClient(token=settings.slack_bot_token),
+            )
+        poster = SlackPoster(
+            session=session,
+            client=client,
+            task_service=task_service,
+        )
+        thread = SlackThread.from_task(task)
+        artifacts = list(
+            session.scalars(
+                select(Artifact)
+                .where(
+                    Artifact.task_id == task.id,
+                    Artifact.storage_path.is_not(None),
+                    Artifact.posted_at.is_(None),
+                )
+                .order_by(Artifact.created_at)
+            )
+        )
+        if not artifacts:
+            logger.info("posting final message task_id=%s", task.id)
+            poster.post_message(thread, result_summary)
+            return
+
+        for index, artifact in enumerate(artifacts):
+            if artifact.storage_path is None:
+                continue
+            logger.info(
+                "posting artifact task_id=%s artifact_id=%s filename=%s",
+                task.id,
+                artifact.id,
+                artifact.filename,
+            )
+            poster.upload_file(
+                thread,
+                artifact.storage_path,
+                artifact=artifact,
+                initial_comment=result_summary if index == 0 else None,
+                title=artifact.filename,
+            )
+
+    def _post_failure_notice(
+        self,
+        *,
+        settings: Settings,
+        session: Session,
+        task: Task,
+        task_service: TaskService,
+    ) -> None:
+        try:
+            client = self.slack_client
+            if client is None:
+                client = cast(
+                    SlackPostingClient,
+                    WebClient(token=settings.slack_bot_token),
+                )
+            SlackPoster(
+                session=session,
+                client=client,
+                task_service=task_service,
+            ).post_message(
+                SlackThread.from_task(task),
+                GENERIC_FAILURE_TEXT,
+                purpose="failure",
+            )
+            logger.info("posted generic failure notice task_id=%s", task.id)
+        except Exception:
+            logger.exception(
+                "failed to post generic failure notice task_id=%s", task.id
+            )
+
+
+class WalkingSkeletonExecutor:
+    """Legacy trivial executor retained for narrow worker tests."""
+
+    def execute(
+        self,
+        *,
+        session: Session,
+        task: Task,
+        task_service: TaskService,
+    ) -> TaskExecutionResult:
+        return TaskExecutionResult(
+            result_summary=f"Walking skeleton processed task {task.id}: {task.input}"
+        )

@@ -22,6 +22,11 @@ from kortny.tools import ToolRegistry
 from kortny.tools.types import JsonObject, JsonSchema, ToolArtifact, ToolResult
 
 DEFAULT_MAX_TURNS = 6
+DEFAULT_SYSTEM_PROMPT = (
+    "You are Kortny, a Slack-native AI coworker. Use the available tools when "
+    "they are needed to complete the user's request. If the user asks for "
+    "research and a PDF, search first and then generate the PDF artifact."
+)
 
 
 class LLMClient(Protocol):
@@ -66,6 +71,7 @@ class AgentCoordinator:
         registry: ToolRegistry,
         task_service: TaskService | None = None,
         max_turns: int = DEFAULT_MAX_TURNS,
+        system_prompt: str | None = None,
     ) -> None:
         if max_turns < 1:
             raise ValueError("max_turns must be at least 1")
@@ -75,12 +81,13 @@ class AgentCoordinator:
         self.registry = registry
         self.task_service = task_service or TaskService(session)
         self.max_turns = max_turns
+        self.system_prompt = system_prompt
 
     def run(self, task: Task | uuid.UUID) -> AgentRunResult:
         """Run the coordinator until final text or a produced artifact."""
 
         task_obj = self._resolve_task(task)
-        messages = [ChatMessage(role="user", content=task_obj.input)]
+        messages = self._initial_messages(task_obj.input)
         schemas = self.registry.schemas()
         artifact_count = 0
 
@@ -320,6 +327,13 @@ class AgentCoordinator:
         if task_obj is None:
             raise LookupError(f"Task not found: {task}")
         return task_obj
+
+    def _initial_messages(self, task_input: str) -> list[ChatMessage]:
+        messages: list[ChatMessage] = []
+        if self.system_prompt:
+            messages.append(ChatMessage(role="system", content=self.system_prompt))
+        messages.append(ChatMessage(role="user", content=task_input))
+        return messages
 
 
 def _tool_result_payload(tool_name: str, result: ToolResult) -> JsonObject:

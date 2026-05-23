@@ -1,13 +1,14 @@
-"""Walking-skeleton worker over the durable Postgres queue."""
+"""Task worker over the durable Postgres queue."""
 
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import socket
 import time
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
@@ -15,13 +16,14 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from kortny.db.models import Task, TaskEventType, TaskStatus
 from kortny.db.session import make_session_factory
+from kortny.logging_config import configure_logging
 from kortny.queue import TaskQueue
 from kortny.queue.service import DEFAULT_LEASE_SECONDS
 from kortny.tasks import TaskService
+from kortny.worker.agent_executor import AgentTaskExecutor, TaskExecutor
 
 DEFAULT_POLL_INTERVAL_SECONDS = 2.0
-
-TaskHandler = Callable[[Task], str]
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,20 +43,20 @@ class WorkerRunResult:
 
 
 class TaskWorker:
-    """Polls the task queue and runs the MVP walking-skeleton handler."""
+    """Polls the task queue and runs the MVP task executor."""
 
     def __init__(
         self,
         *,
         session_factory: sessionmaker[Session] | None = None,
         worker_id: str | None = None,
-        handler: TaskHandler | None = None,
+        executor: TaskExecutor | None = None,
         lease_for: timedelta = timedelta(seconds=DEFAULT_LEASE_SECONDS),
         poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS,
     ) -> None:
         self.session_factory = session_factory or make_session_factory()
         self.worker_id = worker_id or default_worker_id()
-        self.handler = handler or walking_skeleton_handler
+        self.executor = executor or AgentTaskExecutor()
         self.lease_for = lease_for
         self.poll_interval_seconds = poll_interval_seconds
 
@@ -65,6 +67,12 @@ class TaskWorker:
             task_service = TaskService(session)
             queue = TaskQueue(session)
             reclaimed = queue.reclaim_expired_leases(now=now)
+            if reclaimed:
+                logger.info(
+                    "worker reclaimed expired tasks worker_id=%s task_ids=%s",
+                    self.worker_id,
+                    ",".join(str(task.id) for task in reclaimed),
+                )
             task = queue.claim_next(
                 worker_id=self.worker_id,
                 lease_for=self.lease_for,
@@ -73,34 +81,51 @@ class TaskWorker:
             reclaimed_task_ids = tuple(task.id for task in reclaimed)
 
             if task is None:
+                logger.debug("worker idle worker_id=%s", self.worker_id)
                 return WorkerRunResult(
                     worker_id=self.worker_id,
                     status="idle",
                     reclaimed_task_ids=reclaimed_task_ids,
                 )
 
+            logger.info(
+                "worker claimed task task_id=%s worker_id=%s input_len=%s",
+                task.id,
+                self.worker_id,
+                len(task.input),
+            )
             task_service.append_event(
                 task,
                 TaskEventType.log,
                 {
-                    "message": "walking_skeleton_handler_started",
+                    "message": "task_executor_started",
                     "worker_id": self.worker_id,
                 },
             )
 
             try:
-                task.result_summary = self.handler(task)
+                execution_result = self.executor.execute(
+                    session=session,
+                    task=task,
+                    task_service=task_service,
+                )
+                task.result_summary = execution_result.result_summary
                 task.error = None
                 self._clear_lease(task)
                 task_service.append_event(
                     task,
                     TaskEventType.log,
                     {
-                        "message": "walking_skeleton_handler_completed",
+                        "message": "task_executor_completed",
                         "worker_id": self.worker_id,
                     },
                 )
                 task_service.transition(task, TaskStatus.succeeded)
+                logger.info(
+                    "worker succeeded task_id=%s worker_id=%s",
+                    task.id,
+                    self.worker_id,
+                )
                 return WorkerRunResult(
                     worker_id=self.worker_id,
                     status=TaskStatus.succeeded.value,
@@ -118,13 +143,18 @@ class TaskWorker:
                     task,
                     TaskEventType.error,
                     {
-                        "message": "walking_skeleton_handler_failed",
+                        "message": "task_executor_failed",
                         "error_type": type(exc).__name__,
                         "error": str(exc),
                         "worker_id": self.worker_id,
                     },
                 )
                 task_service.transition(task, TaskStatus.failed)
+                logger.exception(
+                    "worker failed task_id=%s worker_id=%s",
+                    task.id,
+                    self.worker_id,
+                )
                 return WorkerRunResult(
                     worker_id=self.worker_id,
                     status=TaskStatus.failed.value,
@@ -149,7 +179,7 @@ class TaskWorker:
 
 
 def walking_skeleton_handler(task: Task) -> str:
-    """Trivial MVP handler used before the real coordinator lands."""
+    """Deprecated trivial MVP handler retained for compatibility."""
 
     return f"Walking skeleton processed task {task.id}: {task.input}"
 
@@ -163,6 +193,7 @@ def default_worker_id() -> str:
 def main(argv: Sequence[str] | None = None) -> None:
     """CLI entrypoint for local and Compose worker runs."""
 
+    configure_logging()
     parser = argparse.ArgumentParser(description="Run the Kortny task worker")
     parser.add_argument("--once", action="store_true", help="Process at most one task")
     parser.add_argument("--worker-id", default=None, help="Override lease worker id")
@@ -178,6 +209,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         worker_id=args.worker_id,
         poll_interval_seconds=args.poll_interval,
     )
+    logger.info("worker started worker_id=%s once=%s", worker.worker_id, args.once)
     if args.once:
         result = worker.run_once()
         print(

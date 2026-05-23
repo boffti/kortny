@@ -197,6 +197,34 @@ def test_llm_service_requires_model_pricing(db_session: Session) -> None:
         )
 
 
+def test_llm_service_uses_provider_cost_without_pricing(db_session: Session) -> None:
+    task = create_task(db_session)
+    provider = FakeProvider(
+        Completion(
+            content="done",
+            tool_calls=(),
+            usage=TokenUsage(input_tokens=1000, output_tokens=1000),
+            cost_usd=Decimal("0.004200"),
+            model="openai/gpt-4o-mini",
+        )
+    )
+
+    LLMService(
+        session=db_session,
+        provider=provider,
+        provider_name=LLMProvider.openrouter,
+    ).complete(
+        task_id=task.id,
+        messages=[ChatMessage(role="user", content="hello")],
+    )
+
+    usage = db_session.scalar(select(LLMUsage).where(LLMUsage.task_id == task.id))
+
+    assert usage is not None
+    assert usage.cost_usd == Decimal("0.004200")
+    assert task.total_cost_usd == Decimal("0.004200")
+
+
 def cleanup_database(session: Session) -> None:
     for model in (
         Artifact,

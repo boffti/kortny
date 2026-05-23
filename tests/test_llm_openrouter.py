@@ -57,6 +57,7 @@ def test_openrouter_provider_posts_chat_completion_with_tools() -> None:
                     "prompt_tokens": 120,
                     "completion_tokens": 30,
                     "total_tokens": 150,
+                    "cost": 0.00042,
                 },
             },
         )
@@ -86,6 +87,8 @@ def test_openrouter_provider_posts_chat_completion_with_tools() -> None:
     assert completion.model == "openai/gpt-4o-mini"
     assert completion.content is None
     assert completion.usage == TokenUsage(input_tokens=120, output_tokens=30)
+    assert completion.cost_usd is not None
+    assert str(completion.cost_usd) == "0.00042"
     assert completion.tool_calls == (
         ToolCall(id="call-123", name="web_search", arguments={"query": "kortny"}),
     )

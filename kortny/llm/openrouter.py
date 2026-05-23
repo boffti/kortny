@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping, Sequence
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import httpx
@@ -167,6 +168,7 @@ def _parse_completion(payload: JsonObject, *, fallback_model: str) -> Completion
         content=content,
         tool_calls=_parse_tool_calls(message.get("tool_calls", [])),
         usage=usage,
+        cost_usd=_parse_usage_cost(payload.get("usage", {})),
         response_id=response_id if isinstance(response_id, str) else None,
         model=response_model if isinstance(response_model, str) else fallback_model,
     )
@@ -195,6 +197,26 @@ def _coerce_token_count(value: object) -> int:
     if isinstance(value, str) and value.isdigit():
         return int(value)
     return 0
+
+
+def _parse_usage_cost(raw_usage: object) -> Decimal | None:
+    if not isinstance(raw_usage, dict):
+        return None
+
+    raw_cost = raw_usage.get("cost")
+    if raw_cost is None:
+        return None
+    if isinstance(raw_cost, bool):
+        return None
+    if isinstance(raw_cost, int | float | str):
+        try:
+            cost = Decimal(str(raw_cost))
+        except InvalidOperation:
+            return None
+        if cost < 0:
+            return None
+        return cost
+    return None
 
 
 def _parse_tool_calls(raw_tool_calls: object) -> tuple[ToolCall, ...]:

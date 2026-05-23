@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -16,6 +17,7 @@ from kortny.tasks import TaskService
 
 ON_IT_TEXT = "On it. I'll start a task for this."
 LEADING_MENTION_RE = re.compile(r"^\s*<@[^>]+>\s*")
+logger = logging.getLogger(__name__)
 
 
 class SlackPostMessageClient(Protocol):
@@ -70,6 +72,13 @@ class SlackIngress:
         if existing is None:
             existing = self._get_by_slack_message(channel_id, message_ts)
         if existing is not None:
+            logger.info(
+                "slack app_mention duplicate task_id=%s event_id=%s channel=%s thread_ts=%s",
+                existing.id,
+                event_id,
+                channel_id,
+                existing.slack_thread_ts or _event_thread_ts(event),
+            )
             return AppMentionResult(
                 task=existing,
                 created=False,
@@ -90,6 +99,15 @@ class SlackIngress:
             slack_user_id=user_id,
             input=_task_input(event),
         )
+        logger.info(
+            "slack app_mention created task_id=%s event_id=%s channel=%s thread_ts=%s user=%s input_len=%s",
+            task.id,
+            event_id,
+            channel_id,
+            thread_ts,
+            user_id,
+            len(task.input),
+        )
 
         acknowledgement = self.client.chat_postMessage(
             channel=channel_id,
@@ -107,6 +125,13 @@ class SlackIngress:
                 "text": ON_IT_TEXT,
                 "purpose": "acknowledgement",
             },
+        )
+        logger.info(
+            "slack acknowledgement posted task_id=%s channel=%s thread_ts=%s message_ts=%s",
+            task.id,
+            channel_id,
+            thread_ts,
+            acknowledgement_ts,
         )
 
         return AppMentionResult(

@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from kortny.config import Settings, load_settings
 from kortny.db.session import session_scope
+from kortny.logging_config import configure_logging
 from kortny.slack.ingress import SlackIngress
 
 T = TypeVar("T")
@@ -69,6 +70,7 @@ def create_bolt_app(
 def run_socket_mode(settings: Settings | None = None) -> None:
     """Run the Slack Bolt app in Socket Mode."""
 
+    configure_logging()
     resolved_settings = settings or load_settings()
     app = create_bolt_app(resolved_settings)
     SocketModeHandler(app, resolved_settings.slack_app_token).start()

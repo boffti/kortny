@@ -21,8 +21,8 @@ from kortny.agent.thread_context import (
     ThreadTranscriptMessage,
     ThreadTranscriptProvider,
 )
-from kortny.db.models import Task, TaskEvent, TaskEventType
-from kortny.llm import ChatMessage, Completion
+from kortny.db.models import Artifact, Task, TaskEvent, TaskEventType
+from kortny.llm import ChatMessage, Completion, ToolCall
 from kortny.tasks import TaskService
 from kortny.tools import ToolRegistry
 from kortny.tools.types import JsonObject, JsonSchema, ToolArtifact, ToolResult
@@ -35,18 +35,23 @@ IMMEDIATE_PRIOR_INPUT_MAX_CHARS = 500
 IMMEDIATE_PRIOR_RESULT_MAX_CHARS = 1_800
 SLACK_FILES_BLOCK_RE = re.compile(r"<slack_files>\s*(.*?)\s*</slack_files>", re.S)
 SLACK_FILE_ID_RE = re.compile(r"^\s*-\s+id:\s*(\S+)\s*$", re.M)
+REQUESTED_PAGES_RE = re.compile(r"\b(\d{1,2})\s+pages?\b", re.I)
 DEFAULT_SYSTEM_PROMPT = (
     "You are Kortny, a Slack-native AI coworker. Use the available tools when "
     "they are needed to complete the user's request. If the user asks for "
     "research and a PDF, search first and then generate the PDF artifact. "
     "If the user asks about an attached Slack file and the task input or prior "
     "context includes Slack file IDs, call slack_file_read before answering. "
+    "For document revision requests, prefer the newest generated artifact "
+    "listed in prior context over the original attachment. Preserve the source "
+    "document title and filename lineage unless the user explicitly asks for a "
+    "retitle, and use versioned filenames like source_v2.pdf, source_v3.pdf. "
     "If the current Slack message is a short answer to your immediately "
     "previous question, continue that pending task using the answer instead of "
     "treating it as a new standalone request. "
     "If a tool result includes error.recoverable=true, keep working with the "
-    "context and tool results already available instead of failing the task or "
-    "repeating the same tool call. "
+    "context and tool results already available. Retry only when you can change "
+    "the arguments or content to address the tool feedback. "
     "When answering with text, format for Slack mrkdwn rather than GitHub "
     "Markdown: use *bold*, <https://example.com|label> links, simple line-break "
     "lists, and avoid Markdown headings."
@@ -226,6 +231,7 @@ class AgentCoordinator:
     ) -> int:
         artifact_count = 0
         for tool_call in completion.tool_calls:
+            arguments = self._tool_arguments(task_obj, tool_call)
             self.task_service.append_event(
                 task_obj,
                 TaskEventType.tool_call,
@@ -233,11 +239,11 @@ class AgentCoordinator:
                     "turn": turn,
                     "tool_call_id": tool_call.id,
                     "tool": tool_call.name,
-                    "arguments": tool_call.arguments,
+                    "arguments": arguments,
                 },
             )
             try:
-                result = self.registry.invoke(tool_call.name, tool_call.arguments)
+                result = self.registry.invoke(tool_call.name, arguments)
             except Exception as exc:
                 self._append_error(
                     task_obj,
@@ -272,6 +278,14 @@ class AgentCoordinator:
             )
 
         return artifact_count
+
+    def _tool_arguments(self, task: Task, tool_call: ToolCall) -> JsonObject:
+        arguments = dict(tool_call.arguments)
+        if tool_call.name == "pdf_generator" and "min_pages" not in arguments:
+            min_pages = _requested_pdf_min_pages(task.input)
+            if min_pages is not None:
+                arguments["min_pages"] = min_pages
+        return arguments
 
     def _finish_with_text(
         self,
@@ -458,7 +472,9 @@ class AgentCoordinator:
                 'to resolve references like "it", "that", "the PDF", and '
                 '"your source". If prior context includes Slack file IDs, you can '
                 "reuse those IDs with slack_file_read. Do not treat this as "
-                "cross-thread memory. If the current message is a short reply to "
+                "cross-thread memory. For document revision requests, prefer the "
+                "newest generated artifact over older original attachments. If "
+                "the current message is a short reply to "
                 "the immediately previous assistant question, treat it as the "
                 "answer to that question and continue the pending task.",
             ]
@@ -500,6 +516,7 @@ class AgentCoordinator:
 
     def _prior_task_detail_lines(self, index: int, task: Task) -> list[str]:
         lines = [_task_summary_line(index, task)]
+        lines.extend(self._artifact_detail_lines(task, indent="  "))
         slack_files_block = _slack_files_block(task.input)
         if slack_files_block is not None:
             lines.append("  attached Slack files from original request:")
@@ -523,6 +540,35 @@ class AgentCoordinator:
                     TaskEvent.type.in_(THREAD_CONTEXT_EVENT_TYPES),
                 )
                 .order_by(TaskEvent.seq)
+            )
+        )
+
+    def _artifact_detail_lines(self, task: Task, *, indent: str = "") -> list[str]:
+        artifacts = self._artifacts(task)
+        if not artifacts:
+            return []
+
+        lines = [f"{indent}generated artifacts:"]
+        for artifact in artifacts:
+            details = [
+                f"artifact_id={artifact.id}",
+                f"filename={_quote(artifact.filename)}",
+            ]
+            if artifact.slack_file_id:
+                details.append(f"slack_file_id={artifact.slack_file_id}")
+            if artifact.mime_type:
+                details.append(f"mime_type={_quote(artifact.mime_type)}")
+            if artifact.size_bytes is not None:
+                details.append(f"size_bytes={artifact.size_bytes}")
+            lines.append(f"{indent}- " + " ".join(details))
+        return lines
+
+    def _artifacts(self, task: Task) -> list[Artifact]:
+        return list(
+            self.session.scalars(
+                select(Artifact)
+                .where(Artifact.task_id == task.id)
+                .order_by(Artifact.created_at)
             )
         )
 
@@ -593,6 +639,16 @@ def _slack_file_ids(input_text: str) -> list[str]:
     if block is None:
         return []
     return SLACK_FILE_ID_RE.findall(block)
+
+
+def _requested_pdf_min_pages(input_text: str) -> int | None:
+    matches = [int(match.group(1)) for match in REQUESTED_PAGES_RE.finditer(input_text)]
+    if not matches:
+        return None
+    requested = max(matches)
+    if requested < 1 or requested > 50:
+        return None
+    return requested
 
 
 def _error_summary(error: dict | None) -> str | None:

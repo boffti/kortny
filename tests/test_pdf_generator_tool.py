@@ -1,12 +1,14 @@
 import os
 import uuid
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import pytest
 from alembic import command
 from alembic.config import Config
+from pypdf import PdfReader
 from sqlalchemy import Engine, delete, select
 from sqlalchemy.orm import Session
 
@@ -55,6 +57,25 @@ def test_pdf_generator_sanitizes_filename(tmp_path: Path) -> None:
 
     assert result.output["filename"] == "My_Unsafe_Report.pdf"
     assert Path(result.output["path"]).parent == tmp_path
+
+
+def test_pdf_generator_returns_recoverable_error_when_min_pages_not_met(
+    tmp_path: Path,
+) -> None:
+    result = PdfGeneratorTool(working_dir=tmp_path).invoke(
+        {
+            **report_args(),
+            "min_pages": 3,
+        }
+    )
+
+    assert result.artifacts == ()
+    assert result.output["filename"] == "kortny-report.pdf"
+    assert result.output["page_count"] < 3
+    assert result.output["min_pages"] == 3
+    assert result.output["error"]["code"] == "min_pages_not_met"
+    assert result.output["error"]["recoverable"] is True
+    assert not Path(result.output["path"]).exists()
 
 
 def test_pdf_generator_rejects_empty_sections(tmp_path: Path) -> None:
@@ -130,9 +151,75 @@ def test_pdf_generator_creates_artifact_row(
         assert artifact.size_bytes == output_path.stat().st_size
         assert artifact.storage_path == str(output_path)
         assert result.output["artifact_id"] == str(artifact.id)
+        assert result.output["page_count"] == len(PdfReader(str(output_path)).pages)
         assert artifact_event is not None
         assert artifact_event.payload["artifact_id"] == str(artifact.id)
         assert artifact_event.payload["storage_path"] == str(output_path)
+
+
+def test_pdf_generator_versions_revision_from_attached_source(
+    db_session: Session,
+    tmp_path: Path,
+) -> None:
+    task = create_task(
+        db_session,
+        input_text=(
+            "Enhance the report with more company info\n\n"
+            "<slack_files>\n"
+            "- id: F123\n"
+            "  name: pypl_report.pdf\n"
+            "  mimetype: application/pdf\n"
+            "</slack_files>"
+        ),
+        created_at=datetime(2026, 5, 23, 15, 0, tzinfo=UTC),
+    )
+
+    result = PdfGeneratorTool(
+        working_dir=tmp_path,
+        session=db_session,
+        task_id=task.id,
+        task_service=TaskService(db_session),
+    ).invoke(report_args(filename="enhanced_pypl_report.pdf"))
+
+    assert result.output["filename"] == "pypl_report_v2.pdf"
+    assert Path(result.output["path"]).name == "pypl_report_v2.pdf"
+
+
+def test_pdf_generator_versions_revision_from_latest_thread_artifact(
+    db_session: Session,
+    tmp_path: Path,
+) -> None:
+    prior = create_task(
+        db_session,
+        input_text="Enhance the report",
+        created_at=datetime(2026, 5, 23, 15, 0, tzinfo=UTC),
+    )
+    db_session.add(
+        Artifact(
+            task_id=prior.id,
+            filename="pypl_report_v2.pdf",
+            mime_type="application/pdf",
+            size_bytes=2048,
+            storage_path=None,
+            slack_file_id="FGENV2",
+        )
+    )
+    current = create_task(
+        db_session,
+        input_text="make it more elaborate. I want 3 pages of data",
+        slack_message_ts="1716400100.000001",
+        created_at=datetime(2026, 5, 23, 15, 1, tzinfo=UTC),
+    )
+
+    result = PdfGeneratorTool(
+        working_dir=tmp_path,
+        session=db_session,
+        task_id=current.id,
+        task_service=TaskService(db_session),
+    ).invoke(report_args(filename="comprehensive_pypl_report.pdf"))
+
+    assert result.output["filename"] == "pypl_report_v3.pdf"
+    assert Path(result.output["path"]).name == "pypl_report_v3.pdf"
 
 
 def report_args(filename: str = "kortny-report.pdf") -> dict[str, Any]:
@@ -169,16 +256,27 @@ def cleanup_database(session: Session) -> None:
         session.execute(delete(model))
 
 
-def create_task(session: Session) -> Task:
+def create_task(
+    session: Session,
+    *,
+    input_text: str = "make a PDF",
+    slack_thread_ts: str = "1716400000.000001",
+    slack_message_ts: str = "1716400000.000001",
+    created_at: datetime | None = None,
+) -> Task:
     installation = Installation(slack_team_id=f"T{uuid.uuid4().hex}")
     session.add(installation)
     session.flush()
-    return TaskService(session).create_task(
+    task = TaskService(session).create_task(
         installation_id=installation.id,
         slack_event_id=f"Ev{uuid.uuid4().hex}",
         slack_channel_id="C123",
-        slack_thread_ts="1716400000.000001",
-        slack_message_ts="1716400000.000001",
+        slack_thread_ts=slack_thread_ts,
+        slack_message_ts=slack_message_ts,
         slack_user_id="U123",
-        input="make a PDF",
+        input=input_text,
     )
+    if created_at is not None:
+        task.created_at = created_at
+        session.flush()
+    return task

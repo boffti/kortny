@@ -111,6 +111,33 @@ class ArtifactTool:
         )
 
 
+class RecordingPdfTool:
+    name = "pdf_generator"
+    description = "Records PDF arguments."
+    parameters: JsonSchema = {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": True,
+    }
+
+    def __init__(self) -> None:
+        self.calls: list[JsonObject] = []
+
+    def invoke(self, args: JsonObject) -> ToolResult:
+        self.calls.append(args)
+        return ToolResult(
+            output={"created": True},
+            artifacts=(
+                ToolArtifact(
+                    filename="report.pdf",
+                    path="/tmp/report.pdf",
+                    mime_type="application/pdf",
+                    size_bytes=42,
+                ),
+            ),
+        )
+
+
 @pytest.fixture(scope="session")
 def engine() -> Iterator[Engine]:
     assert TEST_POSTGRES_URL is not None
@@ -477,6 +504,60 @@ def test_coordinator_highlights_immediate_previous_exchange_for_short_follow_up(
     assert transcript_provider.calls == []
 
 
+def test_coordinator_includes_prior_generated_artifacts_for_revision_follow_up(
+    db_session: Session,
+) -> None:
+    installation = create_installation(db_session)
+    prior = create_task(
+        db_session,
+        input_text="Enhance the report",
+        installation=installation,
+        slack_event_id="EvPriorArtifact",
+        created_at=datetime(2026, 5, 23, 13, 34, tzinfo=UTC),
+    )
+    prior.result_summary = "Generated 1 artifact."
+    db_session.add(
+        Artifact(
+            task_id=prior.id,
+            filename="pypl_report_v2.pdf",
+            mime_type="application/pdf",
+            size_bytes=4096,
+            storage_path=None,
+            slack_file_id="FGENV2",
+        )
+    )
+    current = create_task(
+        db_session,
+        input_text="make it more elaborate",
+        installation=installation,
+        slack_event_id="EvCurrentArtifactRevision",
+        slack_message_ts="1716500040.000001",
+        created_at=datetime(2026, 5, 23, 13, 35, tzinfo=UTC),
+    )
+    llm = FakeLLM(
+        [
+            Completion(
+                content="I will revise the latest generated artifact.",
+                tool_calls=(),
+                usage=TokenUsage(input_tokens=100, output_tokens=18),
+            )
+        ]
+    )
+
+    AgentCoordinator(
+        session=db_session,
+        llm=llm,
+        registry=ToolRegistry(),
+    ).run(current)
+
+    context = llm.calls[0][1][0].content or ""
+
+    assert "generated artifacts:" in context
+    assert "pypl_report_v2.pdf" in context
+    assert "slack_file_id=FGENV2" in context
+    assert "prefer the newest generated artifact" in context
+
+
 def test_coordinator_compacts_prior_context_when_over_budget(
     db_session: Session,
 ) -> None:
@@ -524,6 +605,50 @@ def test_coordinator_compacts_prior_context_when_over_budget(
     assert "Context was compacted" in context
     assert "Summary survives compaction." in context
     assert '"large"' not in context
+
+
+def test_coordinator_injects_pdf_min_pages_from_user_request(
+    db_session: Session,
+) -> None:
+    task = create_task(
+        db_session,
+        input_text="make it more elaborate. I want 3 pages of data",
+    )
+    pdf_tool = RecordingPdfTool()
+    llm = FakeLLM(
+        [
+            Completion(
+                content=None,
+                tool_calls=(
+                    ToolCall(
+                        id="call-1",
+                        name="pdf_generator",
+                        arguments={
+                            "title": "PYPL Report",
+                            "sections": [{"heading": "Summary", "body": "Short."}],
+                            "filename": "comprehensive_pypl_report.pdf",
+                        },
+                    ),
+                ),
+                usage=TokenUsage(input_tokens=20, output_tokens=3),
+            ),
+        ]
+    )
+
+    AgentCoordinator(
+        session=db_session,
+        llm=llm,
+        registry=ToolRegistry([pdf_tool]),
+    ).run(task)
+
+    assert pdf_tool.calls == [
+        {
+            "title": "PYPL Report",
+            "sections": [{"heading": "Summary", "body": "Short."}],
+            "filename": "comprehensive_pypl_report.pdf",
+            "min_pages": 3,
+        }
+    ]
 
 
 def test_coordinator_invokes_tool_and_repeats_until_final_answer(

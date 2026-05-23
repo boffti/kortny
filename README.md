@@ -78,7 +78,7 @@ built for exactly that.
 ### Prerequisites
 - Docker and Docker Compose
 - An LLM provider key (OpenAI, Anthropic, or OpenRouter)
-- A Composio API key
+- A Composio API key if you plan to use external integrations
 
 ### 1. Create your Slack app
 
@@ -87,8 +87,9 @@ built for exactly that.
 3. Name your bot whatever you want — this is your bot, your brand
 4. Upload a custom avatar if you'd like
 5. Install the app to your workspace
-6. Copy your **Bot Token** (`xoxb-...`) and **Signing Secret** from
-   Basic Information
+6. Copy your **Bot Token** (`xoxb-...`), **App-Level Token**
+   (`xapp-...` with `connections:write` for Socket Mode), and
+   **Signing Secret**
 
 ### 2. Clone and configure
 
@@ -102,6 +103,7 @@ Edit `.env`:
 
 ```x
 SLACK_BOT_TOKEN=xoxb-...
+SLACK_APP_TOKEN=xapp-...
 SLACK_SIGNING_SECRET=...
 LLM_PROVIDER=openai          # openai | anthropic | openrouter
 LLM_API_KEY=sk-...

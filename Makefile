@@ -1,4 +1,4 @@
-.PHONY: install lock lint lint-fix format format-check typecheck test check playground clean
+.PHONY: install lock lint lint-fix format format-check typecheck test check migrate downgrade playground clean
 
 install:
 	uv sync
@@ -25,6 +25,12 @@ test:
 	uv run pytest
 
 check: lint format-check typecheck test
+
+migrate:
+	uv run alembic upgrade head
+
+downgrade:
+	uv run alembic downgrade base
 
 playground:
 	uv run adk web .

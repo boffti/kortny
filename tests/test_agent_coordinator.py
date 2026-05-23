@@ -2,6 +2,7 @@ import json
 import os
 import uuid
 from collections.abc import Iterator, Sequence
+from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
@@ -11,6 +12,7 @@ from sqlalchemy import Engine, delete, select
 from sqlalchemy.orm import Session
 
 from kortny.agent import AgentCoordinator, AgentTurnLimitError
+from kortny.agent.thread_context import ThreadTranscriptMessage
 from kortny.db.models import (
     Artifact,
     EncryptedSecret,
@@ -20,6 +22,7 @@ from kortny.db.models import (
     Task,
     TaskEvent,
     TaskEventType,
+    TaskStatus,
 )
 from kortny.db.session import make_engine, make_session_factory, normalize_database_url
 from kortny.llm import ChatMessage, Completion, TokenUsage, ToolCall
@@ -53,6 +56,22 @@ class FakeLLM:
         if not self.completions:
             raise AssertionError("FakeLLM received more calls than expected")
         return self.completions.pop(0)
+
+
+class FakeThreadTranscriptProvider:
+    def __init__(self, messages: Sequence[ThreadTranscriptMessage]) -> None:
+        self.messages = tuple(messages)
+        self.calls: list[tuple[str, str, int]] = []
+
+    def fetch_thread_messages(
+        self,
+        *,
+        channel_id: str,
+        thread_ts: str,
+        limit: int,
+    ) -> tuple[ThreadTranscriptMessage, ...]:
+        self.calls.append((channel_id, thread_ts, limit))
+        return self.messages[:limit]
 
 
 class EchoJsonTool:
@@ -153,6 +172,242 @@ def test_coordinator_finishes_with_final_answer(db_session: Session) -> None:
         "agent_completed",
     ]
     assert events[-1].payload["reason"] == "final_answer"
+
+
+def test_coordinator_includes_prior_thread_context_for_follow_up(
+    db_session: Session,
+) -> None:
+    installation = create_installation(db_session)
+    service = TaskService(db_session)
+    first = create_task(
+        db_session,
+        input_text="research Python tempfile best practices and make a PDF",
+        installation=installation,
+        slack_event_id="EvResearchTurn",
+        created_at=datetime(2026, 5, 23, 11, 0, tzinfo=UTC),
+    )
+    first.result_summary = "Generated a PDF about Python tempfile best practices."
+    service.transition(first, TaskStatus.succeeded)
+    service.append_event(
+        first,
+        TaskEventType.tool_call,
+        {
+            "turn": 1,
+            "tool": "web_search",
+            "arguments": {"query": "Python tempfile best practices"},
+        },
+    )
+    service.append_event(
+        first,
+        TaskEventType.tool_result,
+        {
+            "turn": 1,
+            "tool": "web_search",
+            "output": {
+                "results": [{"url": "https://docs.python.org/3/library/tempfile.html"}]
+            },
+        },
+    )
+    follow_up = create_task(
+        db_session,
+        input_text="make it punchier",
+        installation=installation,
+        slack_event_id="EvFollowUp",
+        slack_message_ts="1716400100.000001",
+        created_at=datetime(2026, 5, 23, 11, 1, tzinfo=UTC),
+    )
+    transcript_provider = FakeThreadTranscriptProvider(
+        (
+            ThreadTranscriptMessage(
+                ts="1716400000.000001",
+                user_id="U123",
+                text="research Python tempfile best practices and make a PDF",
+            ),
+            ThreadTranscriptMessage(
+                ts="1716400100.000001",
+                user_id="U123",
+                text="make it punchier",
+            ),
+        )
+    )
+    llm = FakeLLM(
+        [
+            Completion(
+                content="Punchier version ready.",
+                tool_calls=(),
+                usage=TokenUsage(input_tokens=100, output_tokens=20),
+            )
+        ]
+    )
+
+    AgentCoordinator(
+        session=db_session,
+        llm=llm,
+        registry=ToolRegistry(),
+        thread_transcript_provider=transcript_provider,
+    ).run(follow_up)
+
+    first_call_messages = llm.calls[0][1]
+    prior_context = first_call_messages[0].content or ""
+
+    assert first_call_messages[0].role == "system"
+    assert "<prior_context>" in prior_context
+    assert "Generated a PDF about Python tempfile best practices." in prior_context
+    assert "web_search" in prior_context
+    assert "https://docs.python.org/3/library/tempfile.html" in prior_context
+    assert "Slack thread transcript" in prior_context
+    assert first_call_messages[-1] == ChatMessage(
+        role="user", content="make it punchier"
+    )
+    assert transcript_provider.calls == [("C123", "1716400000.000001", 30)]
+
+
+def test_coordinator_orders_three_turn_thread_context(db_session: Session) -> None:
+    installation = create_installation(db_session)
+    first = create_task(
+        db_session,
+        input_text="research FastAPI deployment",
+        installation=installation,
+        slack_event_id="EvThreadOne",
+        created_at=datetime(2026, 5, 23, 12, 0, tzinfo=UTC),
+    )
+    first.result_summary = "FastAPI can run behind a reverse proxy."
+    second = create_task(
+        db_session,
+        input_text="turn that into a PDF",
+        installation=installation,
+        slack_event_id="EvThreadTwo",
+        slack_message_ts="1716400200.000001",
+        created_at=datetime(2026, 5, 23, 12, 1, tzinfo=UTC),
+    )
+    second.result_summary = "Generated 1 artifact."
+    third = create_task(
+        db_session,
+        input_text="what was the key takeaway?",
+        installation=installation,
+        slack_event_id="EvThreadThree",
+        slack_message_ts="1716400300.000001",
+        created_at=datetime(2026, 5, 23, 12, 2, tzinfo=UTC),
+    )
+    llm = FakeLLM(
+        [
+            Completion(
+                content="The key takeaway was deployment behind a reverse proxy.",
+                tool_calls=(),
+                usage=TokenUsage(input_tokens=80, output_tokens=15),
+            )
+        ]
+    )
+
+    AgentCoordinator(
+        session=db_session,
+        llm=llm,
+        registry=ToolRegistry(),
+    ).run(third)
+
+    context = llm.calls[0][1][0].content or ""
+
+    assert context.index("research FastAPI deployment") < context.index(
+        "turn that into a PDF"
+    )
+    assert "what was the key takeaway?" not in context
+
+
+def test_coordinator_includes_failed_prior_task_context(db_session: Session) -> None:
+    installation = create_installation(db_session)
+    service = TaskService(db_session)
+    failed = create_task(
+        db_session,
+        input_text="research unavailable source",
+        installation=installation,
+        slack_event_id="EvFailedPrior",
+        created_at=datetime(2026, 5, 23, 13, 0, tzinfo=UTC),
+    )
+    failed.error = {"type": "ValueError", "message": "source unavailable"}
+    service.append_event(
+        failed,
+        TaskEventType.error,
+        {"type": "ValueError", "message": "source unavailable"},
+    )
+    service.transition(failed, TaskStatus.failed)
+    current = create_task(
+        db_session,
+        input_text="try a different source",
+        installation=installation,
+        slack_event_id="EvAfterFailedPrior",
+        slack_message_ts="1716400400.000001",
+        created_at=datetime(2026, 5, 23, 13, 1, tzinfo=UTC),
+    )
+    llm = FakeLLM(
+        [
+            Completion(
+                content="I will use a different source.",
+                tool_calls=(),
+                usage=TokenUsage(input_tokens=80, output_tokens=15),
+            )
+        ]
+    )
+
+    AgentCoordinator(
+        session=db_session,
+        llm=llm,
+        registry=ToolRegistry(),
+    ).run(current)
+
+    context = llm.calls[0][1][0].content or ""
+
+    assert "status=failed" in context
+    assert "ValueError: source unavailable" in context
+    assert "try a different source" not in context
+
+
+def test_coordinator_compacts_prior_context_when_over_budget(
+    db_session: Session,
+) -> None:
+    installation = create_installation(db_session)
+    first = create_task(
+        db_session,
+        input_text="research a very long topic",
+        installation=installation,
+        slack_event_id="EvLongPrior",
+        created_at=datetime(2026, 5, 23, 14, 0, tzinfo=UTC),
+    )
+    first.result_summary = "Summary survives compaction."
+    TaskService(db_session).append_event(
+        first,
+        TaskEventType.tool_result,
+        {"output": {"large": "x" * 2_000}},
+    )
+    current = create_task(
+        db_session,
+        input_text="refine that",
+        installation=installation,
+        slack_event_id="EvLongCurrent",
+        slack_message_ts="1716400500.000001",
+        created_at=datetime(2026, 5, 23, 14, 1, tzinfo=UTC),
+    )
+    llm = FakeLLM(
+        [
+            Completion(
+                content="Refined.",
+                tool_calls=(),
+                usage=TokenUsage(input_tokens=40, output_tokens=8),
+            )
+        ]
+    )
+
+    AgentCoordinator(
+        session=db_session,
+        llm=llm,
+        registry=ToolRegistry(),
+        thread_context_max_chars=500,
+    ).run(current)
+
+    context = llm.calls[0][1][0].content or ""
+
+    assert "Context was compacted" in context
+    assert "Summary survives compaction." in context
+    assert '"large"' not in context
 
 
 def test_coordinator_invokes_tool_and_repeats_until_final_answer(
@@ -301,19 +556,39 @@ def cleanup_database(session: Session) -> None:
         session.execute(delete(model))
 
 
-def create_task(session: Session, *, input_text: str) -> Task:
+def create_installation(session: Session) -> Installation:
     installation = Installation(slack_team_id=f"T{uuid.uuid4().hex}")
     session.add(installation)
     session.flush()
-    return TaskService(session).create_task(
+    return installation
+
+
+def create_task(
+    session: Session,
+    *,
+    input_text: str,
+    installation: Installation | None = None,
+    slack_event_id: str | None = None,
+    slack_channel_id: str = "C123",
+    slack_thread_ts: str = "1716400000.000001",
+    slack_message_ts: str = "1716400000.000001",
+    slack_user_id: str = "U123",
+    created_at: datetime | None = None,
+) -> Task:
+    installation = installation or create_installation(session)
+    task = TaskService(session).create_task(
         installation_id=installation.id,
-        slack_event_id=f"Ev{uuid.uuid4().hex}",
-        slack_channel_id="C123",
-        slack_thread_ts="1716400000.000001",
-        slack_message_ts="1716400000.000001",
-        slack_user_id="U123",
+        slack_event_id=slack_event_id or f"Ev{uuid.uuid4().hex}",
+        slack_channel_id=slack_channel_id,
+        slack_thread_ts=slack_thread_ts,
+        slack_message_ts=slack_message_ts,
+        slack_user_id=slack_user_id,
         input=input_text,
     )
+    if created_at is not None:
+        task.created_at = created_at
+        session.flush()
+    return task
 
 
 def task_events(session: Session, task: Task) -> list[TaskEvent]:

@@ -108,6 +108,20 @@ class TaskRepository:
             .limit(1)
         )
 
+    def list_by_thread(self, channel: str, thread_ts: str) -> list[Task]:
+        """Return tasks in a Slack channel/thread pair in creation order."""
+
+        return list(
+            self.session.scalars(
+                select(Task)
+                .where(
+                    Task.slack_channel_id == channel,
+                    Task.slack_thread_ts == thread_ts,
+                )
+                .order_by(Task.created_at, Task.id)
+            )
+        )
+
     def transition(self, task: Task | uuid.UUID, status: DbTaskStatus | str) -> Task:
         """Update task status and append a status_changed event."""
 

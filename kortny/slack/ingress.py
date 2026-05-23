@@ -13,9 +13,13 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from kortny.db.models import Installation, Task, TaskEventType
+from kortny.slack.acknowledgement import (
+    AcknowledgementGenerator,
+    StaticAcknowledgementGenerator,
+    generate_acknowledgement,
+)
 from kortny.tasks import TaskService
 
-ON_IT_TEXT = "On it. I'll start a task for this."
 LEADING_MENTION_RE = re.compile(r"^\s*<@[^>]+>\s*")
 logger = logging.getLogger(__name__)
 
@@ -52,10 +56,14 @@ class SlackIngress:
         session: Session,
         client: SlackPostMessageClient,
         task_service: TaskService | None = None,
+        acknowledgement_generator: AcknowledgementGenerator | None = None,
     ) -> None:
         self.session = session
         self.client = client
         self.task_service = task_service or TaskService(session)
+        self.acknowledgement_generator = (
+            acknowledgement_generator or StaticAcknowledgementGenerator()
+        )
 
     def handle_app_mention(
         self,
@@ -109,9 +117,28 @@ class SlackIngress:
             len(task.input),
         )
 
+        if _is_thread_follow_up(event):
+            logger.info(
+                "slack follow-up acknowledgement skipped task_id=%s channel=%s thread_ts=%s",
+                task.id,
+                channel_id,
+                thread_ts,
+            )
+            return AppMentionResult(
+                task=task,
+                created=True,
+                thread_ts=thread_ts,
+            )
+
+        acknowledgement_text = generate_acknowledgement(
+            self.acknowledgement_generator,
+            session=self.session,
+            task=task,
+            task_service=self.task_service,
+        )
         acknowledgement = self.client.chat_postMessage(
             channel=channel_id,
-            text=ON_IT_TEXT,
+            text=acknowledgement_text,
             thread_ts=thread_ts,
         )
         acknowledgement_ts = _optional_response_ts(acknowledgement)
@@ -122,7 +149,7 @@ class SlackIngress:
                 "channel": channel_id,
                 "thread_ts": thread_ts,
                 "message_ts": acknowledgement_ts,
-                "text": ON_IT_TEXT,
+                "text": acknowledgement_text,
                 "purpose": "acknowledgement",
             },
         )
@@ -194,6 +221,17 @@ def _event_thread_ts(event: Mapping[str, Any]) -> str:
     if not isinstance(thread_ts, str) or not thread_ts:
         raise ValueError("Slack event is missing ts")
     return thread_ts
+
+
+def _is_thread_follow_up(event: Mapping[str, Any]) -> bool:
+    thread_ts = event.get("thread_ts")
+    message_ts = event.get("ts")
+    return (
+        isinstance(thread_ts, str)
+        and bool(thread_ts)
+        and isinstance(message_ts, str)
+        and thread_ts != message_ts
+    )
 
 
 def _task_input(event: Mapping[str, Any]) -> str:

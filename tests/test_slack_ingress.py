@@ -21,7 +21,8 @@ from kortny.db.models import (
 )
 from kortny.db.session import make_engine, make_session_factory, normalize_database_url
 from kortny.slack import SlackIngress, acknowledge_then_handle
-from kortny.slack.ingress import ON_IT_TEXT
+from kortny.slack.acknowledgement import ROOT_ACK_FALLBACK_TEXT
+from kortny.tasks import TaskService
 
 TEST_POSTGRES_URL = os.environ.get("KORTNY_TEST_POSTGRES_URL")
 
@@ -48,6 +49,30 @@ class FakeSlackClient:
             "channel": channel,
             "ts": f"1716400000.{len(self.calls):06d}",
         }
+
+
+class FakeAcknowledgementGenerator:
+    def __init__(
+        self,
+        text: str = "I'll pull that together and post it here.",
+        *,
+        error: Exception | None = None,
+    ) -> None:
+        self.text = text
+        self.error = error
+        self.calls: list[str] = []
+
+    def generate(
+        self,
+        *,
+        session: Session,
+        task: Task,
+        task_service: TaskService,
+    ) -> str:
+        self.calls.append(task.input)
+        if self.error is not None:
+            raise self.error
+        return self.text
 
 
 def test_acknowledge_then_handle_acks_before_work() -> None:
@@ -94,7 +119,14 @@ def db_session(engine: Engine) -> Iterator[Session]:
 
 def test_app_mention_creates_task_and_posts_ack_reply(db_session: Session) -> None:
     client = FakeSlackClient()
-    result = SlackIngress(session=db_session, client=client).handle_app_mention(
+    acknowledgements = FakeAcknowledgementGenerator(
+        "I'll pull together the pandas report and post it here."
+    )
+    result = SlackIngress(
+        session=db_session,
+        client=client,
+        acknowledgement_generator=acknowledgements,
+    ).handle_app_mention(
         body=app_mention_body(event_id="EvMention1"),
         event=app_mention_event(text="<@UBOT> research pandas and make a PDF"),
     )
@@ -124,13 +156,17 @@ def test_app_mention_creates_task_and_posts_ack_reply(db_session: Session) -> No
     assert client.calls == [
         {
             "channel": "C123",
-            "text": ON_IT_TEXT,
+            "text": "I'll pull together the pandas report and post it here.",
             "thread_ts": "1716400000.000001",
         }
     ]
+    assert acknowledgements.calls == ["research pandas and make a PDF"]
     assert message_event is not None
     assert message_event.payload["purpose"] == "acknowledgement"
     assert message_event.payload["message_ts"] == "1716400000.000001"
+    assert message_event.payload["text"] == (
+        "I'll pull together the pandas report and post it here."
+    )
 
 
 def test_app_mention_uses_existing_thread_ts(db_session: Session) -> None:
@@ -142,7 +178,73 @@ def test_app_mention_uses_existing_thread_ts(db_session: Session) -> None:
 
     assert result.thread_ts == "1716300000.000999"
     assert result.task.slack_thread_ts == "1716300000.000999"
-    assert client.calls[0]["thread_ts"] == "1716300000.000999"
+    assert client.calls == []
+
+
+def test_thread_follow_up_creates_task_without_visible_ack(
+    db_session: Session,
+) -> None:
+    client = FakeSlackClient()
+    acknowledgements = FakeAcknowledgementGenerator()
+
+    result = SlackIngress(
+        session=db_session,
+        client=client,
+        acknowledgement_generator=acknowledgements,
+    ).handle_app_mention(
+        body=app_mention_body(event_id="EvMentionFollowUp"),
+        event=app_mention_event(
+            text="<@UBOT> what was your source for this?",
+            ts="1716400100.000001",
+            thread_ts="1716400000.000001",
+        ),
+    )
+    db_session.commit()
+
+    message_event_count = db_session.scalar(
+        select(func.count())
+        .select_from(TaskEvent)
+        .where(TaskEvent.type == TaskEventType.message_posted)
+    )
+
+    assert result.created is True
+    assert result.acknowledgement_ts is None
+    assert result.task.input == "what was your source for this?"
+    assert result.task.slack_thread_ts == "1716400000.000001"
+    assert client.calls == []
+    assert acknowledgements.calls == []
+    assert message_event_count == 0
+
+
+def test_app_mention_ack_generation_failure_uses_fallback(
+    db_session: Session,
+) -> None:
+    client = FakeSlackClient()
+    result = SlackIngress(
+        session=db_session,
+        client=client,
+        acknowledgement_generator=FakeAcknowledgementGenerator(
+            error=RuntimeError("ack failed")
+        ),
+    ).handle_app_mention(
+        body=app_mention_body(event_id="EvMentionAckFailure"),
+        event=app_mention_event(text="<@UBOT> research ack failure"),
+    )
+    db_session.commit()
+
+    events = list(
+        db_session.scalars(
+            select(TaskEvent)
+            .where(TaskEvent.task_id == result.task.id)
+            .order_by(TaskEvent.seq)
+        )
+    )
+
+    assert client.calls[0]["text"] == ROOT_ACK_FALLBACK_TEXT
+    assert any(
+        event.payload.get("message") == "acknowledgement_generation_failed"
+        for event in events
+    )
 
 
 def test_redelivered_app_mention_is_idempotent(db_session: Session) -> None:
@@ -216,6 +318,7 @@ def app_mention_body(*, event_id: str | None = None) -> dict[str, Any]:
 def app_mention_event(
     *,
     text: str = "<@UBOT> research a topic",
+    ts: str = "1716400000.000001",
     thread_ts: str | None = None,
 ) -> dict[str, Any]:
     event = {
@@ -223,7 +326,7 @@ def app_mention_event(
         "channel": "C123",
         "user": "U123",
         "text": text,
-        "ts": "1716400000.000001",
+        "ts": ts,
     }
     if thread_ts is not None:
         event["thread_ts"] = thread_ts

@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from kortny.config import Settings, load_settings
 from kortny.db.session import session_scope
 from kortny.logging_config import configure_logging
+from kortny.slack.acknowledgement import LLMAcknowledgementGenerator
 from kortny.slack.ingress import SlackIngress
 
 T = TypeVar("T")
@@ -32,6 +33,7 @@ def create_bolt_app(
     """Create a Bolt app with Kortny event listeners registered."""
 
     resolved_settings = settings or load_settings()
+    acknowledgement_generator = LLMAcknowledgementGenerator(settings=resolved_settings)
     app = App(
         token=resolved_settings.slack_bot_token,
         signing_secret=resolved_settings.slack_signing_secret,
@@ -48,7 +50,11 @@ def create_bolt_app(
         def handle() -> None:
             try:
                 with session_scope(session_factory) as session:
-                    SlackIngress(session=session, client=client).handle_app_mention(
+                    SlackIngress(
+                        session=session,
+                        client=client,
+                        acknowledgement_generator=acknowledgement_generator,
+                    ).handle_app_mention(
                         body=body,
                         event=event,
                     )

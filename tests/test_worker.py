@@ -28,6 +28,7 @@ from kortny.db.models import (
 )
 from kortny.db.session import make_engine, make_session_factory, normalize_database_url
 from kortny.llm import ChatMessage, Completion, TokenUsage, ToolCall
+from kortny.slack.comments import ARTIFACT_COMMENT_FALLBACK_TEXT
 from kortny.tasks import TaskService
 from kortny.tools import ToolResult
 from kortny.tools.types import JsonObject, JsonSchema
@@ -255,6 +256,9 @@ def test_worker_runs_agent_flow_and_posts_pdf(
             provider_name=LLMProvider.openrouter,
             web_search_tool=StaticWebSearchTool(),
             slack_client=slack_client,
+            artifact_comment_generator=FakeArtifactCommentGenerator(
+                "Here's the Python tempfile report."
+            ),
             workspace_base_dir=tmp_path,
         ),
     ).run_once(now=claim_time)
@@ -285,7 +289,9 @@ def test_worker_runs_agent_flow_and_posts_pdf(
     assert slack_client.uploads[0]["channel"] == "C123"
     assert slack_client.uploads[0]["thread_ts"] == "EvAgentWorker"
     assert slack_client.uploads[0]["filename"] == "python-temp-files.pdf"
-    assert slack_client.uploads[0]["initial_comment"] == "Generated 1 artifact."
+    assert slack_client.uploads[0]["initial_comment"] == (
+        "Here's the Python tempfile report."
+    )
     assert slack_client.uploads[0]["file_bytes"].startswith(b"%PDF-")
 
     event_types = [event.type for event in events]
@@ -300,6 +306,75 @@ def test_worker_runs_agent_flow_and_posts_pdf(
         "running",
         "succeeded",
     ]
+
+
+def test_agent_executor_falls_back_when_artifact_comment_generation_fails(
+    db_session: Session,
+    worker_session_factory: sessionmaker[Session],
+    tmp_path: Path,
+) -> None:
+    claim_time = datetime(2026, 5, 23, 9, 50, tzinfo=UTC)
+    task = create_task(db_session, event_id="EvAgentWorkerCommentFallback")
+    task.input = "generate a short PDF"
+    task.available_at = claim_time - timedelta(seconds=1)
+    db_session.add(
+        ModelPricing(
+            provider=LLMProvider.openrouter,
+            model="openai/gpt-4o-mini",
+            input_price_per_mtok=Decimal("1.000000"),
+            output_price_per_mtok=Decimal("2.000000"),
+            effective_from=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+    )
+    db_session.commit()
+
+    slack_client = FakeSlackClient()
+    provider = FakeAgentProvider(
+        [
+            Completion(
+                content=None,
+                tool_calls=(
+                    ToolCall(
+                        id="call-pdf",
+                        name="pdf_generator",
+                        arguments={
+                            "title": "Short Report",
+                            "filename": "short-report.pdf",
+                            "sections": [{"heading": "Summary", "body": "Done."}],
+                        },
+                    ),
+                ),
+                usage=TokenUsage(input_tokens=50, output_tokens=25),
+                model="openai/gpt-4o-mini",
+            ),
+        ]
+    )
+
+    result = TaskWorker(
+        session_factory=worker_session_factory,
+        worker_id="agent-worker-test",
+        executor=AgentTaskExecutor(
+            settings=make_settings(),
+            llm_provider=provider,
+            provider_name=LLMProvider.openrouter,
+            web_search_tool=StaticWebSearchTool(),
+            slack_client=slack_client,
+            artifact_comment_generator=FakeArtifactCommentGenerator(
+                error=RuntimeError("comment failed")
+            ),
+            workspace_base_dir=tmp_path,
+        ),
+    ).run_once(now=claim_time)
+
+    db_session.refresh(task)
+    events = task_events(db_session, task)
+
+    assert result.status == TaskStatus.succeeded.value, task.error
+    assert slack_client.uploads[0]["initial_comment"] == ARTIFACT_COMMENT_FALLBACK_TEXT
+    assert any(
+        event.payload.get("message") == "artifact_comment_generation_failed"
+        for event in events
+    )
 
 
 def test_agent_executor_posts_generic_failure_notice_for_setup_errors(
@@ -428,6 +503,31 @@ class StaticWebSearchTool:
                 ],
             }
         )
+
+
+class FakeArtifactCommentGenerator:
+    def __init__(
+        self,
+        text: str = "Here's the report.",
+        *,
+        error: Exception | None = None,
+    ) -> None:
+        self.text = text
+        self.error = error
+        self.calls: list[tuple[str, str]] = []
+
+    def generate(
+        self,
+        *,
+        session: Session,
+        task: Task,
+        artifact: Artifact,
+        task_service: TaskService,
+    ) -> str:
+        self.calls.append((task.input, artifact.filename))
+        if self.error is not None:
+            raise self.error
+        return self.text
 
 
 class FakeSlackClient:

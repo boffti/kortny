@@ -13,13 +13,20 @@ from sqlalchemy.orm import Session
 
 from kortny.agent import AgentCoordinator
 from kortny.agent.coordinator import DEFAULT_SYSTEM_PROMPT
+from kortny.agent.thread_context import ThreadTranscriptProvider
 from kortny.config import Settings, load_settings
 from kortny.db.models import Artifact, Task
 from kortny.db.models import LLMProvider as DbLLMProvider
 from kortny.execution import task_workspace
 from kortny.llm import LLMProvider, LLMService, create_llm_provider
 from kortny.slack import SlackPoster, SlackThread
+from kortny.slack.comments import (
+    ArtifactCommentGenerator,
+    LLMArtifactCommentGenerator,
+    generate_artifact_comment,
+)
 from kortny.slack.posting import SlackPostingClient
+from kortny.slack.thread_context import SlackThreadTranscriptProvider
 from kortny.tasks import TaskService
 from kortny.tools import PdfGeneratorTool, Tool, ToolRegistry, WebSearchTool
 
@@ -60,6 +67,8 @@ class AgentTaskExecutor:
         provider_name: DbLLMProvider | str | None = None,
         web_search_tool: Tool | None = None,
         slack_client: SlackPostingClient | None = None,
+        thread_transcript_provider: ThreadTranscriptProvider | None = None,
+        artifact_comment_generator: ArtifactCommentGenerator | None = None,
         workspace_base_dir: Path | str | None = None,
         system_prompt: str | None = DEFAULT_SYSTEM_PROMPT,
     ) -> None:
@@ -68,6 +77,8 @@ class AgentTaskExecutor:
         self.provider_name = DbLLMProvider(provider_name) if provider_name else None
         self.web_search_tool = web_search_tool
         self.slack_client = slack_client
+        self.thread_transcript_provider = thread_transcript_provider
+        self.artifact_comment_generator = artifact_comment_generator
         self.workspace_base_dir = workspace_base_dir
         self.system_prompt = system_prompt
 
@@ -105,6 +116,9 @@ class AgentTaskExecutor:
                     registry=registry,
                     task_service=task_service,
                     system_prompt=self.system_prompt,
+                    thread_transcript_provider=self._build_thread_transcript_provider(
+                        settings
+                    ),
                 ).run(task)
                 self._post_outputs(
                     settings=settings,
@@ -144,6 +158,22 @@ class AgentTaskExecutor:
             provider_name=provider_name,
             task_service=task_service,
         )
+
+    def _build_thread_transcript_provider(
+        self,
+        settings: Settings,
+    ) -> ThreadTranscriptProvider:
+        if self.thread_transcript_provider is not None:
+            return self.thread_transcript_provider
+        return SlackThreadTranscriptProvider(WebClient(token=settings.slack_bot_token))
+
+    def _build_artifact_comment_generator(
+        self,
+        settings: Settings,
+    ) -> ArtifactCommentGenerator:
+        if self.artifact_comment_generator is not None:
+            return self.artifact_comment_generator
+        return LLMArtifactCommentGenerator(settings=settings)
 
     def _build_registry(
         self,
@@ -203,6 +233,15 @@ class AgentTaskExecutor:
         for index, artifact in enumerate(artifacts):
             if artifact.storage_path is None:
                 continue
+            initial_comment = None
+            if index == 0:
+                initial_comment = generate_artifact_comment(
+                    self._build_artifact_comment_generator(settings),
+                    session=session,
+                    task=task,
+                    artifact=artifact,
+                    task_service=task_service,
+                )
             logger.info(
                 "posting artifact task_id=%s artifact_id=%s filename=%s",
                 task.id,
@@ -213,7 +252,7 @@ class AgentTaskExecutor:
                 thread,
                 artifact.storage_path,
                 artifact=artifact,
-                initial_comment=result_summary if index == 0 else None,
+                initial_comment=initial_comment,
                 title=artifact.filename,
             )
 

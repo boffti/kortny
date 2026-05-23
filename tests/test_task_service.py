@@ -1,6 +1,7 @@
 import os
 import uuid
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -119,6 +120,46 @@ def test_lookup_and_transition_write_status_event(db_session: Session) -> None:
     assert [event.seq for event in events] == [1, 2]
     assert events[1].type is TaskEventType.status_changed
     assert events[1].payload == {"from": "pending", "to": "running"}
+
+
+def test_list_by_thread_returns_tasks_in_creation_order(db_session: Session) -> None:
+    installation = create_installation(db_session)
+    service = TaskService(db_session)
+    created_at = datetime(2026, 5, 23, 11, 0, tzinfo=UTC)
+
+    first = service.create_task(
+        installation_id=installation.id,
+        slack_event_id="EvThreadFirst",
+        slack_channel_id="CThread",
+        slack_thread_ts="1716400000.000010",
+        slack_message_ts="1716400000.000010",
+        slack_user_id="UThread",
+        input="research tempfile",
+    )
+    second = service.create_task(
+        installation_id=installation.id,
+        slack_event_id="EvThreadSecond",
+        slack_channel_id="CThread",
+        slack_thread_ts="1716400000.000010",
+        slack_message_ts="1716400010.000010",
+        slack_user_id="UThread",
+        input="make it punchier",
+    )
+    other_thread = service.create_task(
+        installation_id=installation.id,
+        slack_event_id="EvOtherThread",
+        slack_channel_id="CThread",
+        slack_thread_ts="1716500000.000010",
+        slack_message_ts="1716500000.000010",
+        slack_user_id="UThread",
+        input="unrelated",
+    )
+    first.created_at = created_at
+    second.created_at = created_at + timedelta(seconds=10)
+    other_thread.created_at = created_at + timedelta(seconds=20)
+    db_session.flush()
+
+    assert service.list_by_thread("CThread", "1716400000.000010") == [first, second]
 
 
 def test_append_event_assigns_monotonic_seq_per_task(db_session: Session) -> None:

@@ -13,20 +13,34 @@ from dataclasses import asdict, dataclass
 from decimal import Decimal
 from typing import Protocol
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from kortny.db.models import Task, TaskEventType
+from kortny.agent.thread_context import (
+    ThreadTranscriptMessage,
+    ThreadTranscriptProvider,
+)
+from kortny.db.models import Task, TaskEvent, TaskEventType
 from kortny.llm import ChatMessage, Completion
 from kortny.tasks import TaskService
 from kortny.tools import ToolRegistry
 from kortny.tools.types import JsonObject, JsonSchema, ToolArtifact, ToolResult
 
 DEFAULT_MAX_TURNS = 6
+DEFAULT_THREAD_CONTEXT_MAX_CHARS = 12_000
+DEFAULT_THREAD_CONTEXT_RECENT_TASKS = 3
+DEFAULT_THREAD_TRANSCRIPT_LIMIT = 30
 DEFAULT_SYSTEM_PROMPT = (
     "You are Kortny, a Slack-native AI coworker. Use the available tools when "
     "they are needed to complete the user's request. If the user asks for "
     "research and a PDF, search first and then generate the PDF artifact."
 )
+THREAD_CONTEXT_EVENT_TYPES = {
+    TaskEventType.llm_call,
+    TaskEventType.tool_call,
+    TaskEventType.tool_result,
+    TaskEventType.error,
+}
 
 
 class LLMClient(Protocol):
@@ -72,9 +86,19 @@ class AgentCoordinator:
         task_service: TaskService | None = None,
         max_turns: int = DEFAULT_MAX_TURNS,
         system_prompt: str | None = None,
+        thread_transcript_provider: ThreadTranscriptProvider | None = None,
+        thread_context_max_chars: int = DEFAULT_THREAD_CONTEXT_MAX_CHARS,
+        thread_context_recent_tasks: int = DEFAULT_THREAD_CONTEXT_RECENT_TASKS,
+        thread_transcript_limit: int = DEFAULT_THREAD_TRANSCRIPT_LIMIT,
     ) -> None:
         if max_turns < 1:
             raise ValueError("max_turns must be at least 1")
+        if thread_context_max_chars < 1:
+            raise ValueError("thread_context_max_chars must be at least 1")
+        if thread_context_recent_tasks < 1:
+            raise ValueError("thread_context_recent_tasks must be at least 1")
+        if thread_transcript_limit < 0:
+            raise ValueError("thread_transcript_limit cannot be negative")
 
         self.session = session
         self.llm = llm
@@ -82,12 +106,16 @@ class AgentCoordinator:
         self.task_service = task_service or TaskService(session)
         self.max_turns = max_turns
         self.system_prompt = system_prompt
+        self.thread_transcript_provider = thread_transcript_provider
+        self.thread_context_max_chars = thread_context_max_chars
+        self.thread_context_recent_tasks = thread_context_recent_tasks
+        self.thread_transcript_limit = thread_transcript_limit
 
     def run(self, task: Task | uuid.UUID) -> AgentRunResult:
         """Run the coordinator until final text or a produced artifact."""
 
         task_obj = self._resolve_task(task)
-        messages = self._initial_messages(task_obj.input)
+        messages = self._initial_messages(task_obj)
         schemas = self.registry.schemas()
         artifact_count = 0
 
@@ -328,12 +356,139 @@ class AgentCoordinator:
             raise LookupError(f"Task not found: {task}")
         return task_obj
 
-    def _initial_messages(self, task_input: str) -> list[ChatMessage]:
+    def _initial_messages(self, task: Task) -> list[ChatMessage]:
         messages: list[ChatMessage] = []
         if self.system_prompt:
             messages.append(ChatMessage(role="system", content=self.system_prompt))
-        messages.append(ChatMessage(role="user", content=task_input))
+        prior_context = self._prior_context(task)
+        if prior_context:
+            messages.append(ChatMessage(role="system", content=prior_context))
+        messages.append(ChatMessage(role="user", content=task.input))
         return messages
+
+    def _prior_context(self, task: Task) -> str | None:
+        thread_ts = task.slack_thread_ts
+        if not thread_ts:
+            return None
+
+        thread_tasks = self.task_service.list_by_thread(
+            task.slack_channel_id, thread_ts
+        )
+        prior_tasks = _tasks_before(thread_tasks, task)
+        if not prior_tasks:
+            return None
+
+        transcript = self._fetch_thread_transcript(task)
+        detailed = self._render_prior_context(
+            prior_tasks,
+            transcript=transcript,
+            include_events=True,
+            compacted=False,
+        )
+        if len(detailed) <= self.thread_context_max_chars:
+            return detailed
+
+        compact = self._render_prior_context(
+            prior_tasks,
+            transcript=transcript,
+            include_events=False,
+            compacted=True,
+        )
+        return _fit_context_to_budget(compact, self.thread_context_max_chars)
+
+    def _fetch_thread_transcript(
+        self,
+        task: Task,
+    ) -> tuple[ThreadTranscriptMessage, ...]:
+        if self.thread_transcript_provider is None or self.thread_transcript_limit == 0:
+            return ()
+        if not task.slack_thread_ts:
+            return ()
+
+        try:
+            return self.thread_transcript_provider.fetch_thread_messages(
+                channel_id=task.slack_channel_id,
+                thread_ts=task.slack_thread_ts,
+                limit=self.thread_transcript_limit,
+            )
+        except Exception as exc:
+            self._append_log(
+                task,
+                "thread_transcript_unavailable",
+                {"error_type": type(exc).__name__, "error": str(exc)},
+            )
+            return ()
+
+    def _render_prior_context(
+        self,
+        prior_tasks: Sequence[Task],
+        *,
+        transcript: Sequence[ThreadTranscriptMessage],
+        include_events: bool,
+        compacted: bool,
+    ) -> str:
+        lines = [
+            "<prior_context>",
+            "This task is a follow-up in the same Slack thread. Use this context "
+            'to resolve references like "it", "that", "the PDF", and '
+            '"your source". Do not treat it as cross-thread memory.',
+        ]
+        if compacted:
+            lines.append(
+                "Context was compacted to stay within the configured token budget; "
+                "older task event details were omitted."
+            )
+
+        if include_events:
+            older_tasks = prior_tasks[: -self.thread_context_recent_tasks]
+            recent_tasks = prior_tasks[-self.thread_context_recent_tasks :]
+            if older_tasks:
+                lines.append("")
+                lines.append("Older prior task summaries:")
+                for index, prior_task in enumerate(older_tasks, start=1):
+                    lines.append(_task_summary_line(index, prior_task))
+            lines.append("")
+            lines.append("Recent prior task details:")
+            start_index = len(older_tasks) + 1
+            for index, prior_task in enumerate(recent_tasks, start=start_index):
+                lines.extend(self._prior_task_detail_lines(index, prior_task))
+        else:
+            lines.append("")
+            lines.append("Prior task summaries:")
+            for index, prior_task in enumerate(prior_tasks, start=1):
+                lines.append(_task_summary_line(index, prior_task))
+
+        if transcript:
+            lines.append("")
+            lines.append("Slack thread transcript:")
+            for message in transcript:
+                lines.append(_transcript_line(message))
+
+        lines.append("</prior_context>")
+        return "\n".join(lines)
+
+    def _prior_task_detail_lines(self, index: int, task: Task) -> list[str]:
+        lines = [_task_summary_line(index, task)]
+        events = self._context_events(task)
+        if events:
+            lines.append("  events:")
+            for event in events:
+                lines.append(
+                    f"  - {event.type.value}: {_shorten(_json_dumps(event.payload), max_chars=600)}"
+                )
+        return lines
+
+    def _context_events(self, task: Task) -> list[TaskEvent]:
+        return list(
+            self.session.scalars(
+                select(TaskEvent)
+                .where(
+                    TaskEvent.task_id == task.id,
+                    TaskEvent.type.in_(THREAD_CONTEXT_EVENT_TYPES),
+                )
+                .order_by(TaskEvent.seq)
+            )
+        )
 
 
 def _tool_result_payload(tool_name: str, result: ToolResult) -> JsonObject:
@@ -349,7 +504,68 @@ def _artifact_payload(artifact: ToolArtifact) -> JsonObject:
     return asdict(artifact)
 
 
-def _json_dumps(payload: JsonObject) -> str:
+def _tasks_before(thread_tasks: Sequence[Task], current_task: Task) -> list[Task]:
+    prior_tasks: list[Task] = []
+    for task in thread_tasks:
+        if task.id == current_task.id:
+            return prior_tasks
+        prior_tasks.append(task)
+    return [task for task in thread_tasks if task.id != current_task.id]
+
+
+def _task_summary_line(index: int, task: Task) -> str:
+    result = task.result_summary or "(no result summary yet)"
+    line = (
+        f"- {index}. task_id={task.id} status={task.status.value} input={_quote(_shorten(task.input, max_chars=240))} "
+        f"result={_quote(_shorten(result, max_chars=360))} cost_usd={task.total_cost_usd}"
+    )
+    error = _error_summary(task.error)
+    if error:
+        line = f"{line} error={_quote(_shorten(error, max_chars=240))}"
+    return line
+
+
+def _error_summary(error: dict | None) -> str | None:
+    if not error:
+        return None
+    error_type = error.get("type")
+    message = error.get("message")
+    if isinstance(error_type, str) and isinstance(message, str):
+        return f"{error_type}: {message}"
+    return _json_dumps(error)
+
+
+def _transcript_line(message: ThreadTranscriptMessage) -> str:
+    speaker = message.user_id
+    if speaker is None and message.bot_id is not None:
+        speaker = f"bot:{message.bot_id}"
+    if speaker is None:
+        speaker = "unknown"
+    return f"- [{message.ts}] {speaker}: {_shorten(_single_line(message.text), max_chars=500)}"
+
+
+def _fit_context_to_budget(content: str, max_chars: int) -> str:
+    if len(content) <= max_chars:
+        return content
+    suffix = "\n[prior_context truncated at configured budget]\n</prior_context>"
+    return content[: max(0, max_chars - len(suffix))].rstrip() + suffix
+
+
+def _shorten(value: str, *, max_chars: int) -> str:
+    if len(value) <= max_chars:
+        return value
+    return value[: max(0, max_chars - 3)].rstrip() + "..."
+
+
+def _quote(value: str) -> str:
+    return json.dumps(_single_line(value))
+
+
+def _single_line(value: str) -> str:
+    return " ".join(value.split())
+
+
+def _json_dumps(payload: object) -> str:
     return json.dumps(payload, default=_json_default, separators=(",", ":"))
 
 

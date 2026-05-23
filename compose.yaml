@@ -1,0 +1,37 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-kortny}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-kortny}
+      POSTGRES_USER: ${POSTGRES_USER:-kortny}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+    ports:
+      - "${POSTGRES_HOST_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  migrate:
+    image: ghcr.io/astral-sh/uv:python3.11-bookworm-slim
+    working_dir: /app
+    command: ["uv", "run", "alembic", "upgrade", "head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      POSTGRES_URL: postgresql://${POSTGRES_USER:-kortny}:${POSTGRES_PASSWORD:-kortny}@postgres:5432/${POSTGRES_DB:-kortny}
+      UV_CACHE_DIR: /tmp/uv-cache
+      UV_LINK_MODE: copy
+      UV_PROJECT_ENVIRONMENT: /tmp/kortny-venv
+    volumes:
+      - .:/app
+      - uv-cache:/tmp/uv-cache
+
+volumes:
+  postgres-data:
+  uv-cache:

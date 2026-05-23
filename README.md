@@ -109,23 +109,38 @@ LLM_PROVIDER=openai          # openai | anthropic | openrouter
 LLM_API_KEY=sk-...
 LLM_MODEL=gpt-4o             # or claude-3-5-sonnet, etc.
 COMPOSIO_API_KEY=...
-POSTGRES_URL=postgresql://kortny:kortny@postgres:5432/kortny
+POSTGRES_URL=postgresql://kortny:kortny@localhost:5432/kortny
+POSTGRES_DB=kortny
+POSTGRES_USER=kortny
+POSTGRES_PASSWORD=kortny
+POSTGRES_HOST_PORT=5432
 ```
 
 ### 3. Start Kortny
 
 ```
-docker compose up -d
+docker compose up
 ```
 
-### 4. Complete setup via the management UI
+This starts Postgres on `localhost:5432` and runs the Alembic migration.
+The Slack ingress and worker services will be added to the stack as those
+entrypoints land.
 
-Visit http://localhost:3000:
-- Validate your Slack connection
-- Test your LLM provider
-- Connect your first integration (Gmail, HubSpot, GitHub, etc.)
+### 4. Develop against the local database
+
+Host-side commands use the same `POSTGRES_URL` from `.env`:
+
+```
+make migrate
+KORTNY_TEST_POSTGRES_URL=postgresql://kortny:kortny@localhost:5432/kortny uv run pytest tests/test_task_service.py tests/test_queue.py
+```
+
+Slack ingress, worker, and management UI services will be added to Compose
+as those entrypoints land.
 
 ### 5. Invite your bot to a channel
+
+Once the Slack ingress service lands and is running:
 
 ```
 /invite @your-bot-name

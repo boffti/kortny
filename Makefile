@@ -1,4 +1,4 @@
-.PHONY: install lock lint lint-fix format format-check typecheck test check migrate downgrade playground clean
+.PHONY: install lock lint lint-fix format format-check typecheck test check migrate downgrade compose-up compose-down compose-logs playground clean
 
 install:
 	uv sync
@@ -31,6 +31,15 @@ migrate:
 
 downgrade:
 	uv run alembic downgrade base
+
+compose-up:
+	docker compose up
+
+compose-down:
+	docker compose down
+
+compose-logs:
+	docker compose logs -f
 
 playground:
 	uv run adk web .

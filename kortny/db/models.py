@@ -1,10 +1,9 @@
 """
-Kortny — database models (MVP).
+Kortny — database models.
 
-These mirror the locked DBML schema 1:1: seven tables, three native Postgres
-enums. Postgres-specific types are used throughout (UUID, JSONB, BYTEA,
-timestamptz, native enums), so the canonical path to a live database is the
-Alembic migration, not Base.metadata.create_all().
+Postgres-specific types are used throughout (UUID, JSONB, BYTEA, timestamptz,
+native enums), so the canonical path to a live database is the Alembic
+migration, not Base.metadata.create_all().
 """
 
 from __future__ import annotations
@@ -16,6 +15,7 @@ from enum import StrEnum
 
 from sqlalchemy import (
     BigInteger,
+    CheckConstraint,
     ForeignKey,
     Index,
     Integer,
@@ -207,6 +207,99 @@ class TaskEvent(Base):
     )
 
     __table_args__ = (UniqueConstraint("task_id", "seq", name="idx_events_task_seq"),)
+
+
+class WorkspaceState(Base):
+    __tablename__ = "workspace_state"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    installation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("installations.id", ondelete="CASCADE"), nullable=False
+    )
+    scope_type: Mapped[str] = mapped_column(String, nullable=False)
+    scope_id: Mapped[str | None] = mapped_column(String)
+    key: Mapped[str] = mapped_column(String, nullable=False)
+    value_json: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    value_text: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    source_kind: Mapped[str] = mapped_column(String, nullable=False)
+    source_task_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("tasks.id", ondelete="SET NULL")
+    )
+    source_event_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("task_events.id", ondelete="SET NULL")
+    )
+    source_slack_channel_id: Mapped[str | None] = mapped_column(String)
+    source_slack_message_ts: Mapped[str | None] = mapped_column(String)
+    source_slack_file_id: Mapped[str | None] = mapped_column(String)
+    source_url: Mapped[str | None] = mapped_column(Text)
+    proposed_by: Mapped[str] = mapped_column(String, nullable=False)
+    proposed_reason: Mapped[str | None] = mapped_column(Text)
+    confidence_score: Mapped[Decimal | None] = mapped_column(Numeric(4, 3))
+    confidence_reason: Mapped[str | None] = mapped_column(Text)
+    confirmed_by_user_id: Mapped[str | None] = mapped_column(String)
+    confirmed_at: Mapped[datetime | None] = mapped_column(TZ)
+    rejected_by_user_id: Mapped[str | None] = mapped_column(String)
+    rejected_at: Mapped[datetime | None] = mapped_column(TZ)
+    superseded_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("workspace_state.id")
+    )
+    superseded_at: Mapped[datetime | None] = mapped_column(TZ)
+    forgotten_by_user_id: Mapped[str | None] = mapped_column(String)
+    forgotten_at: Mapped[datetime | None] = mapped_column(TZ)
+    expires_at: Mapped[datetime | None] = mapped_column(TZ)
+    created_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "scope_type in ('workspace', 'channel', 'user')",
+            name="ck_workspace_state_scope_type",
+        ),
+        CheckConstraint(
+            "status in ('proposed', 'active', 'rejected', 'superseded', 'forgotten')",
+            name="ck_workspace_state_status",
+        ),
+        CheckConstraint(
+            "source_kind in "
+            "('user_explicit', 'agent_proposed', 'summarizer_proposed', "
+            "'observer_proposed', 'import')",
+            name="ck_workspace_state_source_kind",
+        ),
+        CheckConstraint(
+            "(scope_type = 'workspace' and scope_id is null) or "
+            "(scope_type in ('channel', 'user') and scope_id is not null)",
+            name="ck_workspace_state_scope_id",
+        ),
+        Index(
+            "idx_workspace_state_active_unique",
+            "installation_id",
+            "scope_type",
+            text("coalesce(scope_id, '')"),
+            "key",
+            unique=True,
+            postgresql_where=text("status = 'active' AND expires_at IS NULL"),
+        ),
+        Index(
+            "idx_workspace_state_active_lookup",
+            "installation_id",
+            "status",
+            "scope_type",
+            "scope_id",
+        ),
+        Index(
+            "idx_workspace_state_source",
+            "source_task_id",
+            "source_event_id",
+        ),
+        Index("idx_workspace_state_expires_at", "expires_at"),
+    )
 
 
 class LLMUsage(Base):

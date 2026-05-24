@@ -40,6 +40,7 @@ IGNORED_DM_SUBTYPES = frozenset(
     }
 )
 logger = logging.getLogger(__name__)
+VERBAL_ACKS_ENABLED = False
 REACTION_CANCEL = "x"
 REACTION_RETRY = "arrows_counterclockwise"
 REACTION_CONFIRM = "white_check_mark"
@@ -106,7 +107,7 @@ class SlackIngress:
         body: Mapping[str, Any],
         event: Mapping[str, Any],
     ) -> AppMentionResult:
-        """Create a task for a Slack app_mention and post the immediate reply."""
+        """Create a task for a Slack app_mention and acknowledge it visually."""
 
         return self._handle_addressed_message(
             body=body,
@@ -641,6 +642,8 @@ def _is_thread_follow_up(event: Mapping[str, Any]) -> bool:
 
 
 def _should_skip_visible_ack(event: Mapping[str, Any], *, source: str) -> bool:
+    if not VERBAL_ACKS_ENABLED:
+        return True
     return source == "dm" or _is_thread_follow_up(event)
 
 

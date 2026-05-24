@@ -22,8 +22,7 @@ from kortny.db.models import (
 )
 from kortny.db.session import make_engine, make_session_factory, normalize_database_url
 from kortny.slack import SlackIngress, acknowledge_then_handle
-from kortny.slack.acknowledgement import ROOT_ACK_FALLBACK_TEXT
-from kortny.slack.reactions import ReactionChoice
+from kortny.slack.reactions import ACK_REACTION_ADDED_MESSAGE, ReactionChoice
 from kortny.tasks import TaskService
 
 TEST_POSTGRES_URL = os.environ.get("KORTNY_TEST_POSTGRES_URL")
@@ -157,7 +156,9 @@ def db_session(engine: Engine) -> Iterator[Session]:
         session.commit()
 
 
-def test_app_mention_creates_task_and_posts_ack_reply(db_session: Session) -> None:
+def test_app_mention_creates_task_and_adds_reaction_ack(
+    db_session: Session,
+) -> None:
     client = FakeSlackClient()
     acknowledgements = FakeAcknowledgementGenerator(
         "I'll pull together the pandas report and post it here."
@@ -182,10 +183,11 @@ def test_app_mention_creates_task_and_posts_ack_reply(db_session: Session) -> No
             TaskEvent.type == TaskEventType.message_posted,
         )
     )
+    events = task_events(db_session, result.task)
 
     assert result.created is True
     assert result.thread_ts == "1716400000.000001"
-    assert result.acknowledgement_ts == "1716400000.000001"
+    assert result.acknowledgement_ts is None
     assert installation is not None
     assert installation.slack_team_id == "T123"
     assert task is not None
@@ -195,13 +197,7 @@ def test_app_mention_creates_task_and_posts_ack_reply(db_session: Session) -> No
     assert task.slack_message_ts == "1716400000.000001"
     assert task.slack_user_id == "U123"
     assert task.input == "research pandas and make a PDF"
-    assert client.calls == [
-        {
-            "channel": "C123",
-            "text": "I'll pull together the pandas report and post it here.",
-            "thread_ts": "1716400000.000001",
-        }
-    ]
+    assert client.calls == []
     assert client.reactions == [
         {
             "channel": "C123",
@@ -209,15 +205,16 @@ def test_app_mention_creates_task_and_posts_ack_reply(db_session: Session) -> No
             "timestamp": "1716400000.000001",
         }
     ]
-    assert acknowledgements.calls == ["research pandas and make a PDF"]
+    assert acknowledgements.calls == []
     assert reactions.calls == [
         {"input_text": "research pandas and make a PDF", "source": "app_mention"}
     ]
-    assert message_event is not None
-    assert message_event.payload["purpose"] == "acknowledgement"
-    assert message_event.payload["message_ts"] == "1716400000.000001"
-    assert message_event.payload["text"] == (
-        "I'll pull together the pandas report and post it here."
+    assert message_event is None
+    assert any(
+        event.payload.get("message") == ACK_REACTION_ADDED_MESSAGE
+        and event.payload.get("reaction") == "page_facing_up"
+        and event.payload.get("reaction_intent") == "document"
+        for event in events
     )
 
 
@@ -300,13 +297,8 @@ def test_ack_reaction_failure_does_not_block_task_creation(
     assert result.created is True
     assert result.task.input == "remember that weekly recaps go on Fridays"
     assert client.reactions == []
-    assert client.calls == [
-        {
-            "channel": "C123",
-            "text": ROOT_ACK_FALLBACK_TEXT,
-            "thread_ts": "1716400000.000001",
-        }
-    ]
+    assert client.calls == []
+    assert result.acknowledgement_ts is None
     assert any(
         event.payload.get("message") == "slack_ack_reaction_failed"
         and event.payload.get("reaction") == "memo"
@@ -346,16 +338,16 @@ def test_app_mention_includes_attached_slack_file_ids_in_task_input(
     )
 
 
-def test_app_mention_ack_generation_failure_uses_fallback(
+def test_app_mention_skips_visible_ack_generation_by_default(
     db_session: Session,
 ) -> None:
     client = FakeSlackClient()
+    acknowledgements = FakeAcknowledgementGenerator(error=RuntimeError("ack failed"))
     result = SlackIngress(
         session=db_session,
         client=client,
-        acknowledgement_generator=FakeAcknowledgementGenerator(
-            error=RuntimeError("ack failed")
-        ),
+        acknowledgement_generator=acknowledgements,
+        reaction_provider=FakeReactionProvider(name="eyes", intent="working"),
     ).handle_app_mention(
         body=app_mention_body(event_id="EvMentionAckFailure"),
         event=app_mention_event(text="<@UBOT> research ack failure"),
@@ -370,8 +362,18 @@ def test_app_mention_ack_generation_failure_uses_fallback(
         )
     )
 
-    assert client.calls[0]["text"] == ROOT_ACK_FALLBACK_TEXT
-    assert any(
+    assert result.created is True
+    assert result.acknowledgement_ts is None
+    assert acknowledgements.calls == []
+    assert client.calls == []
+    assert client.reactions == [
+        {
+            "channel": "C123",
+            "name": "eyes",
+            "timestamp": "1716400000.000001",
+        }
+    ]
+    assert not any(
         event.payload.get("message") == "acknowledgement_generation_failed"
         for event in events
     )
@@ -398,8 +400,9 @@ def test_redelivered_app_mention_is_idempotent(db_session: Session) -> None:
     assert second.created is False
     assert second.task.id == first.task.id
     assert task_count == 1
-    assert message_event_count == 1
-    assert len(client.calls) == 1
+    assert message_event_count == 0
+    assert client.calls == []
+    assert len(client.reactions) == 1
 
 
 def test_app_mention_dedupes_by_slack_message_timestamp(db_session: Session) -> None:
@@ -422,7 +425,8 @@ def test_app_mention_dedupes_by_slack_message_timestamp(db_session: Session) -> 
     assert second.created is False
     assert second.task.id == first.task.id
     assert task_count == 1
-    assert len(client.calls) == 1
+    assert client.calls == []
+    assert len(client.reactions) == 1
 
 
 def test_dm_creates_task_without_visible_ack(db_session: Session) -> None:
@@ -573,7 +577,9 @@ def test_dm_messages_share_conversation_context_key(db_session: Session) -> None
     assert second.task.slack_message_ts == "1716500010.000001"
 
 
-def test_cancel_reaction_on_ack_cancels_pending_task(db_session: Session) -> None:
+def test_cancel_reaction_on_source_message_cancels_pending_task(
+    db_session: Session,
+) -> None:
     client = FakeSlackClient()
     ingress = SlackIngress(session=db_session, client=client)
     created = ingress.handle_app_mention(
@@ -587,7 +593,7 @@ def test_cancel_reaction_on_ack_cancels_pending_task(db_session: Session) -> Non
             reaction="x",
             user="U123",
             channel="C123",
-            ts=created.acknowledgement_ts or "",
+            ts="1716400000.000001",
         ),
     )
     db_session.commit()

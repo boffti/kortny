@@ -16,6 +16,7 @@ from kortny.agent.thread_context import ThreadTranscriptMessage
 from kortny.db.models import (
     Artifact,
     EncryptedSecret,
+    Episode,
     Installation,
     LLMUsage,
     ModelPricing,
@@ -27,6 +28,7 @@ from kortny.db.models import (
 )
 from kortny.db.session import make_engine, make_session_factory, normalize_database_url
 from kortny.llm import ChatMessage, Completion, TokenUsage, ToolCall
+from kortny.memory import EpisodeService
 from kortny.tasks import TaskService
 from kortny.tools import ToolArtifact, ToolRegistry, ToolResult
 from kortny.tools.types import JsonObject, JsonSchema
@@ -770,6 +772,90 @@ def test_coordinator_includes_prior_thread_context_for_follow_up(
     assert transcript_provider.calls == [("C123", "1716400000.000001", 30)]
 
 
+def test_context_assembler_includes_relevant_episode_context(
+    db_session: Session,
+) -> None:
+    installation = create_installation(db_session)
+    service = TaskService(db_session)
+    prior = create_task(
+        db_session,
+        input_text="research PYPL market sentiment and make a report",
+        installation=installation,
+        slack_event_id="EvEpisodePrior",
+        slack_thread_ts="1716500000.000001",
+        slack_message_ts="1716500000.000001",
+        created_at=datetime(2026, 5, 23, 15, 0, tzinfo=UTC),
+    )
+    prior.result_summary = "Generated a PYPL report with market sentiment."
+    service.append_event(
+        prior,
+        TaskEventType.tool_call,
+        {
+            "turn": 1,
+            "tool_call_id": "call-search",
+            "tool": "web_search",
+            "arguments": {"query": "PYPL market sentiment"},
+        },
+    )
+    service.append_event(
+        prior,
+        TaskEventType.tool_result,
+        {
+            "turn": 1,
+            "tool_call_id": "call-search",
+            "tool": "web_search",
+            "output": {
+                "provider": "brave",
+                "query": "PYPL market sentiment",
+                "results": [
+                    {
+                        "title": "PayPal Holdings Market News",
+                        "url": "https://example.com/pypl-market-news",
+                        "snippet": "Analysts discussed PayPal sentiment.",
+                    }
+                ],
+            },
+            "cost_usd": "0",
+            "artifacts": [],
+        },
+    )
+    db_session.add(
+        Artifact(
+            task_id=prior.id,
+            filename="pypl_report_v2.pdf",
+            mime_type="application/pdf",
+            size_bytes=8192,
+            slack_file_id="FPYPLV2",
+        )
+    )
+    service.transition(prior, TaskStatus.succeeded)
+    episode = EpisodeService(db_session).record_task(prior)
+    assert episode is not None
+
+    current = create_task(
+        db_session,
+        input_text="what did you do for the PYPL report recently?",
+        installation=installation,
+        slack_event_id="EvEpisodeCurrent",
+        slack_thread_ts="1716600000.000001",
+        slack_message_ts="1716600000.000001",
+        created_at=datetime(2026, 5, 23, 15, 5, tzinfo=UTC),
+    )
+
+    package = ContextAssembler(session=db_session).build_for_task(current)
+    episode_context = episode_context_message(package.messages)
+
+    assert "<recent_episodes>" in episode_context
+    assert "relation=same_channel" in episode_context
+    assert "Generated a PYPL report with market sentiment." in episode_context
+    assert "pypl_report_v2.pdf" in episode_context
+    assert "https://example.com/pypl-market-news" in episode_context
+    assert package.selected_episodes[0].episode_id == episode.id
+    assert package.selected_episodes[0].task_id == prior.id
+    assert package.selected_episodes[0].relation == "same_channel"
+    assert package.budget.episode_context_chars == len(episode_context)
+
+
 def test_coordinator_orders_three_turn_thread_context(db_session: Session) -> None:
     installation = create_installation(db_session)
     first = create_task(
@@ -1269,6 +1355,7 @@ def cleanup_database(session: Session) -> None:
     session.execute(update(WorkspaceState).values(superseded_by_id=None))
     for model in (
         WorkspaceState,
+        Episode,
         Artifact,
         LLMUsage,
         TaskEvent,
@@ -1358,6 +1445,13 @@ def prior_context_message(messages: Sequence[ChatMessage]) -> str:
         if message.content and "<prior_context>" in message.content:
             return message.content
     raise AssertionError("No prior_context message found")
+
+
+def episode_context_message(messages: Sequence[ChatMessage]) -> str:
+    for message in messages:
+        if message.content and "<recent_episodes>" in message.content:
+            return message.content
+    raise AssertionError("No recent_episodes message found")
 
 
 def visible_acknowledgement_message(messages: Sequence[ChatMessage]) -> str:

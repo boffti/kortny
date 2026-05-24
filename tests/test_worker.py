@@ -17,6 +17,7 @@ from kortny.config.settings import Settings
 from kortny.db.models import (
     Artifact,
     EncryptedSecret,
+    Episode,
     Installation,
     LLMProvider,
     LLMUsage,
@@ -131,6 +132,10 @@ def test_worker_run_once_processes_pending_task(
         "message": "task_executor_completed",
         "worker_id": "worker-test",
     }
+    episode = db_session.scalar(select(Episode).where(Episode.task_id == task.id))
+    assert episode is not None
+    assert episode.outcome == TaskStatus.succeeded.value
+    assert episode.summary == task.result_summary
 
 
 def test_worker_run_once_is_idle_without_pending_task(
@@ -181,6 +186,14 @@ def test_worker_marks_task_failed_when_handler_raises(
     assert task.error is not None
     assert task.error["type"] == "RuntimeError"
     assert task.locked_by is None
+    episode = db_session.scalar(select(Episode).where(Episode.task_id == task.id))
+    assert episode is not None
+    assert episode.outcome == TaskStatus.failed.value
+    assert episode.error_json == {
+        "type": "RuntimeError",
+        "message": f"boom {task.id}",
+        "worker_id": "worker-test",
+    }
 
     events = task_events(db_session, task)
     assert events[-2].type is TaskEventType.error
@@ -718,6 +731,7 @@ def test_agent_executor_posts_generic_failure_notice_for_setup_errors(
 
 def cleanup_database(session: Session) -> None:
     for model in (
+        Episode,
         Artifact,
         LLMUsage,
         TaskEvent,

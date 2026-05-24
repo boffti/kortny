@@ -8,6 +8,7 @@ def test_mvp_schema_declares_all_core_tables() -> None:
         "tasks",
         "task_events",
         "workspace_state",
+        "episodes",
         "llm_usage",
         "artifacts",
         "model_pricing",
@@ -70,4 +71,17 @@ def test_workspace_state_table_has_memory_policy_constraints_and_indexes() -> No
         "idx_workspace_state_active_lookup",
         "idx_workspace_state_source",
         "idx_workspace_state_expires_at",
+    } <= index_names
+
+
+def test_episode_table_has_bounded_retrieval_indexes() -> None:
+    episodes = Base.metadata.tables["episodes"]
+    constraint_names = {constraint.name for constraint in episodes.constraints}
+    index_names = {index.name for index in episodes.indexes}
+
+    assert {"ck_episodes_outcome", "idx_episodes_task_unique"} <= constraint_names
+    assert {
+        "idx_episodes_thread",
+        "idx_episodes_channel",
+        "idx_episodes_user",
     } <= index_names

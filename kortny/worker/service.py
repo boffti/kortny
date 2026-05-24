@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from kortny.db.models import Task, TaskEventType, TaskStatus
 from kortny.db.session import make_session_factory
 from kortny.logging_config import configure_logging
+from kortny.memory import EpisodeService
 from kortny.queue import TaskQueue
 from kortny.queue.service import DEFAULT_LEASE_SECONDS
 from kortny.tasks import TaskCancelledError, TaskService
@@ -130,6 +131,7 @@ class TaskWorker:
                     },
                 )
                 task_service.transition(task, TaskStatus.succeeded)
+                self._record_episode(session, task)
                 logger.info(
                     "worker succeeded task_id=%s worker_id=%s",
                     task.id,
@@ -162,6 +164,7 @@ class TaskWorker:
                     task_service.cancel_task(task, reason="worker_cancelled")
                 else:
                     session.commit()
+                self._record_episode(session, task)
                 logger.info(
                     "worker cancelled task_id=%s worker_id=%s",
                     task.id,
@@ -197,6 +200,7 @@ class TaskWorker:
                     },
                 )
                 task_service.transition(task, TaskStatus.failed)
+                self._record_episode(session, task)
                 logger.exception(
                     "worker failed task_id=%s worker_id=%s",
                     task.id,
@@ -223,6 +227,13 @@ class TaskWorker:
         task.locked_at = None
         task.lease_expires_at = None
         task.updated_at = datetime.now(UTC)
+
+    @staticmethod
+    def _record_episode(session: Session, task: Task) -> None:
+        try:
+            EpisodeService(session, commit_after_write=True).record_task(task)
+        except Exception:
+            logger.exception("failed to record task episode task_id=%s", task.id)
 
 
 def walking_skeleton_handler(task: Task) -> str:

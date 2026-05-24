@@ -302,6 +302,52 @@ class WorkspaceState(Base):
     )
 
 
+class Episode(Base):
+    __tablename__ = "episodes"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    installation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("installations.id", ondelete="CASCADE"), nullable=False
+    )
+    task_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False
+    )
+    channel_id: Mapped[str] = mapped_column(String, nullable=False)
+    user_id: Mapped[str] = mapped_column(String, nullable=False)
+    thread_ts: Mapped[str | None] = mapped_column(String)
+    summary: Mapped[str] = mapped_column(Text, nullable=False)
+    tools_used: Mapped[list] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb")
+    )
+    artifacts_created: Mapped[list] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb")
+    )
+    source_refs: Mapped[list] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb")
+    )
+    outcome: Mapped[str] = mapped_column(String, nullable=False)
+    error_json: Mapped[dict | None] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "outcome in ('succeeded', 'failed', 'cancelled')",
+            name="ck_episodes_outcome",
+        ),
+        UniqueConstraint("task_id", name="idx_episodes_task_unique"),
+        Index("idx_episodes_thread", "installation_id", "channel_id", "thread_ts"),
+        Index("idx_episodes_channel", "installation_id", "channel_id", "created_at"),
+        Index("idx_episodes_user", "installation_id", "user_id", "created_at"),
+    )
+
+
 class LLMUsage(Base):
     __tablename__ = "llm_usage"
 

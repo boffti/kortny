@@ -18,13 +18,15 @@ from kortny.agent.thread_context import (
 )
 from kortny.db.models import Artifact, Task, TaskEvent, TaskEventType
 from kortny.llm import ChatMessage
-from kortny.memory import Fact, WorkspaceStateService
+from kortny.memory import EpisodeService, Fact, RelevantEpisode, WorkspaceStateService
 from kortny.tasks import TaskService
 
 DEFAULT_THREAD_CONTEXT_MAX_CHARS = 12_000
 DEFAULT_THREAD_CONTEXT_RECENT_TASKS = 3
 DEFAULT_THREAD_TRANSCRIPT_LIMIT = 30
 DEFAULT_KNOWN_FACTS_MAX_CHARS = 4_000
+DEFAULT_EPISODE_CONTEXT_MAX_CHARS = 4_000
+DEFAULT_EPISODE_CONTEXT_LIMIT = 5
 IMMEDIATE_PRIOR_INPUT_MAX_CHARS = 500
 IMMEDIATE_PRIOR_RESULT_MAX_CHARS = 1_800
 SLACK_FILES_BLOCK_RE = re.compile(r"<slack_files>\s*(.*?)\s*</slack_files>", re.S)
@@ -58,6 +60,16 @@ class ContextTask:
 
 
 @dataclass(frozen=True, slots=True)
+class ContextEpisode:
+    """A prior episode selected for episodic context."""
+
+    episode_id: uuid.UUID
+    task_id: uuid.UUID
+    relation: str
+    outcome: str
+
+
+@dataclass(frozen=True, slots=True)
 class ContextArtifact:
     """An artifact selected for thread context."""
 
@@ -88,6 +100,9 @@ class ContextBudget:
     prior_context_chars: int
     thread_context_recent_tasks: int
     thread_transcript_limit: int
+    episode_context_max_chars: int
+    episode_context_chars: int
+    episode_context_limit: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,6 +121,7 @@ class ContextPackage:
     messages: tuple[ChatMessage, ...]
     selected_facts: tuple[ContextFact, ...]
     selected_prior_tasks: tuple[ContextTask, ...]
+    selected_episodes: tuple[ContextEpisode, ...]
     selected_artifacts: tuple[ContextArtifact, ...]
     acknowledgement: ContextAcknowledgement | None
     budget: ContextBudget
@@ -127,6 +143,13 @@ class _PriorContext:
     omissions: tuple[ContextOmission, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class _EpisodeContext:
+    content: str | None
+    selected_episodes: tuple[ContextEpisode, ...]
+    omissions: tuple[ContextOmission, ...]
+
+
 class ContextAssembler:
     """Builds the LLM message context for a task."""
 
@@ -141,6 +164,8 @@ class ContextAssembler:
         thread_context_recent_tasks: int = DEFAULT_THREAD_CONTEXT_RECENT_TASKS,
         thread_transcript_limit: int = DEFAULT_THREAD_TRANSCRIPT_LIMIT,
         known_facts_max_chars: int = DEFAULT_KNOWN_FACTS_MAX_CHARS,
+        episode_context_max_chars: int = DEFAULT_EPISODE_CONTEXT_MAX_CHARS,
+        episode_context_limit: int = DEFAULT_EPISODE_CONTEXT_LIMIT,
     ) -> None:
         if thread_context_max_chars < 1:
             raise ValueError("thread_context_max_chars must be at least 1")
@@ -150,6 +175,10 @@ class ContextAssembler:
             raise ValueError("thread_transcript_limit cannot be negative")
         if known_facts_max_chars < 0:
             raise ValueError("known_facts_max_chars cannot be negative")
+        if episode_context_max_chars < 0:
+            raise ValueError("episode_context_max_chars cannot be negative")
+        if episode_context_limit < 0:
+            raise ValueError("episode_context_limit cannot be negative")
 
         self.session = session
         self.task_service = task_service or TaskService(session)
@@ -159,10 +188,13 @@ class ContextAssembler:
         self.thread_context_recent_tasks = thread_context_recent_tasks
         self.thread_transcript_limit = thread_transcript_limit
         self.known_facts_max_chars = known_facts_max_chars
+        self.episode_context_max_chars = episode_context_max_chars
+        self.episode_context_limit = episode_context_limit
         self.workspace_state_service = WorkspaceStateService(
             session,
             task_service=self.task_service,
         )
+        self.episode_service = EpisodeService(session)
 
     def build_for_task(self, task: Task) -> ContextPackage:
         """Build prompt messages and context-selection metadata."""
@@ -188,12 +220,17 @@ class ContextAssembler:
         if prior_context.content:
             messages.append(ChatMessage(role="system", content=prior_context.content))
 
+        episode_context = self._episode_context(task)
+        if episode_context.content:
+            messages.append(ChatMessage(role="system", content=episode_context.content))
+
         messages.append(ChatMessage(role="user", content=task.input))
 
         return ContextPackage(
             messages=tuple(messages),
             selected_facts=known_facts.selected_facts,
             selected_prior_tasks=prior_context.selected_prior_tasks,
+            selected_episodes=episode_context.selected_episodes,
             selected_artifacts=prior_context.selected_artifacts,
             acknowledgement=acknowledgement,
             budget=ContextBudget(
@@ -204,8 +241,15 @@ class ContextAssembler:
                 prior_context_chars=len(prior_context.content or ""),
                 thread_context_recent_tasks=self.thread_context_recent_tasks,
                 thread_transcript_limit=self.thread_transcript_limit,
+                episode_context_max_chars=self.episode_context_max_chars,
+                episode_context_chars=len(episode_context.content or ""),
+                episode_context_limit=self.episode_context_limit,
             ),
-            omissions=known_facts.omissions + prior_context.omissions,
+            omissions=(
+                known_facts.omissions
+                + prior_context.omissions
+                + episode_context.omissions
+            ),
         )
 
     def _acknowledgement_context(self, task: Task) -> ContextAcknowledgement | None:
@@ -366,6 +410,59 @@ class ContextAssembler:
             selected_prior_tasks=selected_prior_tasks,
             selected_artifacts=compact.selected_artifacts,
             omissions=omissions,
+        )
+
+    def _episode_context(self, task: Task) -> _EpisodeContext:
+        if self.episode_context_max_chars == 0 or self.episode_context_limit == 0:
+            return _EpisodeContext(
+                content=None,
+                selected_episodes=(),
+                omissions=(ContextOmission("episodes", "budget_disabled", 0),),
+            )
+
+        episodes = list(
+            self.episode_service.relevant_for_task(
+                task,
+                limit=self.episode_context_limit,
+            )
+        )
+        if not episodes:
+            return _EpisodeContext(content=None, selected_episodes=(), omissions=())
+
+        dropped = 0
+        rendered = _render_episode_context(episodes)
+        while len(rendered) > self.episode_context_max_chars and episodes:
+            episodes.pop()
+            dropped += 1
+            rendered = _render_episode_context(episodes)
+
+        omissions: list[ContextOmission] = []
+        if dropped:
+            omissions.append(
+                ContextOmission(
+                    "episodes",
+                    "budget_exceeded_drop_lowest_relevance",
+                    dropped,
+                )
+            )
+        if not episodes or len(rendered) > self.episode_context_max_chars:
+            omissions.append(
+                ContextOmission(
+                    "episodes",
+                    "budget_too_small_for_remaining_episodes",
+                    len(episodes),
+                )
+            )
+            return _EpisodeContext(
+                content=None,
+                selected_episodes=(),
+                omissions=tuple(omissions),
+            )
+
+        return _EpisodeContext(
+            content=rendered,
+            selected_episodes=tuple(_context_episode(item) for item in episodes),
+            omissions=tuple(omissions),
         )
 
     def _fetch_thread_transcript(
@@ -586,6 +683,15 @@ def _context_task(task: Task) -> ContextTask:
     )
 
 
+def _context_episode(item: RelevantEpisode) -> ContextEpisode:
+    return ContextEpisode(
+        episode_id=item.episode.id,
+        task_id=item.episode.task_id,
+        relation=item.relation,
+        outcome=item.episode.outcome,
+    )
+
+
 def _context_artifact(artifact: Artifact) -> ContextArtifact:
     return ContextArtifact(
         artifact_id=artifact.id,
@@ -643,6 +749,72 @@ def _render_known_facts(facts: Sequence[Fact]) -> str:
             lines.append(_known_fact_line(fact))
     lines.append("</known_facts>")
     return "\n".join(lines)
+
+
+def _render_episode_context(episodes: Sequence[RelevantEpisode]) -> str:
+    lines = [
+        "<recent_episodes>",
+        "Bounded episodic memory from prior Kortny tasks. Use this to resolve "
+        "references to prior work, artifacts, sources, failures, or decisions. "
+        "Do not treat these as confirmed user/workspace facts; confirmed facts "
+        "are supplied separately in known_facts.",
+    ]
+    for index, item in enumerate(episodes, start=1):
+        episode = item.episode
+        tools = ", ".join(episode.tools_used) if episode.tools_used else "none"
+        lines.append(
+            f"- {index}. relation={item.relation} episode_id={episode.id} "
+            f"task_id={episode.task_id} outcome={episode.outcome} "
+            f"channel={episode.channel_id} thread_ts={episode.thread_ts or ''} "
+            f"user={episode.user_id} tools={_quote(tools)} "
+            f"summary={_quote(_shorten(episode.summary, max_chars=500))}"
+        )
+        if episode.artifacts_created:
+            lines.append("  artifacts:")
+            for artifact in episode.artifacts_created[:5]:
+                lines.append(f"  - {_episode_artifact_line(artifact)}")
+        if episode.source_refs:
+            lines.append("  sources:")
+            for source in episode.source_refs[:5]:
+                lines.append(f"  - {_episode_source_line(source)}")
+        if episode.error:
+            lines.append(
+                "  error: "
+                f"{_quote(_shorten(_json_dumps(episode.error), max_chars=360))}"
+            )
+    lines.append("</recent_episodes>")
+    return "\n".join(lines)
+
+
+def _episode_artifact_line(artifact: dict[str, object]) -> str:
+    details: list[str] = []
+    filename = artifact.get("filename")
+    if isinstance(filename, str):
+        details.append(f"filename={_quote(filename)}")
+    slack_file_id = artifact.get("slack_file_id")
+    if isinstance(slack_file_id, str):
+        details.append(f"slack_file_id={slack_file_id}")
+    mime_type = artifact.get("mime_type")
+    if isinstance(mime_type, str):
+        details.append(f"mime_type={_quote(mime_type)}")
+    size_bytes = artifact.get("size_bytes")
+    if isinstance(size_bytes, int):
+        details.append(f"size_bytes={size_bytes}")
+    return " ".join(details) if details else _json_dumps(artifact)
+
+
+def _episode_source_line(source: dict[str, object]) -> str:
+    details: list[str] = []
+    query = source.get("query")
+    if isinstance(query, str):
+        details.append(f"query={_quote(_shorten(query, max_chars=120))}")
+    title = source.get("title")
+    if isinstance(title, str):
+        details.append(f"title={_quote(_shorten(title, max_chars=160))}")
+    url = source.get("url")
+    if isinstance(url, str):
+        details.append(f"url={url}")
+    return " ".join(details) if details else _json_dumps(source)
 
 
 def _known_fact_scope_label(scope_type: str) -> str:

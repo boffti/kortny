@@ -184,6 +184,55 @@ def test_worker_marks_task_failed_when_handler_raises(
     assert events[-1].payload["to"] == TaskStatus.failed.value
 
 
+def test_worker_exits_cleanly_when_task_is_cancelled_cooperatively(
+    db_session: Session,
+    worker_session_factory: sessionmaker[Session],
+) -> None:
+    claim_time = datetime(2026, 5, 23, 9, 35, tzinfo=UTC)
+    task = create_task(db_session, event_id="EvWorkerCancel")
+    task.available_at = claim_time - timedelta(seconds=1)
+    db_session.commit()
+
+    class CancellingExecutor:
+        def execute(
+            self,
+            *,
+            session: Session,
+            task: Task,
+            task_service: TaskService,
+        ) -> TaskExecutionResult:
+            task_service.cancel_task(task, by_user_id=task.slack_user_id)
+            task_service.raise_if_cancelled(task, phase="test_executor")
+            return TaskExecutionResult(result_summary="should not be used")
+
+    result = TaskWorker(
+        session_factory=worker_session_factory,
+        worker_id="worker-test",
+        executor=CancellingExecutor(),
+    ).run_once(now=claim_time)
+
+    db_session.refresh(task)
+    events = task_events(db_session, task)
+
+    assert result.status == TaskStatus.cancelled.value
+    assert result.task_id == task.id
+    assert task.status is TaskStatus.cancelled
+    assert task.result_summary is None
+    assert task.error is None
+    assert task.locked_by is None
+    assert task.lease_expires_at is None
+    assert any(
+        event.payload.get("message") == "task_executor_cancelled"
+        for event in events
+        if event.type is TaskEventType.log
+    )
+    assert not any(
+        event.payload.get("message") == "task_executor_failed"
+        for event in events
+        if event.type is TaskEventType.error
+    )
+
+
 def test_worker_runs_agent_flow_and_posts_pdf(
     db_session: Session,
     worker_session_factory: sessionmaker[Session],

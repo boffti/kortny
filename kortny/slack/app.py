@@ -94,6 +94,30 @@ def create_bolt_app(
 
         acknowledge_then_handle(ack, handle)
 
+    @app.event("reaction_added")
+    def handle_reaction_added(
+        ack: Callable[[], None],
+        body: dict[str, Any],
+        event: dict[str, Any],
+        client: Any,
+        logger: Any,
+    ) -> None:
+        def handle() -> None:
+            try:
+                with session_scope(session_factory) as session:
+                    SlackIngress(
+                        session=session,
+                        client=client,
+                    ).handle_reaction_added(
+                        body=body,
+                        event=event,
+                    )
+            except Exception:
+                logger.exception("Failed to process Slack reaction_added event")
+                raise
+
+        acknowledge_then_handle(ack, handle)
+
     return app
 
 

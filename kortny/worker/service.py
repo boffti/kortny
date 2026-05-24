@@ -19,7 +19,7 @@ from kortny.db.session import make_session_factory
 from kortny.logging_config import configure_logging
 from kortny.queue import TaskQueue
 from kortny.queue.service import DEFAULT_LEASE_SECONDS
-from kortny.tasks import TaskService
+from kortny.tasks import TaskCancelledError, TaskService
 from kortny.worker.agent_executor import AgentTaskExecutor, TaskExecutor
 
 DEFAULT_POLL_INTERVAL_SECONDS = 2.0
@@ -88,9 +88,10 @@ class TaskWorker:
                     reclaimed_task_ids=reclaimed_task_ids,
                 )
 
+            task_id = task.id
             logger.info(
                 "worker claimed task task_id=%s worker_id=%s input_len=%s",
-                task.id,
+                task_id,
                 self.worker_id,
                 len(task.input),
             )
@@ -103,12 +104,20 @@ class TaskWorker:
                 },
             )
 
+        with self.session_factory() as session:
+            task_service = TaskService(session, commit_after_write=True)
+            task = task_service.get_task(task_id)
+            if task is None:
+                raise LookupError(f"Task not found after claim: {task_id}")
+
             try:
+                task_service.raise_if_cancelled(task, phase="before_executor")
                 execution_result = self.executor.execute(
                     session=session,
                     task=task,
                     task_service=task_service,
                 )
+                task_service.raise_if_cancelled(task, phase="after_executor")
                 task.result_summary = execution_result.result_summary
                 task.error = None
                 self._clear_lease(task)
@@ -132,7 +141,45 @@ class TaskWorker:
                     task_id=task.id,
                     reclaimed_task_ids=reclaimed_task_ids,
                 )
+            except TaskCancelledError:
+                session.rollback()
+                task = task_service.get_task(task_id)
+                if task is None:
+                    raise LookupError(
+                        f"Task not found after cancellation: {task_id}"
+                    ) from None
+                self._clear_lease(task)
+                task.error = None
+                task_service.append_event(
+                    task,
+                    TaskEventType.log,
+                    {
+                        "message": "task_executor_cancelled",
+                        "worker_id": self.worker_id,
+                    },
+                )
+                if TaskStatus(task.status) is not TaskStatus.cancelled:
+                    task_service.cancel_task(task, reason="worker_cancelled")
+                else:
+                    session.commit()
+                logger.info(
+                    "worker cancelled task_id=%s worker_id=%s",
+                    task.id,
+                    self.worker_id,
+                )
+                return WorkerRunResult(
+                    worker_id=self.worker_id,
+                    status=TaskStatus.cancelled.value,
+                    task_id=task.id,
+                    reclaimed_task_ids=reclaimed_task_ids,
+                )
             except Exception as exc:
+                session.rollback()
+                task = task_service.get_task(task_id)
+                if task is None:
+                    raise LookupError(
+                        f"Task not found after failure: {task_id}"
+                    ) from exc
                 task.error = {
                     "type": type(exc).__name__,
                     "message": str(exc),

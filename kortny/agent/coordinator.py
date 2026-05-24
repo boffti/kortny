@@ -147,7 +147,11 @@ class AgentCoordinator:
         )
 
         for turn in range(1, self.max_turns + 1):
+            self.task_service.raise_if_cancelled(task_obj, phase=f"before_turn_{turn}")
             completion = self._complete_turn(task_obj, messages, schemas, turn)
+            self.task_service.raise_if_cancelled(
+                task_obj, phase=f"after_turn_{turn}_completion"
+            )
             messages.append(
                 ChatMessage(
                     role="assistant",
@@ -231,6 +235,9 @@ class AgentCoordinator:
     ) -> int:
         artifact_count = 0
         for tool_call in completion.tool_calls:
+            self.task_service.raise_if_cancelled(
+                task_obj, phase=f"before_tool_{tool_call.name}"
+            )
             arguments = self._tool_arguments(task_obj, tool_call)
             self.task_service.append_event(
                 task_obj,
@@ -257,6 +264,9 @@ class AgentCoordinator:
                 )
                 raise
 
+            self.task_service.raise_if_cancelled(
+                task_obj, phase=f"after_tool_{tool_call.name}"
+            )
             artifact_count += len(result.artifacts)
             result_payload = _tool_result_payload(tool_call.name, result)
             self.task_service.append_event(

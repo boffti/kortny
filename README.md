@@ -187,17 +187,6 @@ Your AI coworker is live.
 
 ---
 
-## Documentation
-
-Full documentation lives in [/docs](./docs):
-
-- [Configuration reference](./docs/configuration.md)
-- [Adding integrations](./docs/integrations.md)
-- [Architecture overview](./docs/architecture.md)
-- [Self-hosting guide](./docs/self-hosting.md)
-
----
-
 ## Development
 
 Kortny uses `uv` for Python dependency management and local tooling.

@@ -19,13 +19,22 @@ TERMINAL_STATUSES = {
     DbTaskStatus.failed,
     DbTaskStatus.cancelled,
 }
+CANCELLABLE_STATUSES = {
+    DbTaskStatus.pending,
+    DbTaskStatus.running,
+}
+
+
+class TaskCancelledError(RuntimeError):
+    """Raised when cooperative execution observes a cancelled task."""
 
 
 class TaskRepository:
     """Repository for task, event, and usage persistence."""
 
-    def __init__(self, session: Session) -> None:
+    def __init__(self, session: Session, *, commit_after_write: bool = False) -> None:
         self.session = session
+        self.commit_after_write = commit_after_write
 
     def create_task(
         self,
@@ -108,6 +117,44 @@ class TaskRepository:
             .limit(1)
         )
 
+    def get_by_slack_message(self, channel: str, message_ts: str) -> Task | None:
+        """Return the newest task triggered by a Slack message."""
+
+        return self.session.scalar(
+            select(Task)
+            .where(
+                Task.slack_channel_id == channel,
+                Task.slack_message_ts == message_ts,
+            )
+            .order_by(Task.created_at.desc())
+            .limit(1)
+        )
+
+    def get_by_slack_reaction_target(
+        self, channel: str, message_ts: str
+    ) -> Task | None:
+        """Return the newest task associated with a reacted Slack message."""
+
+        direct = self.get_by_slack_message(channel, message_ts)
+        posted = self.session.scalar(
+            select(Task)
+            .join(TaskEvent, TaskEvent.task_id == Task.id)
+            .where(
+                Task.slack_channel_id == channel,
+                TaskEvent.type == TaskEventType.message_posted,
+                TaskEvent.payload["message_ts"].as_string() == message_ts,
+            )
+            .order_by(TaskEvent.created_at.desc(), Task.created_at.desc())
+            .limit(1)
+        )
+        if direct is None:
+            return posted
+        if posted is None:
+            return direct
+        if posted.created_at >= direct.created_at:
+            return posted
+        return direct
+
     def list_by_thread(self, channel: str, thread_ts: str) -> list[Task]:
         """Return tasks in a Slack channel/thread pair in creation order."""
 
@@ -145,6 +192,89 @@ class TaskRepository:
         )
         return task_obj
 
+    def cancel_task(
+        self,
+        task: Task | uuid.UUID,
+        *,
+        by_user_id: str | None = None,
+        reason: str = "reaction_cancel",
+    ) -> Task | None:
+        """Cancel a pending/running task and make the status terminal."""
+
+        task_obj = self._resolve_task(task, for_update=True)
+        previous_status = DbTaskStatus(task_obj.status)
+        if previous_status not in CANCELLABLE_STATUSES:
+            return None
+
+        now = datetime.now(UTC)
+        task_obj.status = DbTaskStatus.cancelled
+        task_obj.finished_at = now
+        task_obj.updated_at = now
+        _clear_task_lease(task_obj)
+        self.session.flush()
+        self.append_event(
+            task_obj,
+            TaskEventType.status_changed,
+            {
+                "from": previous_status.value,
+                "to": DbTaskStatus.cancelled.value,
+                "reason": reason,
+                "by_user_id": by_user_id,
+            },
+        )
+        return task_obj
+
+    def retry_failed_task(
+        self,
+        task: Task | uuid.UUID,
+        *,
+        by_user_id: str | None = None,
+        reason: str = "reaction_retry",
+        available_at: datetime | None = None,
+    ) -> Task | None:
+        """Requeue a failed task for a manual retry."""
+
+        task_obj = self._resolve_task(task, for_update=True)
+        previous_status = DbTaskStatus(task_obj.status)
+        if previous_status is not DbTaskStatus.failed:
+            return None
+
+        retry_at = available_at or datetime.now(UTC)
+        task_obj.status = DbTaskStatus.pending
+        task_obj.attempts = 0
+        task_obj.available_at = retry_at
+        task_obj.started_at = None
+        task_obj.finished_at = None
+        task_obj.error = None
+        task_obj.updated_at = retry_at
+        _clear_task_lease(task_obj)
+        self.session.flush()
+        self.append_event(
+            task_obj,
+            TaskEventType.status_changed,
+            {
+                "from": previous_status.value,
+                "to": DbTaskStatus.pending.value,
+                "reason": reason,
+                "by_user_id": by_user_id,
+            },
+        )
+        return task_obj
+
+    def raise_if_cancelled(
+        self,
+        task: Task | uuid.UUID,
+        *,
+        phase: str | None = None,
+    ) -> None:
+        """Refresh a task status and abort cooperative execution if cancelled."""
+
+        task_obj = self._resolve_task(task)
+        self.session.refresh(task_obj, attribute_names=["status"])
+        if DbTaskStatus(task_obj.status) is DbTaskStatus.cancelled:
+            suffix = f" during {phase}" if phase else ""
+            raise TaskCancelledError(f"Task {task_obj.id} was cancelled{suffix}")
+
     def append_event(
         self,
         task: Task | uuid.UUID,
@@ -162,6 +292,7 @@ class TaskRepository:
         )
         self.session.add(event)
         self.session.flush()
+        self._commit_if_requested()
         return event
 
     def record_llm_usage(
@@ -212,6 +343,7 @@ class TaskRepository:
         self.session.add(usage)
         self.session.flush()
         self._refresh_usage_rollup(task_obj)
+        self._commit_if_requested()
         return usage
 
     def _resolve_task(
@@ -258,6 +390,10 @@ class TaskRepository:
         task.updated_at = datetime.now(UTC)
         self.session.flush()
 
+    def _commit_if_requested(self) -> None:
+        if self.commit_after_write:
+            self.session.commit()
+
 
 def _status_value(status: DbTaskStatus | str | None) -> str | None:
     if status is None:
@@ -269,3 +405,9 @@ def _coerce_decimal(value: Decimal | int | str) -> Decimal:
     if isinstance(value, Decimal):
         return value
     return Decimal(str(value))
+
+
+def _clear_task_lease(task: Task) -> None:
+    task.locked_by = None
+    task.locked_at = None
+    task.lease_expires_at = None

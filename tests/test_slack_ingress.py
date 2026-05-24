@@ -18,6 +18,7 @@ from kortny.db.models import (
     Task,
     TaskEvent,
     TaskEventType,
+    TaskStatus,
 )
 from kortny.db.session import make_engine, make_session_factory, normalize_database_url
 from kortny.slack import SlackIngress, acknowledge_then_handle
@@ -465,6 +466,150 @@ def test_dm_messages_share_conversation_context_key(db_session: Session) -> None
     assert second.task.slack_message_ts == "1716500010.000001"
 
 
+def test_cancel_reaction_on_ack_cancels_pending_task(db_session: Session) -> None:
+    client = FakeSlackClient()
+    ingress = SlackIngress(session=db_session, client=client)
+    created = ingress.handle_app_mention(
+        body=app_mention_body(event_id="EvCancelAck"),
+        event=app_mention_event(text="<@UBOT> do a cancellable task"),
+    )
+
+    result = ingress.handle_reaction_added(
+        body=app_mention_body(event_id="EvReactionCancel"),
+        event=reaction_event(
+            reaction="x",
+            user="U123",
+            channel="C123",
+            ts=created.acknowledgement_ts or "",
+        ),
+    )
+    db_session.commit()
+
+    db_session.refresh(created.task)
+    events = task_events(db_session, created.task)
+
+    assert result.handled is True
+    assert result.action == "cancel"
+    assert created.task.status is TaskStatus.cancelled
+    assert events[-1].type is TaskEventType.status_changed
+    assert events[-1].payload["to"] == "cancelled"
+    assert events[-1].payload["by_user_id"] == "U123"
+
+
+def test_cancel_reaction_cancels_running_task(db_session: Session) -> None:
+    installation = create_installation(db_session)
+    service = TaskService(db_session)
+    task = service.create_task(
+        installation_id=installation.id,
+        slack_event_id="EvRunningCancel",
+        slack_channel_id="C123",
+        slack_thread_ts="1716401000.000001",
+        slack_message_ts="1716401000.000001",
+        slack_user_id="U123",
+        input="long running work",
+    )
+    service.transition(task, TaskStatus.running)
+
+    result = SlackIngress(
+        session=db_session,
+        client=FakeSlackClient(),
+    ).handle_reaction_added(
+        body=app_mention_body(event_id="EvReactionRunningCancel"),
+        event=reaction_event(
+            reaction="x",
+            user="U123",
+            channel="C123",
+            ts="1716401000.000001",
+        ),
+    )
+
+    assert result.handled is True
+    assert result.action == "cancel"
+    assert task.status is TaskStatus.cancelled
+    assert task.locked_by is None
+    assert task.lease_expires_at is None
+
+
+def test_retry_reaction_requeues_failed_task_from_failure_notice(
+    db_session: Session,
+) -> None:
+    installation = create_installation(db_session)
+    service = TaskService(db_session)
+    task = service.create_task(
+        installation_id=installation.id,
+        slack_event_id="EvRetryFailed",
+        slack_channel_id="C123",
+        slack_thread_ts="1716402000.000001",
+        slack_message_ts="1716402000.000001",
+        slack_user_id="U123",
+        input="retry me",
+    )
+    service.transition(task, TaskStatus.running)
+    service.transition(task, TaskStatus.failed)
+    task.attempts = 2
+    task.error = {"type": "RuntimeError", "message": "boom"}
+    service.append_event(
+        task,
+        TaskEventType.message_posted,
+        {
+            "channel": "C123",
+            "thread_ts": "1716402000.000001",
+            "message_ts": "1716402001.000001",
+            "purpose": "failure",
+        },
+    )
+
+    result = SlackIngress(
+        session=db_session,
+        client=FakeSlackClient(),
+    ).handle_reaction_added(
+        body=app_mention_body(event_id="EvReactionRetry"),
+        event=reaction_event(
+            reaction="arrows_counterclockwise",
+            user="U123",
+            channel="C123",
+            ts="1716402001.000001",
+        ),
+    )
+
+    assert result.handled is True
+    assert result.action == "retry"
+    assert task.status is TaskStatus.pending
+    assert task.attempts == 0
+    assert task.error is None
+    assert task.finished_at is None
+
+
+def test_reaction_from_non_owner_is_ignored(db_session: Session) -> None:
+    installation = create_installation(db_session)
+    task = TaskService(db_session).create_task(
+        installation_id=installation.id,
+        slack_event_id="EvCancelNonOwner",
+        slack_channel_id="C123",
+        slack_thread_ts="1716403000.000001",
+        slack_message_ts="1716403000.000001",
+        slack_user_id="U123",
+        input="owned work",
+    )
+
+    result = SlackIngress(
+        session=db_session,
+        client=FakeSlackClient(),
+    ).handle_reaction_added(
+        body=app_mention_body(event_id="EvReactionNonOwner"),
+        event=reaction_event(
+            reaction="x",
+            user="U999",
+            channel="C123",
+            ts="1716403000.000001",
+        ),
+    )
+
+    assert result.handled is False
+    assert result.reason == "non_owner"
+    assert task.status is TaskStatus.pending
+
+
 def cleanup_database(session: Session) -> None:
     for model in (
         Artifact,
@@ -476,6 +621,23 @@ def cleanup_database(session: Session) -> None:
         Installation,
     ):
         session.execute(delete(model))
+
+
+def create_installation(session: Session) -> Installation:
+    installation = Installation(slack_team_id=f"T{uuid.uuid4().hex}")
+    session.add(installation)
+    session.flush()
+    return installation
+
+
+def task_events(session: Session, task: Task) -> list[TaskEvent]:
+    return list(
+        session.scalars(
+            select(TaskEvent)
+            .where(TaskEvent.task_id == task.id)
+            .order_by(TaskEvent.seq)
+        )
+    )
 
 
 def app_mention_body(*, event_id: str | None = None) -> dict[str, Any]:
@@ -538,3 +700,22 @@ def dm_event(
     if bot_id is not None:
         event["bot_id"] = bot_id
     return event
+
+
+def reaction_event(
+    *,
+    reaction: str,
+    user: str,
+    channel: str,
+    ts: str,
+) -> dict[str, Any]:
+    return {
+        "type": "reaction_added",
+        "reaction": reaction,
+        "user": user,
+        "item": {
+            "type": "message",
+            "channel": channel,
+            "ts": ts,
+        },
+    }

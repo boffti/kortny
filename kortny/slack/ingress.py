@@ -31,6 +31,11 @@ IGNORED_DM_SUBTYPES = frozenset(
     }
 )
 logger = logging.getLogger(__name__)
+REACTION_CANCEL = "x"
+REACTION_RETRY = "arrows_counterclockwise"
+REACTION_CONFIRM = "white_check_mark"
+REACTION_REJECT = "no_entry_sign"
+CONFIRMATION_REACTIONS = frozenset({REACTION_CONFIRM, REACTION_REJECT})
 
 
 class SlackPostMessageClient(Protocol):
@@ -54,6 +59,16 @@ class AppMentionResult:
     created: bool
     thread_ts: str
     acknowledgement_ts: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ReactionResult:
+    """Result of processing a Slack reaction event."""
+
+    handled: bool
+    action: str
+    task: Task | None = None
+    reason: str | None = None
 
 
 class SlackIngress:
@@ -114,6 +129,75 @@ class SlackIngress:
             source="dm",
         )
 
+    def handle_reaction_added(
+        self,
+        *,
+        body: Mapping[str, Any],
+        event: Mapping[str, Any],
+    ) -> ReactionResult:
+        """Dispatch a Slack reaction to cancel/retry/confirmation handlers."""
+
+        del body
+        reaction = _required_str(event, "reaction")
+        user_id = _required_str(event, "user")
+        item = event.get("item")
+        if not isinstance(item, Mapping) or item.get("type") != "message":
+            return ReactionResult(
+                handled=False,
+                action="ignored",
+                reason="unsupported_item",
+            )
+
+        channel_id = _required_str(item, "channel")
+        message_ts = _required_str(item, "ts")
+        task = self.task_service.get_by_slack_reaction_target(channel_id, message_ts)
+        if task is None:
+            logger.info(
+                "slack reaction ignored reason=no_task channel=%s message_ts=%s reaction=%s user=%s",
+                channel_id,
+                message_ts,
+                reaction,
+                user_id,
+            )
+            return ReactionResult(
+                handled=False,
+                action="ignored",
+                reason="no_task",
+            )
+
+        if reaction == REACTION_CANCEL:
+            return self._handle_cancel_reaction(task, user_id=user_id)
+        if reaction == REACTION_RETRY:
+            return self._handle_retry_reaction(task, user_id=user_id)
+        if reaction in CONFIRMATION_REACTIONS:
+            logger.info(
+                "slack confirmation reaction received task_id=%s reaction=%s user=%s",
+                task.id,
+                reaction,
+                user_id,
+            )
+            self.task_service.append_event(
+                task,
+                TaskEventType.log,
+                {
+                    "message": "confirmation_reaction_noop",
+                    "reaction": reaction,
+                    "by_user_id": user_id,
+                },
+            )
+            return ReactionResult(
+                handled=True,
+                action="confirmation_noop",
+                task=task,
+            )
+
+        return ReactionResult(
+            handled=False,
+            action="ignored",
+            task=task,
+            reason="unsupported_reaction",
+        )
+
     def _handle_addressed_message(
         self,
         *,
@@ -127,7 +211,7 @@ class SlackIngress:
         message_ts = _required_str(event, "ts")
         existing = self.task_service.get_by_slack_event_id(event_id)
         if existing is None:
-            existing = self._get_by_slack_message(channel_id, message_ts)
+            existing = self.task_service.get_by_slack_message(channel_id, message_ts)
         if existing is not None:
             logger.info(
                 "slack %s duplicate task_id=%s event_id=%s channel=%s thread_ts=%s",
@@ -244,16 +328,71 @@ class SlackIngress:
 
         return installation
 
-    def _get_by_slack_message(self, channel_id: str, message_ts: str) -> Task | None:
-        return self.session.scalar(
-            select(Task)
-            .where(
-                Task.slack_channel_id == channel_id,
-                Task.slack_message_ts == message_ts,
+    def _handle_cancel_reaction(
+        self,
+        task: Task,
+        *,
+        user_id: str,
+    ) -> ReactionResult:
+        if task.slack_user_id != user_id:
+            logger.info(
+                "slack cancel reaction ignored reason=non_owner task_id=%s owner=%s user=%s",
+                task.id,
+                task.slack_user_id,
+                user_id,
             )
-            .order_by(Task.created_at.desc())
-            .limit(1)
+            return ReactionResult(
+                handled=False,
+                action="cancel",
+                task=task,
+                reason="non_owner",
+            )
+
+        cancelled = self.task_service.cancel_task(task, by_user_id=user_id)
+        if cancelled is None:
+            return ReactionResult(
+                handled=False,
+                action="cancel",
+                task=task,
+                reason="not_cancellable",
+            )
+
+        logger.info(
+            "slack cancel reaction handled task_id=%s user=%s", task.id, user_id
         )
+        return ReactionResult(handled=True, action="cancel", task=cancelled)
+
+    def _handle_retry_reaction(
+        self,
+        task: Task,
+        *,
+        user_id: str,
+    ) -> ReactionResult:
+        if task.slack_user_id != user_id:
+            logger.info(
+                "slack retry reaction ignored reason=non_owner task_id=%s owner=%s user=%s",
+                task.id,
+                task.slack_user_id,
+                user_id,
+            )
+            return ReactionResult(
+                handled=False,
+                action="retry",
+                task=task,
+                reason="non_owner",
+            )
+
+        retried = self.task_service.retry_failed_task(task, by_user_id=user_id)
+        if retried is None:
+            return ReactionResult(
+                handled=False,
+                action="retry",
+                task=task,
+                reason="not_failed",
+            )
+
+        logger.info("slack retry reaction handled task_id=%s user=%s", task.id, user_id)
+        return ReactionResult(handled=True, action="retry", task=retried)
 
 
 def _required_str(values: Mapping[str, Any], key: str) -> str:

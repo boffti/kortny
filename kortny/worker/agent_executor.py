@@ -27,7 +27,7 @@ from kortny.slack.comments import (
 )
 from kortny.slack.posting import SlackPostingClient
 from kortny.slack.thread_context import SlackThreadTranscriptProvider
-from kortny.tasks import TaskService
+from kortny.tasks import TaskCancelledError, TaskService
 from kortny.tools import (
     PdfGeneratorTool,
     SlackChannelHistoryTool,
@@ -127,6 +127,7 @@ class AgentTaskExecutor:
                         settings
                     ),
                 ).run(task)
+                task_service.raise_if_cancelled(task, phase="before_post_outputs")
                 self._post_outputs(
                     settings=settings,
                     session=session,
@@ -140,6 +141,9 @@ class AgentTaskExecutor:
                     agent_result.artifact_count,
                 )
                 return TaskExecutionResult(result_summary=agent_result.result_summary)
+        except TaskCancelledError:
+            logger.info("agent executor cancelled task_id=%s", task.id)
+            raise
         except Exception:
             logger.exception("agent executor failed task_id=%s", task.id)
             self._post_failure_notice(

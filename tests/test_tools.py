@@ -5,6 +5,7 @@ import pytest
 from kortny.tools import (
     DuplicateToolError,
     EchoTool,
+    RememberFactTool,
     ToolArtifact,
     ToolNotFoundError,
     ToolRegistry,
@@ -55,6 +56,16 @@ def test_registry_exposes_provider_neutral_schemas() -> None:
             "parameters": EchoTool.parameters,
         },
     )
+
+
+def test_remember_fact_tool_schema_requires_faithful_memory_details() -> None:
+    value_text_description = RememberFactTool.parameters["properties"]["value_text"][
+        "description"
+    ]
+
+    assert "Preserve every actionable detail" in RememberFactTool.description
+    assert "footer/header placement" in RememberFactTool.description
+    assert "placement details like footer left" in value_text_description
 
 
 def test_registry_rejects_duplicate_tool_names() -> None:

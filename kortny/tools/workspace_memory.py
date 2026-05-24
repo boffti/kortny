@@ -15,7 +15,12 @@ class RememberFactTool:
     name = "remember_fact"
     description = (
         "Proposes a workspace, channel, or user memory fact. The fact is not "
-        "saved until the user confirms the Slack prompt."
+        "saved until the user confirms the Slack prompt. Use this only for "
+        "stable user-provided facts or preferences. Preserve every actionable "
+        "detail in value and value_text, including concrete names, firm names, "
+        "colors, footer/header placement, file formats, conditions, and "
+        "exceptions. Prefer a slightly longer faithful proposal over a short "
+        "lossy summary."
     )
     parameters: JsonSchema = {
         "type": "object",
@@ -31,12 +36,20 @@ class RememberFactTool:
             },
             "value": {
                 "type": "object",
-                "description": "Structured JSON object to remember.",
+                "description": (
+                    "Structured JSON object to remember. Include all concrete "
+                    "details from the user's preference, not just the broad topic."
+                ),
                 "additionalProperties": True,
             },
             "value_text": {
                 "type": "string",
-                "description": "Human-readable summary shown in the confirmation prompt.",
+                "description": (
+                    "Human-readable summary shown in the confirmation prompt. "
+                    "Keep it concise but faithful: preserve names, colors, "
+                    "placement details like footer left, file formats, and "
+                    "conditions/exceptions."
+                ),
             },
             "reason": {
                 "type": "string",

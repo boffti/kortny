@@ -189,6 +189,41 @@ def test_propose_confirm_round_trip_materializes_active_fact(
     ]
 
 
+def test_propose_preserves_structured_details_when_value_text_is_lossy(
+    db_session: Session,
+) -> None:
+    task = create_task(db_session)
+    poster = FakeConfirmationPoster()
+    service = WorkspaceStateService(db_session, poster=poster)
+
+    pending = service.propose(
+        task.installation_id,
+        "user",
+        "U123",
+        "pdf_branding",
+        {
+            "document_type": "PDF",
+            "style": "clean and professional",
+            "footer_left": "Longboard Asset Management",
+            "brand_color": "blue",
+        },
+        task.id,
+        value_text="Clean and professional style for all PDFs",
+    )
+
+    expected_value_text = (
+        "Clean and professional style for all PDFs; "
+        "footer left: Longboard Asset Management; brand color: blue"
+    )
+
+    assert pending.value_text == expected_value_text
+    assert poster.calls[0]["text"] == (
+        "Should I remember this for you?\n"
+        f"{expected_value_text}\n\n"
+        "React with :white_check_mark: to save it or :no_entry_sign: to skip."
+    )
+
+
 def test_propose_reject_does_not_write_workspace_state(db_session: Session) -> None:
     task = create_task(db_session)
     poster = FakeConfirmationPoster()

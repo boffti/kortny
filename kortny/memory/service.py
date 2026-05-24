@@ -35,6 +35,17 @@ CONFIRMED_PROPOSAL_MESSAGE = "workspace_state_proposal_confirmed"
 REJECTED_PROPOSAL_MESSAGE = "workspace_state_proposal_rejected"
 FORGOTTEN_FACT_MESSAGE = "workspace_state_fact_forgotten"
 DEFAULT_SOURCE_KIND = "agent_proposed"
+GENERIC_MEMORY_DETAIL_KEYS = frozenset(
+    {
+        "details",
+        "preference",
+        "preferences",
+        "summary",
+        "text",
+        "value",
+    }
+)
+MAX_APPENDED_MEMORY_DETAILS = 6
 
 
 class WorkspaceStateServiceError(RuntimeError):
@@ -235,6 +246,7 @@ class WorkspaceStateService:
         normalized_key = _normalize_key(key)
         value_json = _json_object(value)
         readable_value = value_text or _value_text(value_json)
+        readable_value = _faithful_value_text(readable_value, value_json)
         confidence = _optional_confidence_score(confidence_score)
 
         prompt_ts = self.poster.post_message(
@@ -566,6 +578,68 @@ def _value_text(value: Mapping[str, Any]) -> str:
     if "value" in value and isinstance(value["value"], str):
         return value["value"]
     return json.dumps(value, sort_keys=True)
+
+
+def _faithful_value_text(value_text: str, value: Mapping[str, Any]) -> str:
+    text = value_text.strip()
+    if not text:
+        text = _value_text(value)
+
+    missing_phrases: list[str] = []
+    seen_values: set[str] = set()
+    for phrase, search_value in _memory_detail_phrases(value):
+        normalized_search = search_value.casefold()
+        if normalized_search in seen_values:
+            continue
+        seen_values.add(normalized_search)
+        if normalized_search in text.casefold():
+            continue
+        missing_phrases.append(phrase)
+        if len(missing_phrases) >= MAX_APPENDED_MEMORY_DETAILS:
+            break
+
+    if not missing_phrases:
+        return text
+    return f"{text}; {'; '.join(missing_phrases)}"
+
+
+def _memory_detail_phrases(
+    value: Any,
+    path: tuple[str, ...] = (),
+) -> list[tuple[str, str]]:
+    if isinstance(value, Mapping):
+        phrases: list[tuple[str, str]] = []
+        for key, child in value.items():
+            phrases.extend(_memory_detail_phrases(child, path + (str(key),)))
+        return phrases
+    if isinstance(value, list):
+        phrases = []
+        for child in value:
+            phrases.extend(_memory_detail_phrases(child, path))
+        return phrases
+    if isinstance(value, str):
+        search_value = value.strip()
+        if len(search_value) < 3:
+            return []
+        label = _memory_detail_label(path)
+        phrase = search_value if label is None else f"{label}: {search_value}"
+        return [(phrase, search_value)]
+    return []
+
+
+def _memory_detail_label(path: tuple[str, ...]) -> str | None:
+    meaningful = [
+        _humanize_memory_key(part)
+        for part in path
+        if part and part.casefold() not in GENERIC_MEMORY_DETAIL_KEYS
+    ]
+    if not meaningful:
+        return None
+    return " ".join(meaningful)
+
+
+def _humanize_memory_key(value: str) -> str:
+    return value.replace("_", " ").replace("-", " ").strip()
 
 
 def _confirmation_prompt_text(

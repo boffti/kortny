@@ -8,7 +8,7 @@ from decimal import Decimal
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import Engine, delete, select
+from sqlalchemy import Engine, delete, select, update
 from sqlalchemy.orm import Session
 
 from kortny.agent import AgentCoordinator, AgentTurnLimitError
@@ -23,6 +23,7 @@ from kortny.db.models import (
     TaskEvent,
     TaskEventType,
     TaskStatus,
+    WorkspaceState,
 )
 from kortny.db.session import make_engine, make_session_factory, normalize_database_url
 from kortny.llm import ChatMessage, Completion, TokenUsage, ToolCall
@@ -86,6 +87,24 @@ class EchoJsonTool:
 
     def invoke(self, args: JsonObject) -> ToolResult:
         return ToolResult(output={"echoed": args["message"]}, cost_usd=Decimal("0.1"))
+
+
+class RecordingSearchTool:
+    name = "web_search"
+    description = "Records web search arguments."
+    parameters: JsonSchema = {
+        "type": "object",
+        "properties": {"query": {"type": "string"}},
+        "required": ["query"],
+        "additionalProperties": False,
+    }
+
+    def __init__(self) -> None:
+        self.calls: list[JsonObject] = []
+
+    def invoke(self, args: JsonObject) -> ToolResult:
+        self.calls.append(args)
+        return ToolResult(output={"results": []})
 
 
 class ArtifactTool:
@@ -199,6 +218,290 @@ def test_coordinator_finishes_with_final_answer(db_session: Session) -> None:
         "agent_completed",
     ]
     assert events[-1].payload["reason"] == "final_answer"
+
+
+def test_coordinator_injects_workspace_facts(db_session: Session) -> None:
+    installation = create_installation(db_session)
+    create_workspace_fact(
+        db_session,
+        installation=installation,
+        scope_type="workspace",
+        scope_id=None,
+        key="default_report_template",
+        value_text="Use the Longboard report template with blue accents.",
+    )
+    task = create_task(
+        db_session,
+        installation=installation,
+        input_text="what's our default report template?",
+    )
+    llm = FakeLLM(
+        [
+            Completion(
+                content="Use the Longboard report template with blue accents.",
+                tool_calls=(),
+                usage=TokenUsage(input_tokens=30, output_tokens=10),
+            )
+        ]
+    )
+
+    AgentCoordinator(
+        session=db_session,
+        llm=llm,
+        registry=ToolRegistry(),
+    ).run(task)
+
+    known_facts = known_facts_message(llm.calls[0][1])
+
+    assert "<known_facts>" in known_facts
+    assert "Workspace facts:" in known_facts
+    assert (
+        '- default_report_template = "Use the Longboard report template with blue accents."'
+        in known_facts
+    )
+
+
+def test_coordinator_injects_channel_facts_only_for_current_channel(
+    db_session: Session,
+) -> None:
+    installation = create_installation(db_session)
+    create_workspace_fact(
+        db_session,
+        installation=installation,
+        scope_type="channel",
+        scope_id="C123",
+        key="channel_report_style",
+        value_text="Use concise market commentary in this channel.",
+    )
+    create_workspace_fact(
+        db_session,
+        installation=installation,
+        scope_type="channel",
+        scope_id="C999",
+        key="other_channel_report_style",
+        value_text="Use detailed engineering notes in the other channel.",
+    )
+    task = create_task(
+        db_session,
+        installation=installation,
+        input_text="how should you format this channel's reports?",
+    )
+    llm = FakeLLM(
+        [
+            Completion(
+                content="I'll use concise market commentary here.",
+                tool_calls=(),
+                usage=TokenUsage(input_tokens=30, output_tokens=10),
+            )
+        ]
+    )
+
+    AgentCoordinator(
+        session=db_session,
+        llm=llm,
+        registry=ToolRegistry(),
+    ).run(task)
+
+    known_facts = known_facts_message(llm.calls[0][1])
+
+    assert "Channel facts:" in known_facts
+    assert "Use concise market commentary in this channel." in known_facts
+    assert "Use detailed engineering notes in the other channel." not in known_facts
+
+
+def test_coordinator_injects_user_facts_for_requesting_user(
+    db_session: Session,
+) -> None:
+    installation = create_installation(db_session)
+    create_workspace_fact(
+        db_session,
+        installation=installation,
+        scope_type="user",
+        scope_id="U123",
+        key="pdf_preference",
+        value_text="Skip PDFs unless explicitly requested.",
+    )
+    create_workspace_fact(
+        db_session,
+        installation=installation,
+        scope_type="user",
+        scope_id="U999",
+        key="other_user_pdf_preference",
+        value_text="Always include a PDF.",
+    )
+    task = create_task(
+        db_session,
+        installation=installation,
+        input_text="research the latest Python tempfile practices",
+    )
+    llm = FakeLLM(
+        [
+            Completion(
+                content="I'll answer inline unless you ask for a PDF.",
+                tool_calls=(),
+                usage=TokenUsage(input_tokens=30, output_tokens=10),
+            )
+        ]
+    )
+
+    AgentCoordinator(
+        session=db_session,
+        llm=llm,
+        registry=ToolRegistry(),
+    ).run(task)
+
+    known_facts = known_facts_message(llm.calls[0][1])
+
+    assert "User facts:" in known_facts
+    assert "Skip PDFs unless explicitly requested." in known_facts
+    assert "Always include a PDF." not in known_facts
+
+
+def test_coordinator_known_facts_precedence_uses_user_over_lower_scopes(
+    db_session: Session,
+) -> None:
+    installation = create_installation(db_session)
+    create_workspace_fact(
+        db_session,
+        installation=installation,
+        scope_type="workspace",
+        scope_id=None,
+        key="pdf_policy",
+        value_text="Workspace PDF policy.",
+    )
+    create_workspace_fact(
+        db_session,
+        installation=installation,
+        scope_type="channel",
+        scope_id="C123",
+        key="pdf_policy",
+        value_text="Channel PDF policy.",
+    )
+    create_workspace_fact(
+        db_session,
+        installation=installation,
+        scope_type="user",
+        scope_id="U123",
+        key="pdf_policy",
+        value_text="User PDF policy.",
+    )
+    task = create_task(
+        db_session,
+        installation=installation,
+        input_text="what is the PDF policy?",
+    )
+    llm = FakeLLM(
+        [
+            Completion(
+                content="User PDF policy.",
+                tool_calls=(),
+                usage=TokenUsage(input_tokens=30, output_tokens=10),
+            )
+        ]
+    )
+
+    AgentCoordinator(
+        session=db_session,
+        llm=llm,
+        registry=ToolRegistry(),
+    ).run(task)
+
+    known_facts = known_facts_message(llm.calls[0][1])
+
+    assert '- pdf_policy = "User PDF policy."' in known_facts
+    assert "Workspace PDF policy." not in known_facts
+    assert "Channel PDF policy." not in known_facts
+
+
+def test_coordinator_known_facts_budget_drops_oldest(db_session: Session) -> None:
+    installation = create_installation(db_session)
+    create_workspace_fact(
+        db_session,
+        installation=installation,
+        scope_type="workspace",
+        scope_id=None,
+        key="old_fact",
+        value_text="old " * 300,
+        created_at=datetime(2026, 5, 20, 10, 0, tzinfo=UTC),
+    )
+    create_workspace_fact(
+        db_session,
+        installation=installation,
+        scope_type="workspace",
+        scope_id=None,
+        key="new_fact",
+        value_text="Keep this newer fact.",
+        created_at=datetime(2026, 5, 21, 10, 0, tzinfo=UTC),
+    )
+    task = create_task(
+        db_session,
+        installation=installation,
+        input_text="what do you know?",
+    )
+    llm = FakeLLM(
+        [
+            Completion(
+                content="Keep this newer fact.",
+                tool_calls=(),
+                usage=TokenUsage(input_tokens=30, output_tokens=10),
+            )
+        ]
+    )
+
+    AgentCoordinator(
+        session=db_session,
+        llm=llm,
+        registry=ToolRegistry(),
+        known_facts_max_chars=360,
+    ).run(task)
+
+    known_facts = known_facts_message(llm.calls[0][1])
+
+    assert "Keep this newer fact." in known_facts
+    assert "old_fact" not in known_facts
+    assert len(known_facts) <= 360
+
+
+def test_coordinator_uses_known_fact_without_tool_call(
+    db_session: Session,
+) -> None:
+    installation = create_installation(db_session)
+    create_workspace_fact(
+        db_session,
+        installation=installation,
+        scope_type="workspace",
+        scope_id=None,
+        key="default_report_template",
+        value_text="Use the Longboard template with blue headings.",
+    )
+    task = create_task(
+        db_session,
+        installation=installation,
+        input_text="what's our default report template?",
+    )
+    search_tool = RecordingSearchTool()
+    llm = FakeLLM(
+        [
+            Completion(
+                content="Use the Longboard template with blue headings.",
+                tool_calls=(),
+                usage=TokenUsage(input_tokens=30, output_tokens=10),
+            )
+        ]
+    )
+
+    AgentCoordinator(
+        session=db_session,
+        llm=llm,
+        registry=ToolRegistry([search_tool]),
+    ).run(task)
+
+    known_facts = known_facts_message(llm.calls[0][1])
+    events = task_events(db_session, task)
+
+    assert "Use the Longboard template with blue headings." in known_facts
+    assert search_tool.calls == []
+    assert not [event for event in events if event.type is TaskEventType.tool_call]
 
 
 def test_coordinator_includes_prior_thread_context_for_follow_up(
@@ -785,7 +1088,9 @@ def test_coordinator_raises_after_turn_limit(db_session: Session) -> None:
 
 
 def cleanup_database(session: Session) -> None:
+    session.execute(update(WorkspaceState).values(superseded_by_id=None))
     for model in (
+        WorkspaceState,
         Artifact,
         LLMUsage,
         TaskEvent,
@@ -830,6 +1135,44 @@ def create_task(
         task.created_at = created_at
         session.flush()
     return task
+
+
+def create_workspace_fact(
+    session: Session,
+    *,
+    installation: Installation,
+    scope_type: str,
+    scope_id: str | None,
+    key: str,
+    value_text: str,
+    value_json: dict[str, object] | None = None,
+    created_at: datetime | None = None,
+) -> WorkspaceState:
+    state = WorkspaceState(
+        installation_id=installation.id,
+        scope_type=scope_type,
+        scope_id=scope_id,
+        key=key,
+        value_json=value_json or {"value": value_text},
+        value_text=value_text,
+        status="active",
+        source_kind="user_explicit",
+        proposed_by="U123",
+        confirmed_by_user_id="U123",
+        confirmed_at=created_at or datetime.now(UTC),
+    )
+    if created_at is not None:
+        state.created_at = created_at
+    session.add(state)
+    session.flush()
+    return state
+
+
+def known_facts_message(messages: Sequence[ChatMessage]) -> str:
+    for message in messages:
+        if message.content and "<known_facts>" in message.content:
+            return message.content
+    raise AssertionError("No known_facts message found")
 
 
 def task_events(session: Session, task: Task) -> list[TaskEvent]:

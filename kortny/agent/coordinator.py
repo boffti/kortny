@@ -23,6 +23,7 @@ from kortny.agent.thread_context import (
 )
 from kortny.db.models import Artifact, Task, TaskEvent, TaskEventType
 from kortny.llm import ChatMessage, Completion, ToolCall
+from kortny.memory import Fact, WorkspaceStateService
 from kortny.tasks import TaskService
 from kortny.tools import ToolRegistry
 from kortny.tools.types import JsonObject, JsonSchema, ToolArtifact, ToolResult
@@ -31,6 +32,7 @@ DEFAULT_MAX_TURNS = 6
 DEFAULT_THREAD_CONTEXT_MAX_CHARS = 12_000
 DEFAULT_THREAD_CONTEXT_RECENT_TASKS = 3
 DEFAULT_THREAD_TRANSCRIPT_LIMIT = 30
+DEFAULT_KNOWN_FACTS_MAX_CHARS = 4_000
 IMMEDIATE_PRIOR_INPUT_MAX_CHARS = 500
 IMMEDIATE_PRIOR_RESULT_MAX_CHARS = 1_800
 SLACK_FILES_BLOCK_RE = re.compile(r"<slack_files>\s*(.*?)\s*</slack_files>", re.S)
@@ -114,6 +116,7 @@ class AgentCoordinator:
         thread_context_max_chars: int = DEFAULT_THREAD_CONTEXT_MAX_CHARS,
         thread_context_recent_tasks: int = DEFAULT_THREAD_CONTEXT_RECENT_TASKS,
         thread_transcript_limit: int = DEFAULT_THREAD_TRANSCRIPT_LIMIT,
+        known_facts_max_chars: int = DEFAULT_KNOWN_FACTS_MAX_CHARS,
     ) -> None:
         if max_turns < 1:
             raise ValueError("max_turns must be at least 1")
@@ -123,6 +126,8 @@ class AgentCoordinator:
             raise ValueError("thread_context_recent_tasks must be at least 1")
         if thread_transcript_limit < 0:
             raise ValueError("thread_transcript_limit cannot be negative")
+        if known_facts_max_chars < 0:
+            raise ValueError("known_facts_max_chars cannot be negative")
 
         self.session = session
         self.llm = llm
@@ -134,6 +139,11 @@ class AgentCoordinator:
         self.thread_context_max_chars = thread_context_max_chars
         self.thread_context_recent_tasks = thread_context_recent_tasks
         self.thread_transcript_limit = thread_transcript_limit
+        self.known_facts_max_chars = known_facts_max_chars
+        self.workspace_state_service = WorkspaceStateService(
+            session,
+            task_service=self.task_service,
+        )
 
     def run(self, task: Task | uuid.UUID) -> AgentRunResult:
         """Run the coordinator until final text or a produced artifact."""
@@ -403,11 +413,59 @@ class AgentCoordinator:
         messages: list[ChatMessage] = []
         if self.system_prompt:
             messages.append(ChatMessage(role="system", content=self.system_prompt))
+        known_facts = self._known_facts_context(task)
+        if known_facts:
+            messages.append(ChatMessage(role="system", content=known_facts))
         prior_context = self._prior_context(task)
         if prior_context:
             messages.append(ChatMessage(role="system", content=prior_context))
         messages.append(ChatMessage(role="user", content=task.input))
         return messages
+
+    def _known_facts_context(self, task: Task) -> str | None:
+        if self.known_facts_max_chars == 0:
+            return None
+
+        facts = self._scoped_known_facts(task)
+        if not facts:
+            return None
+
+        kept = list(facts)
+        rendered = _render_known_facts(kept)
+        while len(rendered) > self.known_facts_max_chars and kept:
+            oldest = min(kept, key=lambda fact: (fact.created_at, fact.id))
+            kept.remove(oldest)
+            rendered = _render_known_facts(kept)
+
+        if not kept or len(rendered) > self.known_facts_max_chars:
+            return None
+        return rendered
+
+    def _scoped_known_facts(self, task: Task) -> list[Fact]:
+        facts_by_key: dict[str, Fact] = {}
+        for fact in self.workspace_state_service.list(
+            task.installation_id,
+            scope_type="workspace",
+            scope_id=None,
+        ):
+            facts_by_key[fact.key] = fact
+
+        if not _is_dm_channel(task.slack_channel_id):
+            for fact in self.workspace_state_service.list(
+                task.installation_id,
+                scope_type="channel",
+                scope_id=task.slack_channel_id,
+            ):
+                facts_by_key[fact.key] = fact
+
+        for fact in self.workspace_state_service.list(
+            task.installation_id,
+            scope_type="user",
+            scope_id=task.slack_user_id,
+        ):
+            facts_by_key[fact.key] = fact
+
+        return list(facts_by_key.values())
 
     def _prior_context(self, task: Task) -> str | None:
         thread_ts = task.slack_thread_ts
@@ -599,6 +657,54 @@ def _artifact_payload(artifact: ToolArtifact) -> JsonObject:
     return asdict(artifact)
 
 
+def _render_known_facts(facts: Sequence[Fact]) -> str:
+    grouped = {
+        "workspace": [fact for fact in facts if fact.scope_type == "workspace"],
+        "channel": [fact for fact in facts if fact.scope_type == "channel"],
+        "user": [fact for fact in facts if fact.scope_type == "user"],
+    }
+    lines = [
+        "<known_facts>",
+        "Confirmed durable facts for this task. Use these facts before asking "
+        "follow-up questions or calling external tools. If facts conflict, user "
+        "facts override channel facts, and channel facts override workspace facts.",
+    ]
+    for scope_type in ("workspace", "channel", "user"):
+        scoped_facts = sorted(
+            grouped[scope_type],
+            key=lambda fact: (fact.key, fact.created_at, str(fact.id)),
+        )
+        if not scoped_facts:
+            continue
+        lines.append("")
+        lines.append(f"{_known_fact_scope_label(scope_type)}:")
+        for fact in scoped_facts:
+            lines.append(_known_fact_line(fact))
+    lines.append("</known_facts>")
+    return "\n".join(lines)
+
+
+def _known_fact_scope_label(scope_type: str) -> str:
+    if scope_type == "workspace":
+        return "Workspace facts"
+    if scope_type == "channel":
+        return "Channel facts"
+    if scope_type == "user":
+        return "User facts"
+    return "Facts"
+
+
+def _known_fact_line(fact: Fact) -> str:
+    value = _shorten(_known_fact_value(fact), max_chars=600)
+    return f"- {fact.key} = {_quote(value)}"
+
+
+def _known_fact_value(fact: Fact) -> str:
+    if fact.value_text:
+        return fact.value_text
+    return _json_dumps(fact.value)
+
+
 def _tasks_before(thread_tasks: Sequence[Task], current_task: Task) -> list[Task]:
     prior_tasks: list[Task] = []
     for task in thread_tasks:
@@ -708,6 +814,10 @@ def _is_dm_conversation_context_key(
     channel_id: str | None, thread_ts: str | None
 ) -> bool:
     return bool(channel_id and channel_id.startswith("D") and thread_ts == channel_id)
+
+
+def _is_dm_channel(channel_id: str | None) -> bool:
+    return bool(channel_id and channel_id.startswith("D"))
 
 
 def _json_dumps(payload: object) -> str:

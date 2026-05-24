@@ -15,6 +15,7 @@ from kortny.db.session import session_scope
 from kortny.intent import LLMIntentClassifier, should_classify_channel_message
 from kortny.llm import LLMService, ModelRouter, ModelRouteTier, create_llm_provider
 from kortny.logging_config import configure_logging
+from kortny.observability import configure_tracing, record_span_exception, start_span
 from kortny.slack.acknowledgement import LLMAcknowledgementGenerator
 from kortny.slack.ingress import SlackIngress
 
@@ -51,23 +52,28 @@ def create_bolt_app(
         logger: Any,
     ) -> None:
         def handle() -> None:
-            try:
-                with session_scope(session_factory) as session:
-                    SlackIngress(
-                        session=session,
-                        client=client,
-                        acknowledgement_generator=acknowledgement_generator,
-                        intent_classifier=_intent_classifier(
-                            resolved_settings,
-                            session,
-                        ),
-                    ).handle_app_mention(
-                        body=body,
-                        event=event,
-                    )
-            except Exception:
-                logger.exception("Failed to process Slack app_mention event")
-                raise
+            with start_span(
+                "slack.ingress.app_mention",
+                attributes=_slack_event_attributes(body, event),
+            ):
+                try:
+                    with session_scope(session_factory) as session:
+                        SlackIngress(
+                            session=session,
+                            client=client,
+                            acknowledgement_generator=acknowledgement_generator,
+                            intent_classifier=_intent_classifier(
+                                resolved_settings,
+                                session,
+                            ),
+                        ).handle_app_mention(
+                            body=body,
+                            event=event,
+                        )
+                except Exception as exc:
+                    record_span_exception(exc)
+                    logger.exception("Failed to process Slack app_mention event")
+                    raise
 
         acknowledge_then_handle(ack, handle)
 
@@ -80,41 +86,46 @@ def create_bolt_app(
         logger: Any,
     ) -> None:
         def handle() -> None:
-            is_dm = event.get("channel_type") == "im"
-            is_soft_mention_candidate = should_classify_channel_message(
-                event,
-                app_name=resolved_settings.slack_app_name,
-            )
-            if not is_dm and not is_soft_mention_candidate:
-                return
+            with start_span(
+                "slack.ingress.message",
+                attributes=_slack_event_attributes(body, event),
+            ):
+                is_dm = event.get("channel_type") == "im"
+                is_soft_mention_candidate = should_classify_channel_message(
+                    event,
+                    app_name=resolved_settings.slack_app_name,
+                )
+                if not is_dm and not is_soft_mention_candidate:
+                    return
 
-            try:
-                with session_scope(session_factory) as session:
-                    ingress = SlackIngress(
-                        session=session,
-                        client=client,
-                        acknowledgement_generator=acknowledgement_generator,
-                        intent_classifier=_intent_classifier(
-                            resolved_settings,
-                            session,
+                try:
+                    with session_scope(session_factory) as session:
+                        ingress = SlackIngress(
+                            session=session,
+                            client=client,
+                            acknowledgement_generator=acknowledgement_generator,
+                            intent_classifier=_intent_classifier(
+                                resolved_settings,
+                                session,
+                            )
+                            if is_dm
+                            else _pre_task_intent_classifier(resolved_settings),
                         )
-                        if is_dm
-                        else _pre_task_intent_classifier(resolved_settings),
-                    )
-                    if is_dm:
-                        ingress.handle_dm(
-                            body=body,
-                            event=event,
-                        )
-                    else:
-                        ingress.handle_channel_message(
-                            body=body,
-                            event=event,
-                            app_name=resolved_settings.slack_app_name,
-                        )
-            except Exception:
-                logger.exception("Failed to process Slack message event")
-                raise
+                        if is_dm:
+                            ingress.handle_dm(
+                                body=body,
+                                event=event,
+                            )
+                        else:
+                            ingress.handle_channel_message(
+                                body=body,
+                                event=event,
+                                app_name=resolved_settings.slack_app_name,
+                            )
+                except Exception as exc:
+                    record_span_exception(exc)
+                    logger.exception("Failed to process Slack message event")
+                    raise
 
         acknowledge_then_handle(ack, handle)
 
@@ -127,18 +138,23 @@ def create_bolt_app(
         logger: Any,
     ) -> None:
         def handle() -> None:
-            try:
-                with session_scope(session_factory) as session:
-                    SlackIngress(
-                        session=session,
-                        client=client,
-                    ).handle_reaction_added(
-                        body=body,
-                        event=event,
-                    )
-            except Exception:
-                logger.exception("Failed to process Slack reaction_added event")
-                raise
+            with start_span(
+                "slack.ingress.reaction_added",
+                attributes=_slack_event_attributes(body, event),
+            ):
+                try:
+                    with session_scope(session_factory) as session:
+                        SlackIngress(
+                            session=session,
+                            client=client,
+                        ).handle_reaction_added(
+                            body=body,
+                            event=event,
+                        )
+                except Exception as exc:
+                    record_span_exception(exc)
+                    logger.exception("Failed to process Slack reaction_added event")
+                    raise
 
         acknowledge_then_handle(ack, handle)
 
@@ -175,5 +191,22 @@ def run_socket_mode(settings: Settings | None = None) -> None:
 
     configure_logging()
     resolved_settings = settings or load_settings()
+    configure_tracing(resolved_settings)
     app = create_bolt_app(resolved_settings)
     SocketModeHandler(app, resolved_settings.slack_app_token).start()
+
+
+def _slack_event_attributes(
+    body: dict[str, Any],
+    event: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "slack.event_id": body.get("event_id"),
+        "slack.event_type": event.get("type"),
+        "slack.event_subtype": event.get("subtype"),
+        "slack.channel_id": event.get("channel"),
+        "slack.channel_type": event.get("channel_type"),
+        "slack.message_ts": event.get("ts"),
+        "slack.thread_ts": event.get("thread_ts"),
+        "slack.user_id": event.get("user"),
+    }

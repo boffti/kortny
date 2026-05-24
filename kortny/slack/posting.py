@@ -14,6 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from kortny.db.models import Artifact, Task, TaskEventType
+from kortny.observability import set_span_attributes, start_span
 from kortny.slack.formatting import normalize_slack_mrkdwn
 from kortny.tasks import TaskService
 
@@ -92,14 +93,25 @@ class SlackPoster:
 
         post_thread_ts = _post_thread_ts(thread)
         slack_text = normalize_slack_mrkdwn(text)
-        response = self.client.chat_postMessage(
-            channel=thread.channel_id,
-            text=slack_text,
-            thread_ts=post_thread_ts,
-        )
-        message_ts = _response_ts(response)
-        if message_ts is None:
-            raise SlackPostingError("Slack chat_postMessage response is missing ts")
+        with start_span(
+            "slack.post_message",
+            attributes={
+                "kortny.task.id": thread.task_id,
+                "slack.channel_id": thread.channel_id,
+                "slack.thread_ts": post_thread_ts,
+                "slack.message_purpose": purpose,
+                "slack.text_chars": len(slack_text),
+            },
+        ):
+            response = self.client.chat_postMessage(
+                channel=thread.channel_id,
+                text=slack_text,
+                thread_ts=post_thread_ts,
+            )
+            message_ts = _response_ts(response)
+            if message_ts is None:
+                raise SlackPostingError("Slack chat_postMessage response is missing ts")
+            set_span_attributes({"slack.posted_message_ts": message_ts})
 
         if thread.task_id is not None:
             self.task_service.append_event(
@@ -141,17 +153,32 @@ class SlackPoster:
             raise SlackPostingError("Artifact is posted but missing slack_file_id")
 
         post_thread_ts = _post_thread_ts(thread)
-        response = self.client.files_upload_v2(
-            file=str(file_path),
-            filename=file_path.name,
-            title=title or file_path.name,
-            channel=thread.channel_id,
-            initial_comment=initial_comment,
-            thread_ts=post_thread_ts,
-        )
-        slack_file_id = _response_file_id(response)
-        if slack_file_id is None:
-            raise SlackPostingError("Slack files_upload_v2 response is missing file id")
+        with start_span(
+            "slack.upload_file",
+            attributes={
+                "kortny.task.id": task_id,
+                "kortny.artifact.id": artifact_obj.id,
+                "slack.channel_id": thread.channel_id,
+                "slack.thread_ts": post_thread_ts,
+                "file.name": file_path.name,
+                "file.size_bytes": file_path.stat().st_size,
+                "file.initial_comment_chars": len(initial_comment or ""),
+            },
+        ):
+            response = self.client.files_upload_v2(
+                file=str(file_path),
+                filename=file_path.name,
+                title=title or file_path.name,
+                channel=thread.channel_id,
+                initial_comment=initial_comment,
+                thread_ts=post_thread_ts,
+            )
+            slack_file_id = _response_file_id(response)
+            if slack_file_id is None:
+                raise SlackPostingError(
+                    "Slack files_upload_v2 response is missing file id"
+                )
+            set_span_attributes({"slack.file_id": slack_file_id})
 
         artifact_obj.slack_file_id = slack_file_id
         artifact_obj.posted_at = now or datetime.now(UTC)

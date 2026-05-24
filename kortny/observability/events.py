@@ -64,6 +64,9 @@ def observability_payload(
     payload: dict[str, Any] = {"message": event}
     if task is not None:
         payload.update(_task_fields(task))
+    trace_context = _current_trace_context()
+    if trace_context is not None:
+        payload.update(trace_context)
     payload.update(fields)
     return cast(dict[str, Any], sanitize_payload(payload))
 
@@ -81,7 +84,9 @@ def log_observation(
     if not logger.isEnabledFor(level):
         return
 
-    payload = sanitize_payload({**_task_fields(task), **fields} if task else fields)
+    base_fields = _task_fields(task) if task else {}
+    trace_context = _current_trace_context() or {}
+    payload = sanitize_payload({**base_fields, **trace_context, **fields})
     suffix = " ".join(
         f"{key}={_log_value(value)}"
         for key, value in payload.items()
@@ -139,3 +144,12 @@ def _log_value(value: Any) -> str:
 
 def _simple_log_value(value: str) -> bool:
     return all(not char.isspace() and char not in {'"', "="} for char in value)
+
+
+def _current_trace_context() -> dict[str, str] | None:
+    try:
+        from kortny.observability.tracing import current_trace_context
+
+        return current_trace_context()
+    except Exception:
+        return None

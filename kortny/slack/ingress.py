@@ -24,6 +24,12 @@ from kortny.intent import (
     should_react_to_rejected_soft_mention,
 )
 from kortny.memory import Fact, PendingFact, WorkspaceStateService
+from kortny.observability import (
+    current_traceparent,
+    record_span_exception,
+    set_span_attributes,
+    start_span,
+)
 from kortny.slack.acknowledgement import (
     AcknowledgementGenerator,
     StaticAcknowledgementGenerator,
@@ -327,6 +333,14 @@ class SlackIngress:
             slack_user_id=user_id,
             input=input_text,
         )
+        set_span_attributes(
+            {
+                "kortny.task.id": task.id,
+                "kortny.installation.id": task.installation_id,
+                "slack.ingress.source": source,
+            }
+        )
+        self._capture_traceparent(task, source=source)
         logger.info(
             "slack %s created task_id=%s event_id=%s channel=%s thread_ts=%s user=%s input_len=%s",
             source,
@@ -505,6 +519,20 @@ class SlackIngress:
             choice.name,
         )
 
+    def _capture_traceparent(self, task: Task, *, source: str) -> None:
+        traceparent = current_traceparent()
+        if traceparent is None:
+            return
+        self.task_service.append_event(
+            task,
+            TaskEventType.log,
+            {
+                "message": "trace_context_captured",
+                "source": source,
+                "traceparent": traceparent,
+            },
+        )
+
     def _post_rejected_soft_mention_reaction(
         self,
         *,
@@ -570,16 +598,35 @@ class SlackIngress:
             return None
 
         try:
-            decision = self.intent_classifier.classify(
-                task_id=task.id,
-                request=IntentRequest(
-                    text=task.input,
-                    surface=_intent_surface(source),
-                    is_thread_follow_up=_is_thread_follow_up(event),
-                    has_files=bool(_event_files(event)),
-                ),
-            )
+            with start_span(
+                "intent.classify",
+                task=task,
+                attributes={
+                    "intent.surface": source,
+                    "intent.has_files": bool(_event_files(event)),
+                    "intent.is_thread_follow_up": _is_thread_follow_up(event),
+                },
+            ):
+                decision = self.intent_classifier.classify(
+                    task_id=task.id,
+                    request=IntentRequest(
+                        text=task.input,
+                        surface=_intent_surface(source),
+                        is_thread_follow_up=_is_thread_follow_up(event),
+                        has_files=bool(_event_files(event)),
+                    ),
+                )
+                set_span_attributes(
+                    {
+                        "intent.classification": decision.classification.value,
+                        "intent.confidence": decision.confidence,
+                        "intent.addressed_to_kortny": decision.addressed_to_kortny,
+                        "intent.should_create_task": decision.should_create_task,
+                        "intent.model_tier": decision.model_tier.value,
+                    }
+                )
         except Exception as exc:
+            record_span_exception(exc)
             logger.info(
                 "slack intent classification failed task_id=%s source=%s error_type=%s error=%s",
                 task.id,
@@ -616,16 +663,37 @@ class SlackIngress:
             )
             return None
         try:
-            decision = self.intent_classifier.classify(
-                request=IntentRequest(
-                    text=input_text,
-                    surface=IntentSurface.channel_message,
-                    app_name=app_name,
-                    is_thread_follow_up=_is_thread_follow_up(event),
-                    has_files=bool(_event_files(event)),
-                ),
-            )
+            with start_span(
+                "intent.classify",
+                attributes={
+                    "intent.surface": IntentSurface.channel_message.value,
+                    "intent.has_files": bool(_event_files(event)),
+                    "intent.is_thread_follow_up": _is_thread_follow_up(event),
+                    "intent.app_name": app_name,
+                    "slack.channel_id": event.get("channel"),
+                    "slack.message_ts": event.get("ts"),
+                },
+            ):
+                decision = self.intent_classifier.classify(
+                    request=IntentRequest(
+                        text=input_text,
+                        surface=IntentSurface.channel_message,
+                        app_name=app_name,
+                        is_thread_follow_up=_is_thread_follow_up(event),
+                        has_files=bool(_event_files(event)),
+                    ),
+                )
+                set_span_attributes(
+                    {
+                        "intent.classification": decision.classification.value,
+                        "intent.confidence": decision.confidence,
+                        "intent.addressed_to_kortny": decision.addressed_to_kortny,
+                        "intent.should_create_task": decision.should_create_task,
+                        "intent.model_tier": decision.model_tier.value,
+                    }
+                )
         except Exception as exc:
+            record_span_exception(exc)
             logger.info(
                 "slack channel_message intent classification failed channel=%s error_type=%s error=%s",
                 event.get("channel"),

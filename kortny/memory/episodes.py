@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 
 from kortny.db.models import Artifact, Episode, Task, TaskEvent, TaskEventType
 from kortny.db.models import TaskStatus as DbTaskStatus
-from kortny.observability import observe_task_event
+from kortny.observability import observe_task_event, set_span_attributes, start_span
 from kortny.tasks import TaskService
 
 EPISODE_OUTCOMES = {
@@ -85,6 +85,12 @@ class EpisodeService:
         """
 
         task_obj = self._resolve_task(task)
+        with start_span("episode.record", task=task_obj):
+            return self._record_task(task_obj)
+
+    def _record_task(self, task_obj: Task) -> TaskEpisode | None:
+        """Record a resolved terminal task inside the active episode span."""
+
         outcome = DbTaskStatus(task_obj.status)
         if outcome not in EPISODE_OUTCOMES:
             return None
@@ -133,6 +139,16 @@ class EpisodeService:
             source_ref_count=len(episode.source_refs),
             summary_chars=len(episode.summary or ""),
         )
+        set_span_attributes(
+            {
+                "episode.id": episode.id,
+                "episode.outcome": episode.outcome,
+                "episode.tool_count": len(episode.tools_used),
+                "episode.artifact_count": len(episode.artifacts_created),
+                "episode.source_ref_count": len(episode.source_refs),
+                "episode.summary_chars": len(episode.summary or ""),
+            }
+        )
         self._commit_if_requested()
         return _episode_from_row(episode)
 
@@ -153,6 +169,21 @@ class EpisodeService:
             return ()
 
         task_obj = self._resolve_task(task)
+        with start_span(
+            "episode.retrieve",
+            task=task_obj,
+            attributes={"episode.retrieve.limit": limit},
+        ):
+            return self._relevant_for_resolved_task(task_obj, limit=limit)
+
+    def _relevant_for_resolved_task(
+        self,
+        task_obj: Task,
+        *,
+        limit: int,
+    ) -> tuple[RelevantEpisode, ...]:
+        """Return relevant episodes for a resolved task inside a span."""
+
         selected: dict[uuid.UUID, RelevantEpisode] = {}
         base = select(Episode).where(
             Episode.installation_id == task_obj.installation_id,
@@ -193,6 +224,12 @@ class EpisodeService:
             selected_episode_relations=[item.relation for item in relevant],
             limit=limit,
             selected_count=len(relevant),
+        )
+        set_span_attributes(
+            {
+                "episode.retrieve.selected_count": len(relevant),
+                "episode.retrieve.relations": [item.relation for item in relevant],
+            }
         )
         return relevant
 

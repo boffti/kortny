@@ -12,12 +12,15 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
-from kortny.db.models import Task, TaskEventType, TaskStatus
+from kortny.config import load_settings
+from kortny.db.models import Task, TaskEvent, TaskEventType, TaskStatus
 from kortny.db.session import make_session_factory
 from kortny.logging_config import configure_logging
 from kortny.memory import EpisodeService
+from kortny.observability import configure_tracing, start_span
 from kortny.queue import TaskQueue
 from kortny.queue.service import DEFAULT_LEASE_SECONDS
 from kortny.tasks import TaskCancelledError, TaskService
@@ -113,11 +116,17 @@ class TaskWorker:
 
             try:
                 task_service.raise_if_cancelled(task, phase="before_executor")
-                execution_result = self.executor.execute(
-                    session=session,
+                with start_span(
+                    "task.run",
                     task=task,
-                    task_service=task_service,
-                )
+                    attributes={"worker.id": self.worker_id},
+                    linked_traceparent=_task_traceparent(session, task),
+                ):
+                    execution_result = self.executor.execute(
+                        session=session,
+                        task=task,
+                        task_service=task_service,
+                    )
                 task_service.raise_if_cancelled(task, phase="after_executor")
                 task.result_summary = execution_result.result_summary
                 task.error = None
@@ -248,6 +257,26 @@ def default_worker_id() -> str:
     return f"{socket.gethostname()}-{os.getpid()}"
 
 
+def _task_traceparent(session: Session, task: Task) -> str | None:
+    event = session.scalar(
+        select(TaskEvent)
+        .where(
+            TaskEvent.task_id == task.id,
+            TaskEvent.type == TaskEventType.log,
+            TaskEvent.payload["message"].as_string() == "trace_context_captured",
+        )
+        .order_by(TaskEvent.seq.desc())
+        .limit(1)
+    )
+    if event is None:
+        return None
+    traceparent = event.payload.get("traceparent")
+    if not isinstance(traceparent, str):
+        return None
+    stripped = traceparent.strip()
+    return stripped or None
+
+
 def main(argv: Sequence[str] | None = None) -> None:
     """CLI entrypoint for local and Compose worker runs."""
 
@@ -262,6 +291,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         help="Seconds to sleep between idle polls",
     )
     args = parser.parse_args(argv)
+    configure_tracing(load_settings())
 
     worker = TaskWorker(
         worker_id=args.worker_id,

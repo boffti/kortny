@@ -28,7 +28,12 @@ from kortny.agent.context import (
 from kortny.agent.thread_context import ThreadTranscriptProvider
 from kortny.db.models import Task, TaskEventType
 from kortny.llm import ChatMessage, Completion, ToolCall
-from kortny.observability import log_observation
+from kortny.observability import (
+    log_observation,
+    record_span_exception,
+    set_span_attributes,
+    start_span,
+)
 from kortny.tasks import TaskService
 from kortny.tools import ToolRegistry
 from kortny.tools.types import JsonObject, JsonSchema, ToolArtifact, ToolResult
@@ -271,9 +276,28 @@ class AgentCoordinator:
             )
             started = time.perf_counter()
             try:
-                result = self.registry.invoke(tool_call.name, arguments)
+                with start_span(
+                    "tool.invoke",
+                    task=task_obj,
+                    attributes={
+                        "agent.turn": turn,
+                        "tool.name": tool_call.name,
+                        "tool.call_id": tool_call.id,
+                        "tool.argument_keys": sorted(arguments),
+                    },
+                ):
+                    result = self.registry.invoke(tool_call.name, arguments)
+                    set_span_attributes(
+                        {
+                            "tool.latency_ms": _latency_ms(started),
+                            "tool.artifact_count": len(result.artifacts),
+                            "tool.recoverable": _recoverable_tool_result(result.output),
+                            "tool.cost_usd": str(result.cost_usd),
+                        }
+                    )
             except Exception as exc:
                 latency_ms = _latency_ms(started)
+                record_span_exception(exc)
                 log_observation(
                     logger,
                     "tool_call_failed",

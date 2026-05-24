@@ -20,7 +20,7 @@ from kortny.agent.thread_context import (
 from kortny.db.models import Artifact, Task, TaskEvent, TaskEventType
 from kortny.llm import ChatMessage
 from kortny.memory import EpisodeService, Fact, RelevantEpisode, WorkspaceStateService
-from kortny.observability import observe_task_event
+from kortny.observability import observe_task_event, set_span_attributes, start_span
 from kortny.tasks import TaskService
 
 DEFAULT_THREAD_CONTEXT_MAX_CHARS = 12_000
@@ -202,6 +202,12 @@ class ContextAssembler:
     def build_for_task(self, task: Task) -> ContextPackage:
         """Build prompt messages and context-selection metadata."""
 
+        with start_span("context.assemble", task=task):
+            return self._build_for_task(task)
+
+    def _build_for_task(self, task: Task) -> ContextPackage:
+        """Build prompt messages and context-selection metadata inside a span."""
+
         messages: list[ChatMessage] = []
         if self.system_prompt:
             messages.append(ChatMessage(role="system", content=self.system_prompt))
@@ -255,6 +261,18 @@ class ContextAssembler:
             ),
         )
         self._record_context_assembled(task, package)
+        set_span_attributes(
+            {
+                "context.message_count": len(package.messages),
+                "context.selected_fact_count": len(package.selected_facts),
+                "context.selected_episode_count": len(package.selected_episodes),
+                "context.selected_prior_task_count": len(package.selected_prior_tasks),
+                "context.selected_artifact_count": len(package.selected_artifacts),
+                "context.acknowledgement_present": package.acknowledgement is not None,
+                "context.context_chars": _context_chars(package),
+                "context.omission_count": len(package.omissions),
+            }
+        )
         return package
 
     def _record_context_assembled(

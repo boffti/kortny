@@ -16,7 +16,13 @@ from kortny.db.models import LLMProvider as DbLLMProvider
 from kortny.db.models import ModelPricing
 from kortny.llm.routing import ModelRoute, ModelRouteTier
 from kortny.llm.types import ChatMessage, Completion, LLMProvider, TokenUsage
-from kortny.observability import log_observation, observe_task_event
+from kortny.observability import (
+    log_observation,
+    observe_task_event,
+    record_span_exception,
+    set_span_attributes,
+    start_span,
+)
 from kortny.tasks import TaskService
 from kortny.tools.types import JsonObject, JsonSchema
 
@@ -75,84 +81,109 @@ class LLMService:
             prompt_label=prompt_label,
             prompt_version=prompt_version,
         )
-        observe_task_event(
-            self.task_service,
-            task_id,
-            "llm_call_started",
-            logger=logger,
-            **start_fields,
-        )
-
-        try:
-            completion = self.provider.complete(
-                messages,
-                tools,
-                response_format=response_format,
-            )
-        except Exception as exc:
-            latency_ms = _latency_ms(started)
+        with start_span(
+            "llm.complete",
+            task=self.task_service.get_task(task_id),
+            attributes=start_fields,
+        ):
             observe_task_event(
                 self.task_service,
                 task_id,
-                "llm_call_failed",
-                event_type="error",
+                "llm_call_started",
                 logger=logger,
-                level=logging.ERROR,
-                latency_ms=latency_ms,
-                error_type=type(exc).__name__,
-                error_summary=str(exc),
                 **start_fields,
             )
-            raise
 
-        model = completion.model or self.provider.model
-        cost_usd = completion.cost_usd
-        if cost_usd is None:
-            pricing = self.get_pricing(model)
-            cost_usd = calculate_cost_usd(completion.usage, pricing)
+            try:
+                completion = self.provider.complete(
+                    messages,
+                    tools,
+                    response_format=response_format,
+                )
+            except Exception as exc:
+                record_span_exception(exc)
+                latency_ms = _latency_ms(started)
+                observe_task_event(
+                    self.task_service,
+                    task_id,
+                    "llm_call_failed",
+                    event_type="error",
+                    logger=logger,
+                    level=logging.ERROR,
+                    latency_ms=latency_ms,
+                    error_type=type(exc).__name__,
+                    error_summary=str(exc),
+                    **start_fields,
+                )
+                raise
 
-        latency_ms = _latency_ms(started)
-        metadata = {
-            **start_fields,
-            "model": model,
-            "response_id": completion.response_id,
-            "latency_ms": latency_ms,
-            "has_content": bool(completion.content),
-            "tool_call_count": len(completion.tool_calls),
-            "tool_call_names": [tool_call.name for tool_call in completion.tool_calls],
-        }
-        self.task_service.record_llm_usage(
-            task_id,
-            provider=self.provider_name,
-            model=model,
-            model_tier=self.model_tier,
-            input_tokens=completion.usage.input_tokens,
-            output_tokens=completion.usage.output_tokens,
-            cost_usd=cost_usd,
-            metadata=metadata,
-        )
-        log_observation(
-            logger,
-            "llm_call_completed",
-            task=self.task_service.get_task(task_id),
-            provider=self.provider_name.value,
-            model=model,
-            model_tier=self.model_tier,
-            route_reason=self.route_reason,
-            prompt_name=prompt_name,
-            prompt_source=prompt_source,
-            prompt_label=prompt_label,
-            prompt_version=prompt_version,
-            response_id=completion.response_id,
-            input_tokens=completion.usage.input_tokens,
-            output_tokens=completion.usage.output_tokens,
-            total_tokens=completion.usage.input_tokens + completion.usage.output_tokens,
-            cost_usd=str(cost_usd),
-            latency_ms=latency_ms,
-            tool_count=len(tools),
-            tool_call_count=len(completion.tool_calls),
-        )
-        return completion
+            model = completion.model or self.provider.model
+            cost_usd = completion.cost_usd
+            if cost_usd is None:
+                pricing = self.get_pricing(model)
+                cost_usd = calculate_cost_usd(completion.usage, pricing)
+
+            latency_ms = _latency_ms(started)
+            metadata = {
+                **start_fields,
+                "model": model,
+                "response_id": completion.response_id,
+                "latency_ms": latency_ms,
+                "has_content": bool(completion.content),
+                "tool_call_count": len(completion.tool_calls),
+                "tool_call_names": [
+                    tool_call.name for tool_call in completion.tool_calls
+                ],
+            }
+            self.task_service.record_llm_usage(
+                task_id,
+                provider=self.provider_name,
+                model=model,
+                model_tier=self.model_tier,
+                input_tokens=completion.usage.input_tokens,
+                output_tokens=completion.usage.output_tokens,
+                cost_usd=cost_usd,
+                metadata=metadata,
+            )
+            total_tokens = (
+                completion.usage.input_tokens + completion.usage.output_tokens
+            )
+            set_span_attributes(
+                {
+                    "llm.provider": self.provider_name.value,
+                    "llm.model": model,
+                    "llm.response_id": completion.response_id,
+                    "llm.input_tokens": completion.usage.input_tokens,
+                    "llm.output_tokens": completion.usage.output_tokens,
+                    "llm.total_tokens": total_tokens,
+                    "llm.cost_usd": str(cost_usd),
+                    "llm.latency_ms": latency_ms,
+                    "llm.tool_count": len(tools),
+                    "llm.tool_call_count": len(completion.tool_calls),
+                }
+            )
+            log_observation(
+                logger,
+                "llm_call_completed",
+                task=self.task_service.get_task(task_id),
+                provider=self.provider_name.value,
+                model=model,
+                model_tier=self.model_tier,
+                route_reason=self.route_reason,
+                prompt_name=prompt_name,
+                prompt_source=prompt_source,
+                prompt_label=prompt_label,
+                prompt_version=prompt_version,
+                response_id=completion.response_id,
+                input_tokens=completion.usage.input_tokens,
+                output_tokens=completion.usage.output_tokens,
+                total_tokens=total_tokens,
+                cost_usd=str(cost_usd),
+                latency_ms=latency_ms,
+                tool_count=len(tools),
+                tool_call_count=len(completion.tool_calls),
+            )
+            return completion
 
     @property
     def model_tier(self) -> str | None:

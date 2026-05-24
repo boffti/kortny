@@ -15,11 +15,15 @@ from kortny.tasks import TaskService
 
 ROOT_ACK_FALLBACK_TEXT = "I'll take a look and post back here."
 ACK_SYSTEM_PROMPT = (
-    "Write one short Slack acknowledgement for the user's request. "
-    "Make it specific to what they asked, natural, and calm. "
+    "Write one short Slack bridge acknowledgement for the user's request. "
+    "Make it specific to what they asked, natural, and calm, but do not answer "
+    "the request. "
     "Use first person. Maximum 14 words. No emoji. No markdown. "
+    "For capability questions, say that you'll outline where you can help. "
+    "For simple questions, say that you'll answer directly. "
     "Do not mention tasks, queues, workers, tools, or internal systems. "
-    "Do not ask a question. Do not say 'On it'."
+    "Do not ask a question. Do not say 'On it'. Do not list capabilities, "
+    "sources, facts, or conclusions."
 )
 ACK_MAX_CHARS = 140
 logger = logging.getLogger(__name__)

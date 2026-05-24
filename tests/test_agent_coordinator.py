@@ -11,7 +11,7 @@ from alembic.config import Config
 from sqlalchemy import Engine, delete, select, update
 from sqlalchemy.orm import Session
 
-from kortny.agent import AgentCoordinator, AgentTurnLimitError
+from kortny.agent import AgentCoordinator, AgentTurnLimitError, ContextAssembler
 from kortny.agent.thread_context import ThreadTranscriptMessage
 from kortny.db.models import (
     Artifact,
@@ -460,6 +460,184 @@ def test_coordinator_known_facts_budget_drops_oldest(db_session: Session) -> Non
     assert "Keep this newer fact." in known_facts
     assert "old_fact" not in known_facts
     assert len(known_facts) <= 360
+
+
+def test_context_assembler_builds_minimal_package(db_session: Session) -> None:
+    task = create_task(db_session, input_text="summarize this")
+
+    package = ContextAssembler(session=db_session).build_for_task(task)
+
+    assert package.messages == (ChatMessage(role="user", content="summarize this"),)
+    assert package.selected_facts == ()
+    assert package.selected_prior_tasks == ()
+    assert package.selected_artifacts == ()
+    assert package.acknowledgement is None
+    assert package.budget.known_facts_chars == 0
+    assert package.budget.prior_context_chars == 0
+    assert package.omissions == ()
+
+
+def test_coordinator_injects_visible_acknowledgement_context(
+    db_session: Session,
+) -> None:
+    task = create_task(
+        db_session,
+        input_text="what can you do for me?",
+    )
+    TaskService(db_session).append_event(
+        task,
+        TaskEventType.message_posted,
+        {
+            "channel": "C123",
+            "thread_ts": "1716400000.000001",
+            "message_ts": "1716400000.000002",
+            "text": "I'll outline where I can help.",
+            "purpose": "acknowledgement",
+        },
+    )
+    llm = FakeLLM(
+        [
+            Completion(
+                content="Here are the areas where I can help.",
+                tool_calls=(),
+                usage=TokenUsage(input_tokens=40, output_tokens=10),
+            )
+        ]
+    )
+
+    AgentCoordinator(
+        session=db_session,
+        llm=llm,
+        registry=ToolRegistry(),
+    ).run(task)
+
+    acknowledgement_context = visible_acknowledgement_message(llm.calls[0][1])
+
+    assert "Kortny already posted this visible Slack acknowledgement" in (
+        acknowledgement_context
+    )
+    assert '"I\'ll outline where I can help."' in acknowledgement_context
+    assert "natural continuation" in acknowledgement_context
+    assert llm.calls[0][1][-1] == ChatMessage(
+        role="user", content="what can you do for me?"
+    )
+
+
+def test_context_assembler_exposes_known_fact_metadata(
+    db_session: Session,
+) -> None:
+    installation = create_installation(db_session)
+    fact = create_workspace_fact(
+        db_session,
+        installation=installation,
+        scope_type="workspace",
+        scope_id=None,
+        key="default_report_template",
+        value_text="Use the Longboard report template with blue accents.",
+    )
+    task = create_task(
+        db_session,
+        installation=installation,
+        input_text="what's our default report template?",
+    )
+
+    package = ContextAssembler(session=db_session).build_for_task(task)
+    known_facts = known_facts_message(package.messages)
+
+    assert "Use the Longboard report template with blue accents." in known_facts
+    assert package.selected_facts[0].fact_id == fact.id
+    assert package.selected_facts[0].scope_type == "workspace"
+    assert package.selected_facts[0].scope_id is None
+    assert package.selected_facts[0].key == "default_report_template"
+    assert package.budget.known_facts_chars == len(known_facts)
+
+
+def test_context_assembler_exposes_prior_task_and_artifact_metadata(
+    db_session: Session,
+) -> None:
+    installation = create_installation(db_session)
+    prior = create_task(
+        db_session,
+        input_text="Enhance the report",
+        installation=installation,
+        slack_event_id="EvPriorArtifactContext",
+        created_at=datetime(2026, 5, 23, 13, 34, tzinfo=UTC),
+    )
+    prior.result_summary = "Generated 1 artifact."
+    artifact = Artifact(
+        task_id=prior.id,
+        filename="pypl_report_v2.pdf",
+        mime_type="application/pdf",
+        size_bytes=4096,
+        storage_path=None,
+        slack_file_id="FGENV2",
+    )
+    db_session.add(artifact)
+    db_session.flush()
+    current = create_task(
+        db_session,
+        input_text="make it more elaborate",
+        installation=installation,
+        slack_event_id="EvCurrentArtifactContext",
+        slack_message_ts="1716500040.000001",
+        created_at=datetime(2026, 5, 23, 13, 35, tzinfo=UTC),
+    )
+
+    package = ContextAssembler(session=db_session).build_for_task(current)
+    prior_context = prior_context_message(package.messages)
+
+    assert "pypl_report_v2.pdf" in prior_context
+    assert package.selected_prior_tasks[0].task_id == prior.id
+    assert package.selected_prior_tasks[0].status == "pending"
+    assert package.selected_artifacts[0].artifact_id == artifact.id
+    assert package.selected_artifacts[0].task_id == prior.id
+    assert package.selected_artifacts[0].filename == "pypl_report_v2.pdf"
+    assert package.selected_artifacts[0].slack_file_id == "FGENV2"
+    assert package.budget.prior_context_chars == len(prior_context)
+
+
+def test_context_assembler_records_context_omissions(
+    db_session: Session,
+) -> None:
+    installation = create_installation(db_session)
+    first = create_task(
+        db_session,
+        input_text="research a very long topic",
+        installation=installation,
+        slack_event_id="EvLongPriorContext",
+        created_at=datetime(2026, 5, 23, 14, 0, tzinfo=UTC),
+    )
+    first.result_summary = "Summary survives compaction."
+    TaskService(db_session).append_event(
+        first,
+        TaskEventType.tool_result,
+        {"output": {"large": "x" * 2_000}},
+    )
+    current = create_task(
+        db_session,
+        input_text="refine that",
+        installation=installation,
+        slack_event_id="EvLongCurrentContext",
+        slack_message_ts="1716400500.000001",
+        created_at=datetime(2026, 5, 23, 14, 1, tzinfo=UTC),
+    )
+
+    package = ContextAssembler(
+        session=db_session,
+        thread_context_max_chars=500,
+    ).build_for_task(current)
+    prior_context = prior_context_message(package.messages)
+
+    assert len(prior_context) <= 500
+    assert "Summary survives compaction." in prior_context
+    assert ("prior_context", "compacted_to_budget", 1) in {
+        (omission.kind, omission.reason, omission.count)
+        for omission in package.omissions
+    }
+    assert ("prior_task_events", "compacted_context_omits_event_details", 1) in {
+        (omission.kind, omission.reason, omission.count)
+        for omission in package.omissions
+    }
 
 
 def test_coordinator_uses_known_fact_without_tool_call(
@@ -1173,6 +1351,20 @@ def known_facts_message(messages: Sequence[ChatMessage]) -> str:
         if message.content and "<known_facts>" in message.content:
             return message.content
     raise AssertionError("No known_facts message found")
+
+
+def prior_context_message(messages: Sequence[ChatMessage]) -> str:
+    for message in messages:
+        if message.content and "<prior_context>" in message.content:
+            return message.content
+    raise AssertionError("No prior_context message found")
+
+
+def visible_acknowledgement_message(messages: Sequence[ChatMessage]) -> str:
+    for message in messages:
+        if message.content and "<visible_acknowledgement>" in message.content:
+            return message.content
+    raise AssertionError("No visible_acknowledgement message found")
 
 
 def task_events(session: Session, task: Task) -> list[TaskEvent]:

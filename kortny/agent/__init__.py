@@ -1,5 +1,15 @@
 """Agent coordinator loop."""
 
+from kortny.agent.context import (
+    ContextAcknowledgement,
+    ContextArtifact,
+    ContextAssembler,
+    ContextBudget,
+    ContextFact,
+    ContextOmission,
+    ContextPackage,
+    ContextTask,
+)
 from kortny.agent.coordinator import (
     AgentCoordinator,
     AgentLoopError,
@@ -13,5 +23,13 @@ __all__ = [
     "AgentLoopError",
     "AgentRunResult",
     "AgentTurnLimitError",
+    "ContextAcknowledgement",
+    "ContextArtifact",
+    "ContextAssembler",
+    "ContextBudget",
+    "ContextFact",
+    "ContextOmission",
+    "ContextPackage",
+    "ContextTask",
     "LLMClient",
 ]

@@ -29,6 +29,11 @@ from kortny.db.models import (
 from kortny.db.session import make_engine, make_session_factory, normalize_database_url
 from kortny.llm import ChatMessage, Completion, TokenUsage, ToolCall
 from kortny.slack.comments import ARTIFACT_COMMENT_FALLBACK_TEXT
+from kortny.slack.reactions import (
+    ACK_REACTION_ADDED_MESSAGE,
+    ACK_REACTION_REMOVED_MESSAGE,
+    COMPLETION_REACTION_ADDED_MESSAGE,
+)
 from kortny.tasks import TaskService
 from kortny.tools import ToolResult
 from kortny.tools.types import JsonObject, JsonSchema
@@ -426,6 +431,89 @@ def test_agent_executor_falls_back_when_artifact_comment_generation_fails(
     )
 
 
+def test_agent_executor_replaces_ack_reaction_after_success(
+    db_session: Session,
+    worker_session_factory: sessionmaker[Session],
+    tmp_path: Path,
+) -> None:
+    claim_time = datetime(2026, 5, 23, 9, 51, tzinfo=UTC)
+    task = create_task(db_session, event_id="EvAgentWorkerReaction")
+    task.input = "summarize this thread"
+    task.available_at = claim_time - timedelta(seconds=1)
+    TaskService(db_session).append_event(
+        task,
+        TaskEventType.log,
+        {
+            "message": ACK_REACTION_ADDED_MESSAGE,
+            "source": "app_mention",
+            "channel": "C123",
+            "message_ts": "EvAgentWorkerReaction",
+            "reaction": "thinking_face",
+            "reaction_intent": "review",
+        },
+    )
+    db_session.add(
+        ModelPricing(
+            provider=LLMProvider.openrouter,
+            model="openai/gpt-4o-mini",
+            input_price_per_mtok=Decimal("1.000000"),
+            output_price_per_mtok=Decimal("2.000000"),
+            effective_from=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+    )
+    db_session.commit()
+
+    slack_client = FakeSlackClient()
+    result = TaskWorker(
+        session_factory=worker_session_factory,
+        worker_id="agent-worker-test",
+        executor=AgentTaskExecutor(
+            settings=make_settings(),
+            llm_provider=FakeAgentProvider(
+                [
+                    Completion(
+                        content="Here is the summary.",
+                        tool_calls=(),
+                        usage=TokenUsage(input_tokens=50, output_tokens=15),
+                        model="openai/gpt-4o-mini",
+                    ),
+                ]
+            ),
+            provider_name=LLMProvider.openrouter,
+            web_search_tool=StaticWebSearchTool(),
+            slack_client=slack_client,
+            workspace_base_dir=tmp_path,
+        ),
+    ).run_once(now=claim_time)
+
+    db_session.refresh(task)
+    events = task_events(db_session, task)
+
+    assert result.status == TaskStatus.succeeded.value, task.error
+    assert slack_client.reaction_removes == [
+        {
+            "channel": "C123",
+            "name": "thinking_face",
+            "timestamp": "EvAgentWorkerReaction",
+        }
+    ]
+    assert slack_client.reaction_adds == [
+        {
+            "channel": "C123",
+            "name": "heavy_check_mark",
+            "timestamp": "EvAgentWorkerReaction",
+        }
+    ]
+    assert any(
+        event.payload.get("message") == ACK_REACTION_REMOVED_MESSAGE for event in events
+    )
+    assert any(
+        event.payload.get("message") == COMPLETION_REACTION_ADDED_MESSAGE
+        and event.payload.get("reaction") == "heavy_check_mark"
+        for event in events
+    )
+
+
 def test_agent_executor_suppresses_final_message_after_memory_prompt(
     db_session: Session,
     worker_session_factory: sessionmaker[Session],
@@ -524,6 +612,18 @@ def test_agent_executor_posts_generic_failure_notice_for_setup_errors(
     task = create_task(db_session, event_id="EvAgentWorkerMissingSearch")
     task.input = "research Python tempfile and make a PDF"
     task.available_at = claim_time - timedelta(seconds=1)
+    TaskService(db_session).append_event(
+        task,
+        TaskEventType.log,
+        {
+            "message": ACK_REACTION_ADDED_MESSAGE,
+            "source": "app_mention",
+            "channel": "C123",
+            "message_ts": "EvAgentWorkerMissingSearch",
+            "reaction": "mag",
+            "reaction_intent": "discovery",
+        },
+    )
     db_session.commit()
 
     slack_client = FakeSlackClient()
@@ -552,6 +652,20 @@ def test_agent_executor_posts_generic_failure_notice_for_setup_errors(
             "channel": "C123",
             "text": GENERIC_FAILURE_TEXT,
             "thread_ts": "EvAgentWorkerMissingSearch",
+        }
+    ]
+    assert slack_client.reaction_removes == [
+        {
+            "channel": "C123",
+            "name": "mag",
+            "timestamp": "EvAgentWorkerMissingSearch",
+        }
+    ]
+    assert slack_client.reaction_adds == [
+        {
+            "channel": "C123",
+            "name": "warning",
+            "timestamp": "EvAgentWorkerMissingSearch",
         }
     ]
     posted_event = next(
@@ -672,6 +786,8 @@ class FakeSlackClient:
     def __init__(self) -> None:
         self.messages: list[dict[str, Any]] = []
         self.uploads: list[dict[str, Any]] = []
+        self.reaction_adds: list[dict[str, Any]] = []
+        self.reaction_removes: list[dict[str, Any]] = []
 
     def chat_postMessage(
         self,
@@ -711,6 +827,38 @@ class FakeSlackClient:
             }
         )
         return {"ok": True, "files": [{"id": f"F{len(self.uploads):06d}"}]}
+
+    def reactions_add(
+        self,
+        *,
+        channel: str,
+        name: str,
+        timestamp: str,
+    ) -> dict[str, Any]:
+        self.reaction_adds.append(
+            {
+                "channel": channel,
+                "name": name,
+                "timestamp": timestamp,
+            }
+        )
+        return {"ok": True}
+
+    def reactions_remove(
+        self,
+        *,
+        channel: str,
+        name: str,
+        timestamp: str,
+    ) -> dict[str, Any]:
+        self.reaction_removes.append(
+            {
+                "channel": channel,
+                "name": name,
+                "timestamp": timestamp,
+            }
+        )
+        return {"ok": True}
 
 
 def task_events(session: Session, task: Task) -> list[TaskEvent]:

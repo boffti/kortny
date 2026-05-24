@@ -27,6 +27,15 @@ from kortny.slack.comments import (
     generate_artifact_comment,
 )
 from kortny.slack.posting import SlackPostingClient
+from kortny.slack.reactions import (
+    ACK_REACTION_ADDED_MESSAGE,
+    ACK_REACTION_REMOVE_FAILED_MESSAGE,
+    ACK_REACTION_REMOVED_MESSAGE,
+    COMPLETION_REACTION_ADDED_MESSAGE,
+    COMPLETION_REACTION_FAILED_MESSAGE,
+    LibraryReactionProvider,
+    ReactionProvider,
+)
 from kortny.slack.thread_context import SlackThreadTranscriptProvider
 from kortny.tasks import TaskCancelledError, TaskService
 from kortny.tools import (
@@ -82,6 +91,7 @@ class AgentTaskExecutor:
         artifact_comment_generator: ArtifactCommentGenerator | None = None,
         workspace_base_dir: Path | str | None = None,
         system_prompt: str | None = DEFAULT_SYSTEM_PROMPT,
+        reaction_provider: ReactionProvider | None = None,
     ) -> None:
         self.settings = settings
         self.llm_provider = llm_provider
@@ -92,6 +102,7 @@ class AgentTaskExecutor:
         self.artifact_comment_generator = artifact_comment_generator
         self.workspace_base_dir = workspace_base_dir
         self.system_prompt = system_prompt
+        self.reaction_provider = reaction_provider or LibraryReactionProvider()
 
     def execute(
         self,
@@ -139,6 +150,13 @@ class AgentTaskExecutor:
                     task_service=task_service,
                     result_summary=agent_result.result_summary,
                 )
+                self._complete_ack_reaction(
+                    settings=settings,
+                    session=session,
+                    task=task,
+                    task_service=task_service,
+                    succeeded=True,
+                )
                 logger.info(
                     "agent executor completed task_id=%s artifact_count=%s",
                     task.id,
@@ -155,6 +173,13 @@ class AgentTaskExecutor:
                 session=session,
                 task=task,
                 task_service=task_service,
+            )
+            self._complete_ack_reaction(
+                settings=settings,
+                session=session,
+                task=task,
+                task_service=task_service,
+                succeeded=False,
             )
             raise
 
@@ -374,6 +399,164 @@ class AgentTaskExecutor:
                 "failed to post generic failure notice task_id=%s", task.id
             )
 
+    def _complete_ack_reaction(
+        self,
+        *,
+        settings: Settings,
+        session: Session,
+        task: Task,
+        task_service: TaskService,
+        succeeded: bool,
+    ) -> None:
+        ack_event = _latest_ack_reaction_event(session, task)
+        if ack_event is None:
+            return
+
+        channel_id = _payload_str(ack_event.payload, "channel")
+        message_ts = _payload_str(ack_event.payload, "message_ts")
+        ack_reaction = _payload_str(ack_event.payload, "reaction")
+        source = _payload_str(ack_event.payload, "source") or "worker"
+        if channel_id is None or message_ts is None or ack_reaction is None:
+            return
+
+        client: Any = self.slack_client
+        if client is None:
+            client = WebClient(token=settings.slack_bot_token)
+
+        self._remove_ack_reaction(
+            client=client,
+            task=task,
+            task_service=task_service,
+            channel_id=channel_id,
+            message_ts=message_ts,
+            reaction=ack_reaction,
+        )
+        self._add_completion_reaction(
+            client=client,
+            task=task,
+            task_service=task_service,
+            channel_id=channel_id,
+            message_ts=message_ts,
+            source=source,
+            succeeded=succeeded,
+        )
+
+    def _remove_ack_reaction(
+        self,
+        *,
+        client: Any,
+        task: Task,
+        task_service: TaskService,
+        channel_id: str,
+        message_ts: str,
+        reaction: str,
+    ) -> None:
+        reactions_remove = getattr(client, "reactions_remove", None)
+        if not callable(reactions_remove):
+            return
+        try:
+            reactions_remove(
+                channel=channel_id,
+                name=reaction,
+                timestamp=message_ts,
+            )
+        except Exception as exc:
+            logger.info(
+                "slack ack reaction remove failed task_id=%s channel=%s message_ts=%s reaction=%s error_type=%s error=%s",
+                task.id,
+                channel_id,
+                message_ts,
+                reaction,
+                type(exc).__name__,
+                exc,
+            )
+            task_service.append_event(
+                task,
+                TaskEventType.log,
+                {
+                    "message": ACK_REACTION_REMOVE_FAILED_MESSAGE,
+                    "channel": channel_id,
+                    "message_ts": message_ts,
+                    "reaction": reaction,
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                },
+            )
+            return
+
+        task_service.append_event(
+            task,
+            TaskEventType.log,
+            {
+                "message": ACK_REACTION_REMOVED_MESSAGE,
+                "channel": channel_id,
+                "message_ts": message_ts,
+                "reaction": reaction,
+            },
+        )
+
+    def _add_completion_reaction(
+        self,
+        *,
+        client: Any,
+        task: Task,
+        task_service: TaskService,
+        channel_id: str,
+        message_ts: str,
+        source: str,
+        succeeded: bool,
+    ) -> None:
+        reactions_add = getattr(client, "reactions_add", None)
+        if not callable(reactions_add):
+            return
+        choice = self.reaction_provider.completion_reaction(
+            input_text=task.input,
+            source=source,
+            succeeded=succeeded,
+        )
+        try:
+            reactions_add(
+                channel=channel_id,
+                name=choice.name,
+                timestamp=message_ts,
+            )
+        except Exception as exc:
+            logger.info(
+                "slack completion reaction failed task_id=%s channel=%s message_ts=%s reaction=%s error_type=%s error=%s",
+                task.id,
+                channel_id,
+                message_ts,
+                choice.name,
+                type(exc).__name__,
+                exc,
+            )
+            task_service.append_event(
+                task,
+                TaskEventType.log,
+                {
+                    "message": COMPLETION_REACTION_FAILED_MESSAGE,
+                    "channel": channel_id,
+                    "message_ts": message_ts,
+                    "reaction": choice.name,
+                    "reaction_intent": choice.intent,
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                },
+            )
+            return
+
+        task_service.append_event(
+            task,
+            TaskEventType.log,
+            {
+                "message": COMPLETION_REACTION_ADDED_MESSAGE,
+                "channel": channel_id,
+                "message_ts": message_ts,
+                "reaction": choice.name,
+                "reaction_intent": choice.intent,
+            },
+        )
+
 
 class WalkingSkeletonExecutor:
     """Legacy trivial executor retained for narrow worker tests."""
@@ -388,3 +571,23 @@ class WalkingSkeletonExecutor:
         return TaskExecutionResult(
             result_summary=f"Walking skeleton processed task {task.id}: {task.input}"
         )
+
+
+def _latest_ack_reaction_event(session: Session, task: Task) -> TaskEvent | None:
+    return session.scalar(
+        select(TaskEvent)
+        .where(
+            TaskEvent.task_id == task.id,
+            TaskEvent.type == TaskEventType.log,
+            TaskEvent.payload["message"].as_string() == ACK_REACTION_ADDED_MESSAGE,
+        )
+        .order_by(TaskEvent.seq.desc())
+        .limit(1)
+    )
+
+
+def _payload_str(payload: dict[str, Any], key: str) -> str | None:
+    value = payload.get(key)
+    if isinstance(value, str) and value:
+        return value
+    return None

@@ -23,14 +23,17 @@ from kortny.db.models import (
 from kortny.db.session import make_engine, make_session_factory, normalize_database_url
 from kortny.slack import SlackIngress, acknowledge_then_handle
 from kortny.slack.acknowledgement import ROOT_ACK_FALLBACK_TEXT
+from kortny.slack.reactions import ReactionChoice
 from kortny.tasks import TaskService
 
 TEST_POSTGRES_URL = os.environ.get("KORTNY_TEST_POSTGRES_URL")
 
 
 class FakeSlackClient:
-    def __init__(self) -> None:
+    def __init__(self, *, reaction_error: Exception | None = None) -> None:
         self.calls: list[dict[str, Any]] = []
+        self.reactions: list[dict[str, Any]] = []
+        self.reaction_error = reaction_error
 
     def chat_postMessage(
         self,
@@ -50,6 +53,24 @@ class FakeSlackClient:
             "channel": channel,
             "ts": f"1716400000.{len(self.calls):06d}",
         }
+
+    def reactions_add(
+        self,
+        *,
+        channel: str,
+        name: str,
+        timestamp: str,
+    ) -> dict[str, Any]:
+        if self.reaction_error is not None:
+            raise self.reaction_error
+        self.reactions.append(
+            {
+                "channel": channel,
+                "name": name,
+                "timestamp": timestamp,
+            }
+        )
+        return {"ok": True}
 
 
 class FakeAcknowledgementGenerator:
@@ -74,6 +95,24 @@ class FakeAcknowledgementGenerator:
         if self.error is not None:
             raise self.error
         return self.text
+
+
+class FakeReactionProvider:
+    def __init__(self, name: str = "eyes", intent: str = "working") -> None:
+        self.choice = ReactionChoice(name=name, intent=intent)
+        self.calls: list[dict[str, str]] = []
+
+    def acknowledgement_reaction(
+        self, *, input_text: str, source: str
+    ) -> ReactionChoice:
+        self.calls.append({"input_text": input_text, "source": source})
+        return self.choice
+
+    def completion_reaction(
+        self, *, input_text: str, source: str, succeeded: bool
+    ) -> ReactionChoice:
+        del input_text, source, succeeded
+        return ReactionChoice(name="heavy_check_mark", intent="completed")
 
 
 def test_acknowledge_then_handle_acks_before_work() -> None:
@@ -123,10 +162,12 @@ def test_app_mention_creates_task_and_posts_ack_reply(db_session: Session) -> No
     acknowledgements = FakeAcknowledgementGenerator(
         "I'll pull together the pandas report and post it here."
     )
+    reactions = FakeReactionProvider(name="page_facing_up", intent="document")
     result = SlackIngress(
         session=db_session,
         client=client,
         acknowledgement_generator=acknowledgements,
+        reaction_provider=reactions,
     ).handle_app_mention(
         body=app_mention_body(event_id="EvMention1"),
         event=app_mention_event(text="<@UBOT> research pandas and make a PDF"),
@@ -161,7 +202,17 @@ def test_app_mention_creates_task_and_posts_ack_reply(db_session: Session) -> No
             "thread_ts": "1716400000.000001",
         }
     ]
+    assert client.reactions == [
+        {
+            "channel": "C123",
+            "name": "page_facing_up",
+            "timestamp": "1716400000.000001",
+        }
+    ]
     assert acknowledgements.calls == ["research pandas and make a PDF"]
+    assert reactions.calls == [
+        {"input_text": "research pandas and make a PDF", "source": "app_mention"}
+    ]
     assert message_event is not None
     assert message_event.payload["purpose"] == "acknowledgement"
     assert message_event.payload["message_ts"] == "1716400000.000001"
@@ -187,11 +238,13 @@ def test_thread_follow_up_creates_task_without_visible_ack(
 ) -> None:
     client = FakeSlackClient()
     acknowledgements = FakeAcknowledgementGenerator()
+    reactions = FakeReactionProvider(name="mag", intent="research")
 
     result = SlackIngress(
         session=db_session,
         client=client,
         acknowledgement_generator=acknowledgements,
+        reaction_provider=reactions,
     ).handle_app_mention(
         body=app_mention_body(event_id="EvMentionFollowUp"),
         event=app_mention_event(
@@ -213,8 +266,53 @@ def test_thread_follow_up_creates_task_without_visible_ack(
     assert result.task.input == "what was your source for this?"
     assert result.task.slack_thread_ts == "1716400000.000001"
     assert client.calls == []
+    assert client.reactions == [
+        {
+            "channel": "C123",
+            "name": "mag",
+            "timestamp": "1716400100.000001",
+        }
+    ]
     assert acknowledgements.calls == []
     assert message_event_count == 0
+
+
+def test_ack_reaction_failure_does_not_block_task_creation(
+    db_session: Session,
+) -> None:
+    client = FakeSlackClient(reaction_error=RuntimeError("reaction denied"))
+    reactions = FakeReactionProvider(name="memo", intent="memory")
+
+    result = SlackIngress(
+        session=db_session,
+        client=client,
+        reaction_provider=reactions,
+    ).handle_app_mention(
+        body=app_mention_body(event_id="EvReactionFailOpen"),
+        event=app_mention_event(
+            text="<@UBOT> remember that weekly recaps go on Fridays"
+        ),
+    )
+    db_session.commit()
+
+    events = task_events(db_session, result.task)
+
+    assert result.created is True
+    assert result.task.input == "remember that weekly recaps go on Fridays"
+    assert client.reactions == []
+    assert client.calls == [
+        {
+            "channel": "C123",
+            "text": ROOT_ACK_FALLBACK_TEXT,
+            "thread_ts": "1716400000.000001",
+        }
+    ]
+    assert any(
+        event.payload.get("message") == "slack_ack_reaction_failed"
+        and event.payload.get("reaction") == "memo"
+        and event.payload.get("reaction_intent") == "memory"
+        for event in events
+    )
 
 
 def test_app_mention_includes_attached_slack_file_ids_in_task_input(
@@ -332,11 +430,13 @@ def test_dm_creates_task_without_visible_ack(db_session: Session) -> None:
     acknowledgements = FakeAcknowledgementGenerator(
         "I'll take a look and send the answer here."
     )
+    reactions = FakeReactionProvider(name="mag", intent="research")
 
     result = SlackIngress(
         session=db_session,
         client=client,
         acknowledgement_generator=acknowledgements,
+        reaction_provider=reactions,
     ).handle_dm(
         body=message_body(event_id="EvDm1"),
         event=dm_event(text="<@UBOT> research private context"),
@@ -366,6 +466,13 @@ def test_dm_creates_task_without_visible_ack(db_session: Session) -> None:
     assert task.slack_user_id == "U123"
     assert task.input == "<@UBOT> research private context"
     assert client.calls == []
+    assert client.reactions == [
+        {
+            "channel": "D123",
+            "name": "mag",
+            "timestamp": "1716500000.000001",
+        }
+    ]
     assert acknowledgements.calls == []
     assert message_event is None
 

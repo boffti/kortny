@@ -20,6 +20,13 @@ from kortny.slack.acknowledgement import (
     StaticAcknowledgementGenerator,
     generate_acknowledgement,
 )
+from kortny.slack.reactions import (
+    ACK_REACTION_ADD_FAILED_MESSAGE,
+    ACK_REACTION_ADDED_MESSAGE,
+    ACK_REACTION_UNAVAILABLE_MESSAGE,
+    LibraryReactionProvider,
+    ReactionProvider,
+)
 from kortny.tasks import TaskService
 
 LEADING_MENTION_RE = re.compile(r"^\s*<@[^>]+>\s*")
@@ -83,6 +90,7 @@ class SlackIngress:
         client: SlackPostMessageClient,
         task_service: TaskService | None = None,
         acknowledgement_generator: AcknowledgementGenerator | None = None,
+        reaction_provider: ReactionProvider | None = None,
     ) -> None:
         self.session = session
         self.client = client
@@ -90,6 +98,7 @@ class SlackIngress:
         self.acknowledgement_generator = (
             acknowledgement_generator or StaticAcknowledgementGenerator()
         )
+        self.reaction_provider = reaction_provider or LibraryReactionProvider()
 
     def handle_app_mention(
         self,
@@ -241,6 +250,12 @@ class SlackIngress:
             user_id,
             len(task.input),
         )
+        self._post_ack_reaction(
+            task=task,
+            source=source,
+            channel_id=channel_id,
+            message_ts=message_ts,
+        )
 
         if _should_skip_visible_ack(event, source=source):
             logger.info(
@@ -293,6 +308,87 @@ class SlackIngress:
             created=True,
             thread_ts=thread_ts,
             acknowledgement_ts=acknowledgement_ts,
+        )
+
+    def _post_ack_reaction(
+        self,
+        *,
+        task: Task,
+        source: str,
+        channel_id: str,
+        message_ts: str,
+    ) -> None:
+        choice = self.reaction_provider.acknowledgement_reaction(
+            input_text=task.input,
+            source=source,
+        )
+        reactions_add = getattr(self.client, "reactions_add", None)
+        if not callable(reactions_add):
+            self.task_service.append_event(
+                task,
+                TaskEventType.log,
+                {
+                    "message": ACK_REACTION_UNAVAILABLE_MESSAGE,
+                    "source": source,
+                    "channel": channel_id,
+                    "message_ts": message_ts,
+                    "reaction": choice.name,
+                    "reaction_intent": choice.intent,
+                },
+            )
+            return
+        try:
+            reactions_add(
+                channel=channel_id,
+                name=choice.name,
+                timestamp=message_ts,
+            )
+        except Exception as exc:
+            logger.info(
+                "slack %s ack reaction failed task_id=%s channel=%s message_ts=%s reaction=%s error_type=%s error=%s",
+                source,
+                task.id,
+                channel_id,
+                message_ts,
+                choice.name,
+                type(exc).__name__,
+                exc,
+            )
+            self.task_service.append_event(
+                task,
+                TaskEventType.log,
+                {
+                    "message": ACK_REACTION_ADD_FAILED_MESSAGE,
+                    "source": source,
+                    "channel": channel_id,
+                    "message_ts": message_ts,
+                    "reaction": choice.name,
+                    "reaction_intent": choice.intent,
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                },
+            )
+            return
+
+        self.task_service.append_event(
+            task,
+            TaskEventType.log,
+            {
+                "message": ACK_REACTION_ADDED_MESSAGE,
+                "source": source,
+                "channel": channel_id,
+                "message_ts": message_ts,
+                "reaction": choice.name,
+                "reaction_intent": choice.intent,
+            },
+        )
+        logger.info(
+            "slack %s ack reaction added task_id=%s channel=%s message_ts=%s reaction=%s",
+            source,
+            task.id,
+            channel_id,
+            message_ts,
+            choice.name,
         )
 
     def _get_or_create_installation(self, slack_team_id: str) -> Installation:

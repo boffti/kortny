@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any, Protocol
 
+from slack_sdk.errors import SlackApiError
+
 from kortny.tools.types import JsonObject, JsonSchema, ToolResult
 
 DEFAULT_CHANNEL_HISTORY_LIMIT = 200
@@ -51,11 +53,12 @@ class SlackChannelHistoryTool:
 
     name = "slack_channel_history"
     description = (
-        "Reads recent Slack conversation history from the current task channel or "
-        "a provided Slack channel ID. Use it before summarizing channel context, "
-        "answering questions about recent Slack discussion, or grounding follow-up "
-        "work in channel messages. Includes compact Slack file metadata when "
-        "messages have file attachments."
+        "Reads recent Slack conversation history. Use it before summarizing the "
+        "current channel, answering questions about recent Slack discussion, or "
+        "grounding follow-up work in channel messages. Omit channel_id for the "
+        "current task channel; only pass channel_id when the user explicitly "
+        "provided a different Slack channel ID. Never guess channel IDs. Includes "
+        "compact Slack file metadata when messages have file attachments."
     )
     parameters: JsonSchema = {
         "type": "object",
@@ -63,8 +66,12 @@ class SlackChannelHistoryTool:
             "channel_id": {
                 "type": "string",
                 "description": (
-                    "Slack channel ID to read. Omit this to use the current task "
-                    "channel."
+                    "Optional Slack channel ID to read. For phrases like 'this "
+                    "channel', 'the channel', 'above', 'recent discussion', or "
+                    "'channel history', omit this field so the tool uses the "
+                    "current task channel. Only include this when the user "
+                    "explicitly provides a Slack channel ID such as C123ABC. Do "
+                    "not infer, remember, or guess channel IDs."
                 ),
             },
             "oldest_ts": {
@@ -129,20 +136,50 @@ class SlackChannelHistoryTool:
         limit = _limit(args, self.max_limit)
         include_threads = _include_threads(args)
 
-        root_messages = self._fetch_history_roots(
-            channel_id=channel_id,
-            oldest_ts=oldest_ts,
-            latest_ts=latest_ts,
-            limit=limit,
-        )
-        messages = self._build_output_messages(
-            channel_id=channel_id,
-            root_messages=root_messages,
-            oldest_ts=oldest_ts,
-            latest_ts=latest_ts,
-            limit=limit,
-            include_threads=include_threads,
-        )
+        try:
+            root_messages = self._fetch_history_roots(
+                channel_id=channel_id,
+                oldest_ts=oldest_ts,
+                latest_ts=latest_ts,
+                limit=limit,
+            )
+            messages = self._build_output_messages(
+                channel_id=channel_id,
+                root_messages=root_messages,
+                oldest_ts=oldest_ts,
+                latest_ts=latest_ts,
+                limit=limit,
+                include_threads=include_threads,
+            )
+        except SlackApiError as exc:
+            return _recoverable_history_result(
+                channel_id=channel_id,
+                requested_channel_id=_optional_string(
+                    args.get("channel_id"), "channel_id"
+                ),
+                default_channel_id=self.default_channel_id,
+                oldest_ts=oldest_ts,
+                latest_ts=latest_ts,
+                limit=limit,
+                include_threads=include_threads,
+                code=_slack_api_error_code(exc.response),
+                message=f"Slack API failed: {_slack_api_error_code(exc.response)}",
+            )
+        except SlackChannelHistoryError as exc:
+            code = _history_error_code(str(exc))
+            return _recoverable_history_result(
+                channel_id=channel_id,
+                requested_channel_id=_optional_string(
+                    args.get("channel_id"), "channel_id"
+                ),
+                default_channel_id=self.default_channel_id,
+                oldest_ts=oldest_ts,
+                latest_ts=latest_ts,
+                limit=limit,
+                include_threads=include_threads,
+                code=code,
+                message=str(exc),
+            )
 
         return ToolResult(
             output={
@@ -319,6 +356,84 @@ def _response_payload(response: object, method: str) -> Mapping[str, Any]:
         raise SlackChannelHistoryError(f"{method} failed: {error}")
 
     return payload
+
+
+def _recoverable_history_result(
+    *,
+    channel_id: str,
+    requested_channel_id: str | None,
+    default_channel_id: str | None,
+    oldest_ts: str | None,
+    latest_ts: str | None,
+    limit: int,
+    include_threads: bool,
+    code: str,
+    message: str,
+) -> ToolResult:
+    return ToolResult(
+        output={
+            "channel_id": channel_id,
+            "oldest_ts": oldest_ts,
+            "latest_ts": latest_ts,
+            "limit": limit,
+            "include_threads": include_threads,
+            "message_count": 0,
+            "messages": [],
+            "error": {
+                "code": code,
+                "message": message,
+                "recoverable": True,
+                "hint": _history_error_hint(
+                    requested_channel_id=requested_channel_id,
+                    default_channel_id=default_channel_id,
+                ),
+            },
+        }
+    )
+
+
+def _history_error_hint(
+    *,
+    requested_channel_id: str | None,
+    default_channel_id: str | None,
+) -> str:
+    if (
+        requested_channel_id is not None
+        and default_channel_id is not None
+        and requested_channel_id != default_channel_id
+    ):
+        return (
+            "If the user means the current Slack channel, retry "
+            "slack_channel_history without channel_id."
+        )
+    return (
+        "Use prior thread context if it is sufficient. Otherwise ask the user "
+        "to add Kortny to the channel or provide an accessible Slack channel."
+    )
+
+
+def _history_error_code(message: str) -> str:
+    marker = " failed: "
+    if marker in message:
+        code = message.rsplit(marker, maxsplit=1)[-1].strip()
+        if code:
+            return code
+    return "slack_channel_history_failed"
+
+
+def _slack_api_error_code(response: object) -> str:
+    if isinstance(response, Mapping):
+        error = response.get("error")
+        if isinstance(error, str) and error:
+            return error
+
+    data = getattr(response, "data", None)
+    if isinstance(data, Mapping):
+        error = data.get("error")
+        if isinstance(error, str) and error:
+            return error
+
+    return "slack_api_error"
 
 
 def _response_messages(response: Mapping[str, Any]) -> tuple[Mapping[str, Any], ...]:

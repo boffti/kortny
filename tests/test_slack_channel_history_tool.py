@@ -3,8 +3,9 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from slack_sdk.errors import SlackApiError
 
-from kortny.tools import SlackChannelHistoryError, SlackChannelHistoryTool
+from kortny.tools import SlackChannelHistoryTool
 
 
 class FakeSlackHistoryClient:
@@ -13,9 +14,11 @@ class FakeSlackHistoryClient:
         *,
         history_pages: list[dict[str, Any]],
         reply_pages_by_ts: dict[str, list[dict[str, Any]]] | None = None,
+        history_error: Exception | None = None,
     ) -> None:
         self.history_pages = history_pages
         self.reply_pages_by_ts = reply_pages_by_ts or {}
+        self.history_error = history_error
         self.history_calls: list[dict[str, Any]] = []
         self.reply_calls: list[dict[str, Any]] = []
 
@@ -39,6 +42,8 @@ class FakeSlackHistoryClient:
                 "oldest": oldest,
             }
         )
+        if self.history_error is not None:
+            raise self.history_error
         return self.history_pages.pop(0)
 
     def conversations_replies(
@@ -271,7 +276,7 @@ def test_slack_channel_history_fans_out_active_threads() -> None:
     ]
 
 
-def test_slack_channel_history_requires_accessible_channel() -> None:
+def test_slack_channel_history_reports_inaccessible_channel_as_recoverable() -> None:
     client = FakeSlackHistoryClient(
         history_pages=[
             {
@@ -281,11 +286,59 @@ def test_slack_channel_history_requires_accessible_channel() -> None:
         ]
     )
 
-    with pytest.raises(
-        SlackChannelHistoryError,
-        match="conversations.history failed: not_in_channel",
-    ):
-        SlackChannelHistoryTool(client, default_channel_id="C_PRIVATE").invoke({})
+    result = SlackChannelHistoryTool(client, default_channel_id="C_PRIVATE").invoke({})
+
+    assert result.output == {
+        "channel_id": "C_PRIVATE",
+        "oldest_ts": None,
+        "latest_ts": None,
+        "limit": 200,
+        "include_threads": False,
+        "message_count": 0,
+        "messages": [],
+        "error": {
+            "code": "not_in_channel",
+            "message": "conversations.history failed: not_in_channel",
+            "recoverable": True,
+            "hint": (
+                "Use prior thread context if it is sufficient. Otherwise ask the user "
+                "to add Kortny to the channel or provide an accessible Slack channel."
+            ),
+        },
+    }
+
+
+def test_slack_channel_history_reports_hallucinated_channel_id_as_recoverable() -> None:
+    client = FakeSlackHistoryClient(
+        history_pages=[],
+        history_error=SlackApiError(
+            "The request to the Slack API failed.",
+            {"ok": False, "error": "channel_not_found"},
+        ),
+    )
+
+    result = SlackChannelHistoryTool(client, default_channel_id="C_CURRENT").invoke(
+        {"channel_id": "C_HALLUCINATED", "limit": 100}
+    )
+
+    assert result.output == {
+        "channel_id": "C_HALLUCINATED",
+        "oldest_ts": None,
+        "latest_ts": None,
+        "limit": 100,
+        "include_threads": False,
+        "message_count": 0,
+        "messages": [],
+        "error": {
+            "code": "channel_not_found",
+            "message": "Slack API failed: channel_not_found",
+            "recoverable": True,
+            "hint": (
+                "If the user means the current Slack channel, retry "
+                "slack_channel_history without channel_id."
+            ),
+        },
+    }
 
 
 def test_slack_channel_history_rejects_missing_channel_without_default() -> None:

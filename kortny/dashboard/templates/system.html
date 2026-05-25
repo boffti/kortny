@@ -1,0 +1,96 @@
+{% extends "base.html" %}
+
+{% block title %}System - Kortny Dashboard{% endblock %}
+
+{% block content %}
+  <section class="page-heading">
+    <div>
+      <h1>System</h1>
+      <p>Setup readiness, dependency health, and redacted runtime configuration.</p>
+    </div>
+    <span class="status-chip badge-{{ system.overall_tone }}">{{ system.overall_label }}</span>
+  </section>
+
+  <section class="summary-grid system-summary" aria-label="System overview">
+    {% for metric in system.metrics %}
+      <div class="card metric-card metric-{{ metric.tone }}">
+        <span>{{ metric.label }}</span>
+        <strong>{{ metric.value }}</strong>
+        {% if metric.detail %}
+          <small>{{ metric.detail }}</small>
+        {% endif %}
+      </div>
+    {% endfor %}
+  </section>
+
+  <section class="system-grid" aria-label="System health checks">
+    <article class="card system-checks">
+      <header>
+        <h2>Readiness Checks</h2>
+        <p>Grouped checks for the services and settings Kortny needs to operate.</p>
+      </header>
+      <div class="check-list">
+        {% for check in system.checks %}
+          <article class="check-row">
+            <div class="check-marker check-{{ check.tone }}" aria-hidden="true"></div>
+            <div class="check-copy">
+              <div class="check-title">
+                <span>{{ check.group }}</span>
+                <strong>{{ check.name }}</strong>
+              </div>
+              <p>{{ check.detail }}</p>
+              {% if check.action %}
+                <small>{{ check.action }}</small>
+              {% endif %}
+            </div>
+            <span class="badge badge-{{ check.tone }}">{{ check.status }}</span>
+          </article>
+        {% endfor %}
+      </div>
+    </article>
+
+    <article class="card system-note">
+      <header>
+        <h2>Operator Notes</h2>
+        <p>Designed for self-hosted diagnosis before digging into logs.</p>
+      </header>
+      <div class="note-list">
+        <div>
+          <strong>No secrets exposed</strong>
+          <p>Tokens, passwords, and signing secrets are shown only as configured or missing.</p>
+        </div>
+        <div>
+          <strong>Read-only first</strong>
+          <p>This page reports state. Editing settings belongs in later audited controls.</p>
+        </div>
+        <div>
+          <strong>Use with traces</strong>
+          <p>Use Tasks for per-run timelines and Usage for model and cost attribution.</p>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <section class="config-grid" aria-label="Runtime configuration">
+    {% for section in system.config_sections %}
+      <article class="card config-card">
+        <header>
+          <h2>{{ section.title }}</h2>
+        </header>
+        <dl class="config-list">
+          {% for row in section.rows %}
+            <div>
+              <dt>{{ row.name }}</dt>
+              <dd>
+                <span class="config-value badge-{{ row.tone }}">{{ row.value }}</span>
+                {% if row.detail %}
+                  <small>{{ row.detail }}</small>
+                {% endif %}
+              </dd>
+            </div>
+          {% endfor %}
+        </dl>
+      </article>
+    {% endfor %}
+  </section>
+{% endblock %}

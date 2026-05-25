@@ -11,12 +11,15 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 from sqlalchemy import Select, case, func, select
 from sqlalchemy.engine import Row
 from sqlalchemy.orm import Session
 from sqlalchemy.sql.elements import ColumnElement
 
+from kortny.config import Settings
+from kortny.dashboard.settings import DashboardSettings
 from kortny.db.models import (
     Artifact,
     LLMUsage,
@@ -276,6 +279,47 @@ class UserDetail:
     tasks: tuple[UserTaskRow, ...]
     usage: tuple[LLMUsage, ...]
     artifacts: tuple[UserArtifactRow, ...]
+
+
+@dataclass(frozen=True)
+class SystemMetric:
+    label: str
+    value: str
+    detail: str | None = None
+    tone: str = "neutral"
+
+
+@dataclass(frozen=True)
+class SystemCheck:
+    group: str
+    name: str
+    status: str
+    tone: str
+    detail: str
+    action: str | None = None
+
+
+@dataclass(frozen=True)
+class SystemConfigRow:
+    name: str
+    value: str
+    detail: str | None = None
+    tone: str = "neutral"
+
+
+@dataclass(frozen=True)
+class SystemConfigSection:
+    title: str
+    rows: tuple[SystemConfigRow, ...]
+
+
+@dataclass(frozen=True)
+class SystemHealth:
+    overall_label: str
+    overall_tone: str
+    metrics: tuple[SystemMetric, ...]
+    checks: tuple[SystemCheck, ...]
+    config_sections: tuple[SystemConfigSection, ...]
 
 
 def list_tasks(
@@ -653,6 +697,99 @@ def get_user_detail(
     )
 
 
+def get_system_health(
+    session: Session,
+    *,
+    dashboard_settings: DashboardSettings,
+    runtime_settings: Settings | None = None,
+    runtime_error: str | None = None,
+) -> SystemHealth:
+    """Return a read-only operator snapshot for setup and system health."""
+
+    total_tasks = session.scalar(select(func.count()).select_from(Task)) or 0
+    active_tasks = (
+        session.scalar(
+            select(func.count())
+            .select_from(Task)
+            .where(Task.status.in_((TaskStatus.pending, TaskStatus.running)))
+        )
+        or 0
+    )
+    failed_tasks = (
+        session.scalar(
+            select(func.count())
+            .select_from(Task)
+            .where(Task.status.in_((TaskStatus.failed, TaskStatus.crashed)))
+        )
+        or 0
+    )
+    llm_calls = session.scalar(select(func.count()).select_from(LLMUsage)) or 0
+    last_task_at = session.scalar(select(func.max(Task.created_at)))
+
+    checks: list[SystemCheck] = [
+        SystemCheck(
+            group="Core",
+            name="Database",
+            status="Connected",
+            tone="success",
+            detail=f"{total_tasks:,} tasks and {llm_calls:,} LLM calls recorded.",
+        ),
+    ]
+
+    if runtime_settings is None:
+        checks.append(
+            SystemCheck(
+                group="Core",
+                name="Runtime settings",
+                status="Needs setup",
+                tone="danger",
+                detail=runtime_error or "Runtime configuration could not be loaded.",
+                action="Set the required Slack, LLM, and Postgres environment variables.",
+            )
+        )
+    else:
+        checks.extend(_runtime_checks(runtime_settings))
+
+    checks.append(_dashboard_auth_check(dashboard_settings))
+
+    metrics = (
+        SystemMetric(
+            label="Overall",
+            value=_overall_label(checks),
+            detail="Worst current setup check.",
+            tone=_overall_tone(checks),
+        ),
+        SystemMetric(
+            label="Tasks",
+            value=f"{total_tasks:,}",
+            detail=f"{active_tasks:,} active",
+        ),
+        SystemMetric(
+            label="Failures",
+            value=f"{failed_tasks:,}",
+            detail="Failed or crashed tasks",
+            tone="danger" if failed_tasks else "neutral",
+        ),
+        SystemMetric(
+            label="Last Task",
+            value=_datetime_label(last_task_at),
+            detail="Most recent task creation",
+        ),
+    )
+
+    return SystemHealth(
+        overall_label=_overall_label(checks),
+        overall_tone=_overall_tone(checks),
+        metrics=metrics,
+        checks=tuple(checks),
+        config_sections=_config_sections(
+            dashboard_settings=dashboard_settings,
+            runtime_settings=runtime_settings,
+            runtime_error=runtime_error,
+        ),
+    )
+
+
 def parse_date_bound(
     value: str | None, *, inclusive_end: bool = False
 ) -> datetime | None:
@@ -669,6 +806,363 @@ def parse_date_bound(
     if inclusive_end:
         return parsed + timedelta(days=1)
     return parsed
+
+
+def _runtime_checks(settings: Settings) -> tuple[SystemCheck, ...]:
+    model_tier_count = len(
+        tuple(
+            model
+            for model in (
+                settings.llm_cheap_model,
+                settings.llm_standard_model,
+                settings.llm_analysis_model,
+                settings.llm_document_model,
+                settings.llm_high_reasoning_model,
+            )
+            if model
+        )
+    )
+    return (
+        SystemCheck(
+            group="Core",
+            name="Slack app",
+            status="Configured",
+            tone="success",
+            detail=f"Socket mode credentials are present for app name {settings.slack_app_name!r}.",
+        ),
+        SystemCheck(
+            group="Core",
+            name="LLM provider",
+            status="Configured",
+            tone="success",
+            detail=f"{settings.llm_provider.value} using {settings.llm_model}.",
+        ),
+        SystemCheck(
+            group="Models",
+            name="Model routing",
+            status="Specialized" if model_tier_count else "Fallback only",
+            tone="success" if model_tier_count else "warning",
+            detail=(
+                f"{model_tier_count:,} specialized model tiers configured."
+                if model_tier_count
+                else "All model tiers fall back to LLM_MODEL."
+            ),
+            action=(
+                None
+                if model_tier_count
+                else "Set LLM_CHEAP_MODEL, LLM_ANALYSIS_MODEL, or document/high reasoning tiers."
+            ),
+        ),
+        SystemCheck(
+            group="Tools",
+            name="Web search",
+            status="Configured" if settings.brave_search_api_key else "Unavailable",
+            tone="success" if settings.brave_search_api_key else "warning",
+            detail=(
+                "Brave Search API key is present."
+                if settings.brave_search_api_key
+                else "Web search tool will fail until BRAVE_SEARCH_API_KEY is set."
+            ),
+        ),
+        SystemCheck(
+            group="Observability",
+            name="Tracing export",
+            status=_observability_status(settings),
+            tone=_observability_tone(settings),
+            detail=_observability_detail(settings),
+            action=(
+                None
+                if settings.otel_exporter_otlp_endpoint
+                else "Run the observability profile or configure an OTLP endpoint for external traces."
+            ),
+        ),
+    )
+
+
+def _dashboard_auth_check(settings: DashboardSettings) -> SystemCheck:
+    default_password = settings.password == "change-me"
+    default_secret = settings.session_secret == "change-me-dashboard-session-secret"
+    if default_password or default_secret:
+        return SystemCheck(
+            group="Dashboard",
+            name="Dashboard auth",
+            status="Needs hardening",
+            tone="danger",
+            detail="Default dashboard credentials or session secret are still in use.",
+            action="Set DASHBOARD_PASSWORD and DASHBOARD_SESSION_SECRET before exposing the dashboard.",
+        )
+    if not settings.secure_cookies:
+        return SystemCheck(
+            group="Dashboard",
+            name="Dashboard auth",
+            status="Local mode",
+            tone="warning",
+            detail="Secure cookies are disabled, which is acceptable for local HTTP only.",
+            action="Enable DASHBOARD_SECURE_COOKIES when serving over HTTPS.",
+        )
+    return SystemCheck(
+        group="Dashboard",
+        name="Dashboard auth",
+        status="Hardened",
+        tone="success",
+        detail="Custom credentials and secure cookies are configured.",
+    )
+
+
+def _config_sections(
+    *,
+    dashboard_settings: DashboardSettings,
+    runtime_settings: Settings | None,
+    runtime_error: str | None,
+) -> tuple[SystemConfigSection, ...]:
+    dashboard_rows = (
+        SystemConfigRow("Dashboard user", dashboard_settings.username),
+        SystemConfigRow(
+            "Dashboard password",
+            "Default" if dashboard_settings.password == "change-me" else "Custom",
+            tone=(
+                "danger" if dashboard_settings.password == "change-me" else "success"
+            ),
+        ),
+        SystemConfigRow(
+            "Session secret",
+            (
+                "Default"
+                if dashboard_settings.session_secret
+                == "change-me-dashboard-session-secret"
+                else "Custom"
+            ),
+            tone=(
+                "danger"
+                if dashboard_settings.session_secret
+                == "change-me-dashboard-session-secret"
+                else "success"
+            ),
+        ),
+        SystemConfigRow(
+            "Secure cookies",
+            "Enabled" if dashboard_settings.secure_cookies else "Disabled",
+            detail="Use enabled when served over HTTPS.",
+            tone="success" if dashboard_settings.secure_cookies else "warning",
+        ),
+        SystemConfigRow(
+            "Postgres URL",
+            _redact_url(dashboard_settings.postgres_url),
+            detail="Password is always hidden.",
+        ),
+    )
+
+    sections: list[SystemConfigSection] = [
+        SystemConfigSection("Dashboard", dashboard_rows),
+    ]
+
+    if runtime_settings is None:
+        sections.append(
+            SystemConfigSection(
+                "Runtime",
+                (
+                    SystemConfigRow(
+                        "Configuration",
+                        "Invalid",
+                        detail=runtime_error or "Runtime settings could not load.",
+                        tone="danger",
+                    ),
+                ),
+            )
+        )
+        return tuple(sections)
+
+    sections.extend(
+        (
+            SystemConfigSection(
+                "Runtime",
+                (
+                    SystemConfigRow(
+                        "App Postgres URL",
+                        _redact_url(runtime_settings.postgres_url),
+                        detail="Runtime database target with password hidden.",
+                    ),
+                    SystemConfigRow(
+                        "Release",
+                        runtime_settings.kortny_release
+                        or runtime_settings.kortny_version
+                        or "Not set",
+                    ),
+                ),
+            ),
+            SystemConfigSection(
+                "Slack",
+                (
+                    SystemConfigRow("App name", runtime_settings.slack_app_name),
+                    SystemConfigRow("Bot token", "Configured", tone="success"),
+                    SystemConfigRow("Socket app token", "Configured", tone="success"),
+                    SystemConfigRow("Signing secret", "Configured", tone="success"),
+                    SystemConfigRow(
+                        "File read limit",
+                        f"{runtime_settings.slack_file_read_max_bytes:,} bytes",
+                    ),
+                ),
+            ),
+            SystemConfigSection(
+                "Models",
+                (
+                    SystemConfigRow("Provider", runtime_settings.llm_provider.value),
+                    SystemConfigRow("Default model", runtime_settings.llm_model),
+                    _model_row("Cheap model", runtime_settings.llm_cheap_model),
+                    _model_row("Standard model", runtime_settings.llm_standard_model),
+                    _model_row("Analysis model", runtime_settings.llm_analysis_model),
+                    _model_row("Document model", runtime_settings.llm_document_model),
+                    _model_row(
+                        "High reasoning model",
+                        runtime_settings.llm_high_reasoning_model,
+                    ),
+                ),
+            ),
+            SystemConfigSection(
+                "Tools",
+                (
+                    SystemConfigRow(
+                        "Brave Search",
+                        (
+                            "Configured"
+                            if runtime_settings.brave_search_api_key
+                            else "Missing"
+                        ),
+                        tone=(
+                            "success"
+                            if runtime_settings.brave_search_api_key
+                            else "warning"
+                        ),
+                    ),
+                    SystemConfigRow(
+                        "Composio",
+                        (
+                            "Configured"
+                            if runtime_settings.composio_api_key
+                            else "Not configured"
+                        ),
+                        tone=(
+                            "success"
+                            if runtime_settings.composio_api_key
+                            else "neutral"
+                        ),
+                    ),
+                ),
+            ),
+            SystemConfigSection(
+                "Observability",
+                (
+                    SystemConfigRow(
+                        "Enabled",
+                        "Yes" if runtime_settings.observability_enabled else "No",
+                        tone=(
+                            "success"
+                            if runtime_settings.observability_enabled
+                            else "warning"
+                        ),
+                    ),
+                    SystemConfigRow(
+                        "Capture mode",
+                        runtime_settings.observability_capture_content,
+                    ),
+                    SystemConfigRow(
+                        "OTLP endpoint",
+                        runtime_settings.otel_exporter_otlp_endpoint
+                        or "Not configured",
+                        tone=(
+                            "success"
+                            if runtime_settings.otel_exporter_otlp_endpoint
+                            else "warning"
+                        ),
+                    ),
+                    SystemConfigRow(
+                        "Trace sampling",
+                        f"{runtime_settings.otel_trace_sampling_ratio:.2f}",
+                    ),
+                ),
+            ),
+        )
+    )
+    return tuple(sections)
+
+
+def _model_row(label: str, value: str | None) -> SystemConfigRow:
+    if value:
+        return SystemConfigRow(label, value, tone="success")
+    return SystemConfigRow(
+        label,
+        "Fallback to default",
+        detail="Set the tier-specific env var to override.",
+        tone="warning",
+    )
+
+
+def _overall_tone(checks: Sequence[SystemCheck]) -> str:
+    tones = {check.tone for check in checks}
+    if "danger" in tones:
+        return "danger"
+    if "warning" in tones:
+        return "warning"
+    return "success"
+
+
+def _overall_label(checks: Sequence[SystemCheck]) -> str:
+    tone = _overall_tone(checks)
+    if tone == "danger":
+        return "Needs setup"
+    if tone == "warning":
+        return "Needs attention"
+    return "Ready"
+
+
+def _observability_status(settings: Settings) -> str:
+    if not settings.observability_enabled:
+        return "Disabled"
+    if settings.otel_exporter_otlp_endpoint:
+        return "Exporting"
+    return "Local only"
+
+
+def _observability_tone(settings: Settings) -> str:
+    if not settings.observability_enabled:
+        return "warning"
+    if settings.otel_exporter_otlp_endpoint:
+        return "success"
+    return "warning"
+
+
+def _observability_detail(settings: Settings) -> str:
+    if not settings.observability_enabled:
+        return "Task events still exist, but OTEL instrumentation is disabled."
+    if settings.otel_exporter_otlp_endpoint:
+        return f"Traces export to {_redact_url(settings.otel_exporter_otlp_endpoint)}."
+    return "Structured logs and task events are available; no external trace sink is configured."
+
+
+def _datetime_label(value: datetime | None) -> str:
+    if value is None:
+        return "-"
+    return value.astimezone(UTC).strftime("%Y-%m-%d %H:%M UTC")
+
+
+def _redact_url(value: str) -> str:
+    parsed = urlsplit(value)
+    if not parsed.scheme or not parsed.netloc:
+        return value
+
+    host = parsed.hostname or ""
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    if parsed.port is not None:
+        host = f"{host}:{parsed.port}"
+
+    if parsed.username:
+        user = parsed.username
+        auth = f"{user}:***@"
+    else:
+        auth = ""
+
+    return urlunsplit((parsed.scheme, f"{auth}{host}", parsed.path, "", ""))
 
 
 IdentityKey = tuple[uuid.UUID, str, str]

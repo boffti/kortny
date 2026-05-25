@@ -151,6 +151,48 @@ def test_dashboard_renders_theme_toggle(
     assert "theme.js" in dashboard_page.text
 
 
+def test_dashboard_system_page_shows_health_and_redacted_config(
+    client: tuple[TestClient, Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    test_client, session = client
+    monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-system-secret")
+    monkeypatch.setenv("SLACK_APP_TOKEN", "xapp-system-secret")
+    monkeypatch.setenv("SLACK_SIGNING_SECRET", "system-signing-secret")
+    monkeypatch.setenv("SLACK_APP_NAME", "kortny")
+    monkeypatch.setenv("LLM_PROVIDER", "openrouter")
+    monkeypatch.setenv("LLM_API_KEY", "llm-system-secret")
+    monkeypatch.setenv("LLM_MODEL", "openai/gpt-5.4-mini")
+    monkeypatch.setenv("LLM_ANALYSIS_MODEL", "anthropic/claude-sonnet-4.6")
+    monkeypatch.setenv("BRAVE_SEARCH_API_KEY", "brave-system-secret")
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://phoenix:4317")
+    monkeypatch.setenv(
+        "POSTGRES_URL",
+        "postgresql://kortny:db-system-secret@localhost/kortny",
+    )
+    create_dashboard_task(session)
+    login(test_client)
+
+    response = test_client.get("/system")
+
+    assert response.status_code == 200
+    assert "System" in response.text
+    assert "Readiness Checks" in response.text
+    assert "Runtime configuration" in response.text
+    assert "Database" in response.text
+    assert "Slack app" in response.text
+    assert "LLM provider" in response.text
+    assert "Model routing" in response.text
+    assert "anthropic/claude-sonnet-4.6" in response.text
+    assert "postgresql://kortny:***@localhost/kortny" in response.text
+    assert "xoxb-system-secret" not in response.text
+    assert "xapp-system-secret" not in response.text
+    assert "system-signing-secret" not in response.text
+    assert "llm-system-secret" not in response.text
+    assert "brave-system-secret" not in response.text
+    assert "db-system-secret" not in response.text
+
+
 def test_dashboard_task_list_shows_cost_models_and_turns(
     client: tuple[TestClient, Session],
 ) -> None:

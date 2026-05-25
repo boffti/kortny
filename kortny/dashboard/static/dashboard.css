@@ -518,6 +518,15 @@ p {
   font-variant-numeric: tabular-nums;
 }
 
+.metric-card small {
+  color: var(--muted-foreground);
+  display: block;
+  font-size: 12px;
+  line-height: 1.35;
+  margin-top: 4px;
+  overflow-wrap: anywhere;
+}
+
 .metric-card .metric-time {
   display: block;
   font-size: 13px;
@@ -531,6 +540,22 @@ p {
 
 .usage-summary {
   margin-bottom: 20px;
+}
+
+.system-summary {
+  margin-bottom: 20px;
+}
+
+.metric-danger {
+  border-color: color-mix(in srgb, var(--destructive) 22%, var(--border));
+}
+
+.metric-warning {
+  border-color: color-mix(in srgb, var(--warning) 24%, var(--border));
+}
+
+.metric-success {
+  border-color: color-mix(in srgb, var(--success) 22%, var(--border));
 }
 
 .charts-grid {
@@ -739,6 +764,167 @@ pre {
   background: var(--destructive-bg);
   border-color: color-mix(in srgb, var(--destructive) 28%, transparent);
   color: var(--destructive);
+}
+
+.status-chip {
+  align-self: start;
+  border-radius: 999px;
+  flex: 0 0 auto;
+  font-size: 13px;
+  min-height: 28px;
+  padding: 4px 10px;
+}
+
+.system-grid {
+  display: grid;
+  gap: 20px;
+  grid-template-columns: minmax(0, 1.55fr) minmax(280px, 0.7fr);
+  margin-bottom: 20px;
+}
+
+.system-checks,
+.system-note,
+.config-card {
+  min-width: 0;
+}
+
+.check-list {
+  display: grid;
+}
+
+.check-row {
+  align-items: start;
+  border-bottom: 1px solid var(--border);
+  display: grid;
+  gap: 12px;
+  grid-template-columns: 12px minmax(0, 1fr) auto;
+  padding: 14px 16px;
+}
+
+.check-row:last-child {
+  border-bottom: 0;
+}
+
+.check-marker {
+  border-radius: 999px;
+  height: 10px;
+  margin-top: 6px;
+  width: 10px;
+}
+
+.check-success {
+  background: var(--success);
+}
+
+.check-warning {
+  background: var(--warning);
+}
+
+.check-danger {
+  background: var(--destructive);
+}
+
+.check-neutral {
+  background: var(--muted-foreground);
+}
+
+.check-copy {
+  min-width: 0;
+}
+
+.check-title {
+  display: grid;
+  gap: 1px;
+}
+
+.check-title span {
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.check-title strong {
+  color: var(--foreground);
+  font-size: 14px;
+}
+
+.check-copy small,
+.config-list small {
+  color: var(--muted-foreground);
+  display: block;
+  font-size: 12px;
+  line-height: 1.35;
+  margin-top: 3px;
+}
+
+.note-list {
+  display: grid;
+  gap: 0;
+}
+
+.note-list > div {
+  border-bottom: 1px solid var(--border);
+  padding: 14px 16px;
+}
+
+.note-list > div:last-child {
+  border-bottom: 0;
+}
+
+.note-list strong {
+  color: var(--foreground);
+  display: block;
+  font-size: 13px;
+}
+
+.config-grid {
+  display: grid;
+  gap: 20px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.config-list {
+  display: grid;
+  margin: 0;
+}
+
+.config-list > div {
+  align-items: start;
+  border-bottom: 1px solid var(--border);
+  display: grid;
+  gap: 12px;
+  grid-template-columns: 156px minmax(0, 1fr);
+  padding: 11px 16px;
+}
+
+.config-list > div:last-child {
+  border-bottom: 0;
+}
+
+.config-list dt {
+  color: var(--muted-foreground);
+  font-size: 12px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.config-list dd {
+  margin: 0;
+  min-width: 0;
+}
+
+.config-value {
+  border: 1px solid transparent;
+  border-radius: 999px;
+  color: var(--foreground);
+  display: inline-block;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 650;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  padding: 2px 8px;
 }
 
 .timeline {
@@ -1100,6 +1286,24 @@ pre {
   }
 
   .summary-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .system-grid,
+  .config-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .check-row {
+    grid-template-columns: 10px minmax(0, 1fr);
+  }
+
+  .check-row > .badge {
+    justify-self: start;
+    margin-left: 22px;
+  }
+
+  .config-list > div {
     grid-template-columns: 1fr;
   }
 

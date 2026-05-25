@@ -18,9 +18,11 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session, sessionmaker
 from starlette.middleware.sessions import SessionMiddleware
 
+from kortny.config import SettingsError, load_settings
 from kortny.dashboard.data import (
     DEFAULT_PAGE_SIZE,
     MAX_PAGE_SIZE,
+    get_system_health,
     get_task_detail,
     get_usage_aggregate,
     get_user_detail,
@@ -231,6 +233,36 @@ def register_routes(app: FastAPI) -> None:
                 "detail": detail,
                 "from_date": from_date or "",
                 "to_date": to_date or "",
+            },
+        )
+
+    @app.get("/system", response_class=HTMLResponse)
+    def system(
+        request: Request,
+        username: Annotated[str, Depends(require_user)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> Response:
+        settings = cast(DashboardSettings, request.app.state.dashboard_settings)
+        runtime_settings = None
+        runtime_error = None
+        try:
+            runtime_settings = load_settings()
+        except SettingsError as exc:
+            runtime_error = str(exc)
+
+        system_health = get_system_health(
+            session,
+            dashboard_settings=settings,
+            runtime_settings=runtime_settings,
+            runtime_error=runtime_error,
+        )
+        return templates.TemplateResponse(
+            request=request,
+            name="system.html",
+            context={
+                "active_page": "system",
+                "dashboard_user": username,
+                "system": system_health,
             },
         )
 

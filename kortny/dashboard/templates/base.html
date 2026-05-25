@@ -4,7 +4,9 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{% block title %}Kortny Dashboard{% endblock %}</title>
+    {% include "_theme_init.html" %}
     <link rel="stylesheet" href="{{ url_for('static', path='/dashboard.css') }}">
+    <script src="{{ url_for('static', path='/theme.js') }}" defer></script>
   </head>
   <body>
     <a class="skip-link" href="#main">Skip to dashboard content</a>
@@ -20,6 +22,7 @@
           <a class="nav-item {{ 'active' if active_page == 'users' else '' }}" href="/users" {% if active_page == 'users' %}aria-current="page"{% endif %}>Users</a>
         </nav>
         <div class="sidebar-footer">
+          {% include "_theme_toggle.html" %}
           <div class="user-pill">
             <span>Signed in as</span>
             <strong>{{ dashboard_user }}</strong>
@@ -31,9 +34,12 @@
       </aside>
       <div class="content-column">
         <header class="mobile-bar">
-          <div>
-            <a class="brand" href="/">Kortny</a>
-            <span class="subtitle">Operator Dashboard</span>
+          <div class="mobile-bar-top">
+            <div>
+              <a class="brand" href="/">Kortny</a>
+              <span class="subtitle">Operator Dashboard</span>
+            </div>
+            {% include "_theme_toggle.html" %}
           </div>
           <nav class="mobile-nav">
             <a class="nav-item {{ 'active' if active_page == 'tasks' else '' }}" href="/" {% if active_page == 'tasks' %}aria-current="page"{% endif %}>Tasks</a>

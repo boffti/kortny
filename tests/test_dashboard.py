@@ -130,6 +130,27 @@ def test_dashboard_login_and_logout_flow(
     assert locked_response.status_code == 303
 
 
+def test_dashboard_renders_theme_toggle(
+    client: tuple[TestClient, Session],
+) -> None:
+    test_client, _session = client
+
+    login_page = test_client.get("/login")
+
+    assert login_page.status_code == 200
+    assert "data-theme-toggle" in login_page.text
+    assert "kortny.theme" in login_page.text
+    assert "theme.js" in login_page.text
+
+    login(test_client)
+    dashboard_page = test_client.get("/")
+
+    assert dashboard_page.status_code == 200
+    assert "data-theme-toggle" in dashboard_page.text
+    assert "data-theme-toggle-value" in dashboard_page.text
+    assert "theme.js" in dashboard_page.text
+
+
 def test_dashboard_task_list_shows_cost_models_and_turns(
     client: tuple[TestClient, Session],
 ) -> None:

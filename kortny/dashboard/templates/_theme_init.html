@@ -1,0 +1,12 @@
+<script>
+  (function () {
+    try {
+      var storedTheme = window.localStorage.getItem("kortny.theme");
+      var prefersDark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+      var theme = storedTheme === "dark" || storedTheme === "light" ? storedTheme : prefersDark ? "dark" : "light";
+      document.documentElement.dataset.theme = theme;
+    } catch (_error) {
+      document.documentElement.dataset.theme = "light";
+    }
+  })();
+</script>

@@ -39,6 +39,8 @@ from kortny.slack.reactions import (
 from kortny.slack.thread_context import SlackThreadTranscriptProvider
 from kortny.tasks import TaskCancelledError, TaskService
 from kortny.tools import (
+    ForgetFactTool,
+    InspectMemoryTool,
     PdfGeneratorTool,
     RecallFactTool,
     RememberFactTool,
@@ -281,6 +283,8 @@ class AgentTaskExecutor:
         )
         remember_fact = RememberFactTool(service=memory_service, task=task)
         recall_fact = RecallFactTool(service=memory_service, task=task)
+        inspect_memory = InspectMemoryTool(service=memory_service, task=task)
+        forget_fact = ForgetFactTool(service=memory_service, task=task)
         return ToolRegistry(
             [
                 web_search,
@@ -289,6 +293,8 @@ class AgentTaskExecutor:
                 slack_file_read,
                 remember_fact,
                 recall_fact,
+                inspect_memory,
+                forget_fact,
             ]
         )
 

@@ -5,6 +5,8 @@ import pytest
 from kortny.tools import (
     DuplicateToolError,
     EchoTool,
+    ForgetFactTool,
+    InspectMemoryTool,
     RememberFactTool,
     ToolArtifact,
     ToolNotFoundError,
@@ -66,6 +68,12 @@ def test_remember_fact_tool_schema_requires_faithful_memory_details() -> None:
     assert "Preserve every actionable detail" in RememberFactTool.description
     assert "footer/header placement" in RememberFactTool.description
     assert "placement details like footer left" in value_text_description
+
+
+def test_memory_control_tool_schemas_are_user_trust_focused() -> None:
+    assert "what Kortny remembers" in InspectMemoryTool.description
+    assert "provenance" in InspectMemoryTool.description
+    assert "audit-preserving soft delete" in ForgetFactTool.description
 
 
 def test_registry_rejects_duplicate_tool_names() -> None:

@@ -10,11 +10,18 @@ from kortny.tools.slack_channel_history import (
 from kortny.tools.slack_file_read import SlackFileReadError, SlackFileReadTool
 from kortny.tools.types import JsonObject, JsonSchema, Tool, ToolArtifact, ToolResult
 from kortny.tools.web_search import WebSearchTool
-from kortny.tools.workspace_memory import RecallFactTool, RememberFactTool
+from kortny.tools.workspace_memory import (
+    ForgetFactTool,
+    InspectMemoryTool,
+    RecallFactTool,
+    RememberFactTool,
+)
 
 __all__ = [
     "DuplicateToolError",
     "EchoTool",
+    "ForgetFactTool",
+    "InspectMemoryTool",
     "JsonObject",
     "JsonSchema",
     "PdfGeneratorTool",

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import builtins
 import json
+import re
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -34,6 +35,9 @@ PENDING_PROPOSAL_MESSAGE = "workspace_state_proposal_created"
 CONFIRMED_PROPOSAL_MESSAGE = "workspace_state_proposal_confirmed"
 REJECTED_PROPOSAL_MESSAGE = "workspace_state_proposal_rejected"
 FORGOTTEN_FACT_MESSAGE = "workspace_state_fact_forgotten"
+FORGET_REQUEST_MESSAGE = "workspace_state_forget_requested"
+INSPECTED_MEMORY_MESSAGE = "workspace_state_inspected"
+BLOCKED_SECRET_MESSAGE = "workspace_state_secret_blocked"
 DEFAULT_SOURCE_KIND = "agent_proposed"
 GENERIC_MEMORY_DETAIL_KEYS = frozenset(
     {
@@ -46,10 +50,36 @@ GENERIC_MEMORY_DETAIL_KEYS = frozenset(
     }
 )
 MAX_APPENDED_MEMORY_DETAILS = 6
+SECRET_KEY_RE = re.compile(
+    r"(api[_-]?key|access[_-]?token|refresh[_-]?token|bearer[_-]?token|"
+    r"bot[_-]?token|client[_-]?secret|signing[_-]?secret|private[_-]?key|"
+    r"password|passwd|secret|token)",
+    re.I,
+)
+SECRET_VALUE_RE = re.compile(
+    r"(xox[baprs]-[A-Za-z0-9-]+|xapp-[A-Za-z0-9-]+|"
+    r"-----BEGIN [A-Z ]*PRIVATE KEY-----|"
+    r"bearer\s+[A-Za-z0-9._~+/\-]+=*|"
+    r"\bsk-[A-Za-z0-9][A-Za-z0-9_-]{16,}\b|"
+    r"\b[A-Za-z0-9._%+-]+:[A-Za-z0-9._~+/\-]{12,}\b)",
+    re.I,
+)
+SECRET_ASSIGNMENT_RE = re.compile(
+    r"(api[_ -]?key|token|secret|password)\s*[:=]\s*\S{8,}",
+    re.I,
+)
 
 
 class WorkspaceStateServiceError(RuntimeError):
     """Raised when the workspace memory service cannot complete an operation."""
+
+
+class WorkspaceStateSecretError(WorkspaceStateServiceError):
+    """Raised when a memory proposal appears to contain a secret."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__("Memory proposals cannot store secrets")
+        self.reason = reason
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,6 +121,11 @@ class Fact:
     source_event_id: int | None
     confirmed_by_user_id: str | None
     confirmed_at: datetime | None
+    source_slack_channel_id: str | None
+    source_slack_message_ts: str | None
+    proposed_by: str
+    proposed_reason: str | None
+    confidence_reason: str | None
     created_at: datetime
     updated_at: datetime
 
@@ -247,6 +282,24 @@ class WorkspaceStateService:
         value_json = _json_object(value)
         readable_value = value_text or _value_text(value_json)
         readable_value = _faithful_value_text(readable_value, value_json)
+        if secret_reason := _secret_candidate_reason(
+            key=normalized_key,
+            value=value_json,
+            value_text=readable_value,
+        ):
+            self.task_service.append_event(
+                task,
+                TaskEventType.log,
+                {
+                    "message": BLOCKED_SECRET_MESSAGE,
+                    "installation_id": str(installation_id),
+                    "scope_type": scope_type,
+                    "scope_id": scope_id,
+                    "key": normalized_key,
+                    "reason": secret_reason,
+                },
+            )
+            raise WorkspaceStateSecretError(secret_reason)
         confidence = _optional_confidence_score(confidence_score)
 
         prompt_ts = self.poster.post_message(
@@ -418,6 +471,8 @@ class WorkspaceStateService:
         scope_id: str | None,
         key: str,
         by_user_id: str,
+        *,
+        audit_task_id: uuid.UUID | None = None,
     ) -> int:
         """Forget current active facts for a key/scope with no replacement."""
 
@@ -453,7 +508,47 @@ class WorkspaceStateService:
                         "forgotten_by_user_id": by_user_id,
                     },
                 )
+        if audit_task_id is not None:
+            self.task_service.append_event(
+                audit_task_id,
+                TaskEventType.log,
+                {
+                    "message": FORGET_REQUEST_MESSAGE,
+                    "scope_type": scope_type,
+                    "scope_id": scope_id,
+                    "key": _normalize_key(key),
+                    "forgotten_by_user_id": by_user_id,
+                    "forgotten_count": len(rows),
+                    "workspace_state_ids": [str(row.id) for row in rows],
+                },
+            )
         return len(rows)
+
+    def record_inspection(
+        self,
+        source_task_id: uuid.UUID,
+        *,
+        scope_type: str,
+        scope_id: str | None,
+        key: str | None,
+        include_history: bool,
+        count: int,
+    ) -> None:
+        """Append an audit event for a memory inspection request."""
+
+        _validate_scope(scope_type, scope_id)
+        self.task_service.append_event(
+            source_task_id,
+            TaskEventType.log,
+            {
+                "message": INSPECTED_MEMORY_MESSAGE,
+                "scope_type": scope_type,
+                "scope_id": scope_id,
+                "key": _normalize_key(key) if key is not None else None,
+                "include_history": include_history,
+                "count": count,
+            },
+        )
 
     def _current_statement(
         self, installation_id: uuid.UUID
@@ -513,6 +608,11 @@ def _fact_from_state(state: WorkspaceState) -> Fact:
         source_event_id=state.source_event_id,
         confirmed_by_user_id=state.confirmed_by_user_id,
         confirmed_at=state.confirmed_at,
+        source_slack_channel_id=state.source_slack_channel_id,
+        source_slack_message_ts=state.source_slack_message_ts,
+        proposed_by=state.proposed_by,
+        proposed_reason=state.proposed_reason,
+        confidence_reason=state.confidence_reason,
         created_at=state.created_at,
         updated_at=state.updated_at,
     )
@@ -601,6 +701,51 @@ def _faithful_value_text(value_text: str, value: Mapping[str, Any]) -> str:
     if not missing_phrases:
         return text
     return f"{text}; {'; '.join(missing_phrases)}"
+
+
+def _secret_candidate_reason(
+    *,
+    key: str,
+    value: Mapping[str, Any],
+    value_text: str | None,
+) -> str | None:
+    if SECRET_KEY_RE.search(key):
+        return f"memory key {key!r} looks like a secret field"
+
+    for path, text in _string_values(value):
+        path_text = ".".join(path)
+        if path_text and SECRET_KEY_RE.search(path_text):
+            return f"value field {path_text!r} looks like a secret field"
+        if SECRET_VALUE_RE.search(text) or SECRET_ASSIGNMENT_RE.search(text):
+            label = path_text or "value"
+            return f"{label!r} looks like it contains a secret"
+
+    if value_text and (
+        SECRET_VALUE_RE.search(value_text) or SECRET_ASSIGNMENT_RE.search(value_text)
+    ):
+        return "value_text looks like it contains a secret"
+
+    return None
+
+
+def _string_values(
+    value: Any,
+    path: tuple[str, ...] = (),
+) -> list[tuple[tuple[str, ...], str]]:
+    if isinstance(value, Mapping):
+        values: list[tuple[tuple[str, ...], str]] = []
+        for key, child in value.items():
+            values.extend(_string_values(child, path + (str(key),)))
+        return values
+    if isinstance(value, list):
+        values = []
+        for index, child in enumerate(value):
+            values.extend(_string_values(child, path + (str(index),)))
+        return values
+    if isinstance(value, str):
+        text = value.strip()
+        return [(path, text)] if text else []
+    return []
 
 
 def _memory_detail_phrases(

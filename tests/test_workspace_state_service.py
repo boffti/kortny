@@ -21,11 +21,16 @@ from kortny.db.models import (
     WorkspaceState,
 )
 from kortny.db.session import make_engine, make_session_factory, normalize_database_url
-from kortny.memory import Fact, WorkspaceStateService
+from kortny.memory import Fact, WorkspaceStateSecretError, WorkspaceStateService
 from kortny.slack import SlackIngress
 from kortny.slack.posting import SlackThread
 from kortny.tasks import TaskService
-from kortny.tools import RecallFactTool, RememberFactTool
+from kortny.tools import (
+    ForgetFactTool,
+    InspectMemoryTool,
+    RecallFactTool,
+    RememberFactTool,
+)
 
 TEST_POSTGRES_URL = os.environ.get("KORTNY_TEST_POSTGRES_URL")
 
@@ -353,6 +358,123 @@ def test_forget_removes_only_current_active_fact(db_session: Session) -> None:
     assert listed == []
     assert [fact.status for fact in history] == ["superseded", "forgotten"]
     assert history[-1].id == active.id
+
+
+def test_memory_tool_inspect_and_forget_preserve_audit_history(
+    db_session: Session,
+) -> None:
+    task = create_task(db_session)
+    poster = FakeConfirmationPoster()
+    service = WorkspaceStateService(db_session, poster=poster)
+    propose_and_confirm(
+        service,
+        task=task,
+        key="pdf_style",
+        value={"style": "concise"},
+        user_id="U1",
+    )
+    current = propose_and_confirm(
+        service,
+        task=task,
+        key="pdf_style",
+        value={"style": "board-ready"},
+        user_id="U2",
+    )
+
+    inspect = InspectMemoryTool(service=service, task=task)
+    forget = ForgetFactTool(service=service, task=task)
+
+    listed = inspect.invoke({"scope": "user"}).output
+    forgotten = forget.invoke({"scope": "user", "key": "pdf_style"}).output
+    after_forget = inspect.invoke({"scope": "user"}).output
+    history = inspect.invoke(
+        {"scope": "user", "key": "pdf_style", "include_history": True}
+    ).output
+    audit_events = list(
+        db_session.scalars(
+            select(TaskEvent)
+            .where(TaskEvent.task_id == task.id)
+            .order_by(TaskEvent.seq)
+        )
+    )
+
+    assert listed["count"] == 1
+    assert listed["facts"][0]["id"] == str(current.id)
+    assert listed["facts"][0]["status"] == "active"
+    assert listed["facts"][0]["source_task_id"] == str(task.id)
+    assert forgotten["forgotten_count"] == 1
+    assert after_forget["count"] == 0
+    assert history["count"] == 2
+    assert [fact["status"] for fact in history["facts"]] == [
+        "superseded",
+        "forgotten",
+    ]
+    assert history["facts"][-1]["id"] == str(current.id)
+    assert [
+        event.payload.get("message")
+        for event in audit_events
+        if event.payload.get("message")
+        in {"workspace_state_inspected", "workspace_state_forget_requested"}
+    ] == [
+        "workspace_state_inspected",
+        "workspace_state_forget_requested",
+        "workspace_state_inspected",
+        "workspace_state_inspected",
+    ]
+
+
+def test_propose_blocks_secret_like_memory_and_records_audit_event(
+    db_session: Session,
+) -> None:
+    task = create_task(db_session)
+    poster = FakeConfirmationPoster()
+    service = WorkspaceStateService(db_session, poster=poster)
+
+    with pytest.raises(WorkspaceStateSecretError) as exc_info:
+        service.propose(
+            task.installation_id,
+            "user",
+            "U123",
+            "openrouter_api_key",
+            {"value": "sk-or-v1-this-is-a-secret-value"},
+            task.id,
+        )
+
+    state_count = db_session.scalar(select(func.count()).select_from(WorkspaceState))
+    blocked_event = db_session.scalar(
+        select(TaskEvent).where(
+            TaskEvent.payload["message"].as_string() == "workspace_state_secret_blocked"
+        )
+    )
+
+    assert "secret" in exc_info.value.reason
+    assert state_count == 0
+    assert poster.calls == []
+    assert blocked_event is not None
+    assert blocked_event.payload["key"] == "openrouter_api_key"
+    assert "sk-or" not in str(blocked_event.payload)
+
+
+def test_remember_fact_tool_returns_recoverable_error_for_secret(
+    db_session: Session,
+) -> None:
+    task = create_task(db_session)
+    poster = FakeConfirmationPoster()
+    service = WorkspaceStateService(db_session, poster=poster)
+    remember = RememberFactTool(service=service, task=task)
+
+    result = remember.invoke(
+        {
+            "scope": "user",
+            "key": "api_key",
+            "value": {"value": "sk-or-v1-this-is-a-secret-value"},
+        }
+    )
+
+    assert result.output["status"] == "blocked"
+    assert result.output["error"]["code"] == "secret_not_stored"
+    assert result.output["error"]["recoverable"] is True
+    assert poster.calls == []
 
 
 def test_memory_tools_propose_and_recall_fact(db_session: Session) -> None:

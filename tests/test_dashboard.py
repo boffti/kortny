@@ -199,6 +199,9 @@ def test_dashboard_usage_rollups_by_model_user_and_day(
     assert "openai/gpt-5.4-mini" in response.text
     assert "Aneesh Melkot" in response.text
     assert "UCost" in response.text
+    assert "Cost by Channel" in response.text
+    assert "#ops-desk" in response.text
+    assert "CCost" in response.text
     assert "2026-05-24" in response.text
     assert "1,200" in response.text
     assert "$0.004200" in response.text

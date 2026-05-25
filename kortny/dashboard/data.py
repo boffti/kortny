@@ -144,6 +144,7 @@ class UsageAggregate:
     end: datetime | None
     by_model: tuple[AggregateRow, ...]
     by_user: tuple[AggregateRow, ...]
+    by_channel: tuple[AggregateRow, ...]
     by_day: tuple[DailyUsageRow, ...]
 
 
@@ -295,6 +296,40 @@ def get_usage_aggregate(
         )
         for row in by_user_raw_rows
     )
+    by_channel_raw_rows = session.execute(
+        select(
+            Task.installation_id,
+            Task.slack_channel_id,
+            func.count(LLMUsage.id),
+            func.coalesce(func.sum(LLMUsage.input_tokens), 0),
+            func.coalesce(func.sum(LLMUsage.output_tokens), 0),
+            func.coalesce(func.sum(LLMUsage.cost_usd), 0),
+        )
+        .join(Task, Task.id == LLMUsage.task_id)
+        .where(*usage_filter)
+        .group_by(Task.installation_id, Task.slack_channel_id)
+        .order_by(func.sum(LLMUsage.cost_usd).desc())
+    ).all()
+    channel_identities = _identity_map_from_keys(
+        session,
+        (
+            (row[0], "channel", row[1])
+            for row in by_channel_raw_rows
+            if row[0] is not None and row[1] is not None
+        ),
+    )
+    by_channel_rows = tuple(
+        _aggregate_row(
+            (row[1], row[2], row[3], row[4], row[5]),
+            label=_identity_label(
+                channel_identities,
+                installation_id=row[0],
+                kind="channel",
+                slack_id=row[1],
+            ),
+        )
+        for row in by_channel_raw_rows
+    )
     day_bucket = func.date_trunc("day", LLMUsage.created_at).label("day")
     by_day_rows = session.execute(
         select(
@@ -313,6 +348,7 @@ def get_usage_aggregate(
         end=end,
         by_model=tuple(_aggregate_row(row) for row in by_model_rows),
         by_user=by_user_rows,
+        by_channel=by_channel_rows,
         by_day=tuple(_daily_row(row) for row in by_day_rows),
     )
 

@@ -41,6 +41,15 @@
 
   <section class="card detail-section">
     <header>
+      <h2>Cost by Channel</h2>
+      <p>Slack channel-level usage and cost attribution.</p>
+    </header>
+    {% set rows = aggregate.by_channel %}
+    {% include "_aggregate_table.html" with context %}
+  </section>
+
+  <section class="card detail-section">
+    <header>
       <h2>Cost by Day</h2>
       <p>Daily call volume, token totals, and spend.</p>
     </header>

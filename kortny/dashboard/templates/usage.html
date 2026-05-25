@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+
+{% block title %}Usage - Kortny Dashboard{% endblock %}
+
+{% block content %}
+  <section class="page-heading">
+    <div>
+      <h1>Usage</h1>
+      <p>Cost and token rollups from recorded LLM calls.</p>
+    </div>
+    <form class="filters" method="get" action="/usage">
+      <label>
+        From
+        <input class="input" type="date" name="from" value="{{ from_date }}">
+      </label>
+      <label>
+        To
+        <input class="input" type="date" name="to" value="{{ to_date }}">
+      </label>
+      <button class="btn" type="submit">Apply</button>
+    </form>
+  </section>
+
+  <section class="card detail-section">
+    <header>
+      <h2>Cost by Model</h2>
+      <p>Provider model mix and spend concentration.</p>
+    </header>
+    {% set rows = aggregate.by_model %}
+    {% include "_aggregate_table.html" with context %}
+  </section>
+
+  <section class="card detail-section">
+    <header>
+      <h2>Cost by User</h2>
+      <p>Slack user-level usage and cost attribution.</p>
+    </header>
+    {% set rows = aggregate.by_user %}
+    {% include "_aggregate_table.html" with context %}
+  </section>
+
+  <section class="card detail-section">
+    <header>
+      <h2>Cost by Day</h2>
+      <p>Daily call volume, token totals, and spend.</p>
+    </header>
+    <div class="overflow-x-auto">
+      <table class="table">
+        <caption>Daily LLM usage costs.</caption>
+        <thead>
+          <tr>
+            <th>Day</th>
+            <th class="num">Calls</th>
+            <th class="num">Input Tokens</th>
+            <th class="num">Output Tokens</th>
+            <th class="num">Cost</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in aggregate.by_day %}
+            <tr>
+              <td>{{ row.day }}</td>
+              <td class="num">{{ row.calls }}</td>
+              <td class="num">{{ row.input_tokens }}</td>
+              <td class="num">{{ row.output_tokens }}</td>
+              <td class="num">{{ row.cost_usd|money }}</td>
+            </tr>
+          {% else %}
+            <tr><td colspan="5" class="empty">No usage in this range.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+{% endblock %}

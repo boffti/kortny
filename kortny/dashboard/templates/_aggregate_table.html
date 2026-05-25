@@ -1,0 +1,27 @@
+<div class="overflow-x-auto">
+  <table class="table">
+    <caption>Usage aggregate table.</caption>
+    <thead>
+      <tr>
+        <th>Name</th>
+        <th class="num">Calls</th>
+        <th class="num">Input Tokens</th>
+        <th class="num">Output Tokens</th>
+        <th class="num">Cost</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in rows %}
+        <tr>
+          <td>{{ row.key }}</td>
+          <td class="num">{{ row.calls }}</td>
+          <td class="num">{{ row.input_tokens }}</td>
+          <td class="num">{{ row.output_tokens }}</td>
+          <td class="num">{{ row.cost_usd|money }}</td>
+        </tr>
+      {% else %}
+        <tr><td colspan="5" class="empty">No usage in this range.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>

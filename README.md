@@ -110,6 +110,8 @@ LLM_API_KEY=sk-...
 LLM_MODEL=gpt-4o             # or claude-3-5-sonnet, etc.
 COMPOSIO_API_KEY=...
 BRAVE_SEARCH_API_KEY=...
+DASHBOARD_USERNAME=kortny
+DASHBOARD_PASSWORD=change-me
 POSTGRES_URL=postgresql://kortny:kortny@localhost:5432/kortny
 POSTGRES_DB=kortny
 POSTGRES_USER=kortny
@@ -123,10 +125,15 @@ POSTGRES_HOST_PORT=5432
 docker compose up
 ```
 
-This starts Postgres on `localhost:5432`, runs the Alembic migration, and
-starts the Slack Socket Mode ingress service plus the task worker.
+This starts Postgres on `localhost:5432`, runs the Alembic migration, starts
+the Slack Socket Mode ingress service, starts the task worker, and serves the
+read-only operator dashboard at `http://localhost:8080`.
 
 This does not start optional observability services such as Phoenix.
+
+The dashboard is protected with HTTP Basic Auth using `DASHBOARD_USERNAME` and
+`DASHBOARD_PASSWORD`. It is bound to `127.0.0.1` by default; change
+`DASHBOARD_HOST_PORT` only if you need a different local port.
 
 ### 4. Develop against the local database
 
@@ -143,7 +150,11 @@ To process at most one pending task from your host shell:
 uv run python -m kortny.worker --once
 ```
 
-The management UI service will be added to Compose when that entrypoint lands.
+To inspect task costs and LLM usage, open:
+
+```
+http://localhost:8080
+```
 
 ### Optional: run local observability
 

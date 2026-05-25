@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{% block title %}Kortny Dashboard{% endblock %}</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='/dashboard.css') }}">
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to dashboard content</a>
+    <header class="topbar">
+      <div class="brand-lockup">
+        <a class="brand" href="/">Kortny</a>
+        <span class="subtitle">Operator Dashboard</span>
+      </div>
+      <nav class="nav">
+        <a href="/">Tasks</a>
+        <a href="/usage">Usage</a>
+      </nav>
+    </header>
+    <main id="main" class="shell" tabindex="-1">
+      {% block content %}{% endblock %}
+    </main>
+  </body>
+</html>

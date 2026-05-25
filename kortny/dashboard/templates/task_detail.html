@@ -1,0 +1,150 @@
+{% extends "base.html" %}
+
+{% block title %}Task {{ detail.task.id }} - Kortny Dashboard{% endblock %}
+
+{% block content %}
+  <section class="page-heading">
+    <div>
+      <h1>Task Detail</h1>
+      <p>{{ detail.task.id }}</p>
+    </div>
+    <a class="btn-ghost" href="/">Back to Tasks</a>
+  </section>
+
+  <section class="summary-grid">
+    <div class="card metric-card">
+      <span>Status</span>
+      <strong>{{ detail.task.status.value }}</strong>
+    </div>
+    <div class="card metric-card">
+      <span>Cost</span>
+      <strong>{{ detail.task.total_cost_usd|money }}</strong>
+    </div>
+    <div class="card metric-card">
+      <span>Input Tokens</span>
+      <strong>{{ detail.task.total_input_tokens }}</strong>
+    </div>
+    <div class="card metric-card">
+      <span>Output Tokens</span>
+      <strong>{{ detail.task.total_output_tokens }}</strong>
+    </div>
+  </section>
+
+  <section class="card detail-section">
+    <header>
+      <h2>Request</h2>
+      <p>Original Slack trigger and context identifiers.</p>
+    </header>
+    <dl class="meta">
+      <dt>Channel</dt>
+      <dd>{{ detail.task.slack_channel_id }}</dd>
+      <dt>User</dt>
+      <dd>{{ detail.task.slack_user_id }}</dd>
+      <dt>Thread</dt>
+      <dd>{{ detail.task.slack_thread_ts or "-" }}</dd>
+      <dt>Created</dt>
+      <dd>{{ detail.task.created_at|datetime }}</dd>
+    </dl>
+    <pre>{{ detail.task.input }}</pre>
+  </section>
+
+  <section class="card detail-section">
+    <header>
+      <h2>Result</h2>
+      <p>Final task summary saved by the worker.</p>
+    </header>
+    <pre>{{ detail.task.result_summary or "-" }}</pre>
+  </section>
+
+  <section class="card detail-section">
+    <header>
+      <h2>LLM Usage</h2>
+      <p>Model calls, routing tier, tokens, and recorded cost.</p>
+    </header>
+    <div class="overflow-x-auto">
+      <table class="table">
+        <caption>LLM usage rows for this task.</caption>
+        <thead>
+          <tr>
+            <th>Created</th>
+            <th>Provider</th>
+            <th>Model</th>
+            <th>Tier</th>
+            <th class="num">Input</th>
+            <th class="num">Output</th>
+            <th class="num">Cost</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for usage in detail.usage %}
+            <tr>
+              <td>{{ usage.created_at|datetime }}</td>
+              <td>{{ usage.provider.value }}</td>
+              <td>{{ usage.model }}</td>
+              <td>{{ usage.model_tier or "-" }}</td>
+              <td class="num">{{ usage.input_tokens }}</td>
+              <td class="num">{{ usage.output_tokens }}</td>
+              <td class="num">{{ usage.cost_usd|money }}</td>
+            </tr>
+          {% else %}
+            <tr><td colspan="7" class="empty">No LLM calls recorded.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="card detail-section">
+    <header>
+      <h2>Artifacts</h2>
+      <p>Files generated or posted back to Slack.</p>
+    </header>
+    <div class="overflow-x-auto">
+      <table class="table">
+        <caption>Artifacts created by this task.</caption>
+        <thead>
+          <tr>
+            <th>Created</th>
+            <th>Filename</th>
+            <th>MIME</th>
+            <th class="num">Bytes</th>
+            <th>Slack File</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for artifact in detail.artifacts %}
+            <tr>
+              <td>{{ artifact.created_at|datetime }}</td>
+              <td>{{ artifact.filename }}</td>
+              <td>{{ artifact.mime_type or "-" }}</td>
+              <td class="num">{{ artifact.size_bytes or "-" }}</td>
+              <td>{{ artifact.slack_file_id or "-" }}</td>
+            </tr>
+          {% else %}
+            <tr><td colspan="5" class="empty">No artifacts recorded.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="detail-section">
+    <header class="section-header">
+      <h2>Task Events</h2>
+      <p>Ordered execution events written by the task service.</p>
+    </header>
+    <div class="event-list">
+      {% for event in detail.events %}
+        <article class="card event-card">
+          <header>
+            <strong>#{{ event.seq }} {{ event.type.value }}</strong>
+            <span>{{ event.created_at|datetime }}</span>
+          </header>
+          <pre>{{ event.payload|json }}</pre>
+        </article>
+      {% else %}
+        <p class="empty">No events recorded.</p>
+      {% endfor %}
+    </div>
+  </section>
+{% endblock %}

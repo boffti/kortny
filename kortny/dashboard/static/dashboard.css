@@ -98,10 +98,14 @@ caption {
   border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
-  min-height: 100dvh;
+  height: 100dvh;
+  left: 0;
+  overflow-y: auto;
   padding: 18px 14px;
-  position: sticky;
+  position: fixed;
   top: 0;
+  width: 244px;
+  z-index: 10;
 }
 
 .sidebar-header {
@@ -179,6 +183,7 @@ caption {
 }
 
 .content-column {
+  grid-column: 2;
   min-width: 0;
 }
 
@@ -935,6 +940,10 @@ pre {
 @media (max-width: 760px) {
   .dashboard-layout {
     display: block;
+  }
+
+  .content-column {
+    grid-column: auto;
   }
 
   .sidebar {

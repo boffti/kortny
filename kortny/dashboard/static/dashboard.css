@@ -41,6 +41,10 @@ body {
   text-rendering: optimizeLegibility;
 }
 
+button {
+  appearance: none;
+}
+
 a {
   color: var(--accent);
   text-decoration: none;
@@ -83,23 +87,27 @@ caption {
   top: 0;
 }
 
-.topbar {
-  align-items: center;
-  background: color-mix(in srgb, var(--card) 92%, transparent);
-  border-bottom: 1px solid var(--border);
-  display: flex;
-  justify-content: space-between;
-  min-height: 56px;
-  padding: 0 24px;
-  position: sticky;
-  top: 0;
-  z-index: 10;
+.dashboard-layout {
+  display: grid;
+  grid-template-columns: 244px minmax(0, 1fr);
+  min-height: 100dvh;
 }
 
-.brand-lockup {
-  align-items: baseline;
+.sidebar {
+  background: color-mix(in srgb, var(--card) 94%, transparent);
+  border-right: 1px solid var(--border);
   display: flex;
-  gap: 10px;
+  flex-direction: column;
+  min-height: 100dvh;
+  padding: 18px 14px;
+  position: sticky;
+  top: 0;
+}
+
+.sidebar-header {
+  display: grid;
+  gap: 2px;
+  padding: 0 8px 18px;
 }
 
 .brand {
@@ -112,24 +120,70 @@ caption {
   color: var(--muted-foreground);
 }
 
-.nav {
-  align-items: center;
-  display: flex;
-  gap: 8px;
+.sidebar-nav {
+  display: grid;
+  gap: 4px;
 }
 
-.nav a {
+.nav-item {
   border-radius: 6px;
   color: var(--muted-foreground);
+  display: flex;
   font-weight: 500;
   min-height: 36px;
+  place-items: center start;
   padding: 8px 10px;
+  transition: background-color 160ms ease, color 160ms ease;
 }
 
-.nav a:hover {
+.nav-item:hover,
+.nav-item.active {
   background: var(--muted);
   color: var(--foreground);
   text-decoration: none;
+}
+
+.nav-item.active {
+  font-weight: 700;
+}
+
+.sidebar-footer {
+  display: grid;
+  gap: 10px;
+  margin-top: auto;
+  padding-top: 18px;
+}
+
+.user-pill {
+  background: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  display: grid;
+  gap: 2px;
+  padding: 10px;
+}
+
+.user-pill span {
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.user-pill strong {
+  color: var(--foreground);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.sidebar-logout {
+  width: 100%;
+}
+
+.content-column {
+  min-width: 0;
+}
+
+.mobile-bar {
+  display: none;
 }
 
 .shell {
@@ -434,6 +488,69 @@ pre {
   text-transform: uppercase;
 }
 
+.login-body {
+  background:
+    radial-gradient(circle at top left, rgb(37 99 235 / 10%), transparent 34rem),
+    var(--background);
+}
+
+.login-shell {
+  display: grid;
+  min-height: 100dvh;
+  padding: 24px;
+  place-items: center;
+}
+
+.login-card {
+  max-width: 420px;
+  width: min(100%, 420px);
+}
+
+.login-card header {
+  padding: 24px;
+}
+
+.login-card h1 {
+  font-size: 24px;
+}
+
+.login-kicker {
+  color: var(--accent);
+  display: block;
+  font-size: 13px;
+  font-weight: 800;
+  margin-bottom: 8px;
+  text-transform: uppercase;
+}
+
+.login-form {
+  display: grid;
+  gap: 14px;
+  padding: 18px 24px 24px;
+}
+
+.login-form label {
+  color: var(--foreground);
+  display: grid;
+  font-size: 13px;
+  font-weight: 700;
+  gap: 6px;
+}
+
+.login-submit {
+  margin-top: 4px;
+  width: 100%;
+}
+
+.form-error {
+  background: var(--destructive-bg);
+  border: 1px solid color-mix(in srgb, var(--destructive) 28%, transparent);
+  border-radius: 6px;
+  color: var(--destructive);
+  font-weight: 600;
+  padding: 9px 10px;
+}
+
 .input {
   background: var(--card);
   border: 1px solid var(--input);
@@ -463,26 +580,31 @@ pre {
 }
 
 @media (max-width: 760px) {
-  .topbar,
+  .dashboard-layout {
+    display: block;
+  }
+
+  .sidebar {
+    display: none;
+  }
+
+  .mobile-bar {
+    background: color-mix(in srgb, var(--card) 94%, transparent);
+    border-bottom: 1px solid var(--border);
+    display: grid;
+    gap: 10px;
+    padding: 14px 18px;
+  }
+
+  .mobile-nav {
+    display: flex;
+    gap: 6px;
+  }
+
   .page-heading,
   .filters {
     align-items: stretch;
     flex-direction: column;
-  }
-
-  .topbar {
-    gap: 10px;
-    padding: 14px 18px;
-    position: static;
-  }
-
-  .brand-lockup {
-    flex-direction: column;
-    gap: 0;
-  }
-
-  .nav {
-    justify-content: flex-start;
   }
 
   .shell {

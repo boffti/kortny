@@ -7,14 +7,15 @@ from collections.abc import Iterator
 from decimal import Decimal
 from pathlib import Path
 from typing import Annotated, cast
+from urllib.parse import parse_qs, quote
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session, sessionmaker
+from starlette.middleware.sessions import SessionMiddleware
 
 from kortny.dashboard.data import (
     DEFAULT_PAGE_SIZE,
@@ -29,8 +30,8 @@ from kortny.db.session import make_session_factory
 
 TEMPLATE_DIR = Path(__file__).parent / "templates"
 STATIC_DIR = Path(__file__).parent / "static"
+SESSION_USER_KEY = "dashboard_user"
 
-security = HTTPBasic()
 templates = Jinja2Templates(directory=TEMPLATE_DIR)
 
 
@@ -47,6 +48,14 @@ def create_app(
     app = FastAPI(title="Kortny Dashboard", docs_url=None, redoc_url=None)
     app.state.dashboard_settings = resolved_settings
     app.state.session_factory = resolved_session_factory
+    app.add_middleware(
+        SessionMiddleware,
+        secret_key=resolved_settings.session_secret,
+        session_cookie="kortny_dashboard_session",
+        same_site="lax",
+        https_only=resolved_settings.secure_cookies,
+        max_age=60 * 60 * 24 * 7,
+    )
 
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
@@ -61,10 +70,53 @@ def create_app(
 def register_routes(app: FastAPI) -> None:
     """Register dashboard routes."""
 
+    @app.get("/login", response_class=HTMLResponse)
+    def login_form(request: Request) -> Response:
+        next_path = _safe_next_path(request.query_params.get("next"))
+        if _session_username(request) is not None:
+            return RedirectResponse(
+                url=next_path, status_code=status.HTTP_303_SEE_OTHER
+            )
+        return templates.TemplateResponse(
+            request=request,
+            name="login.html",
+            context={"error": None, "next_path": next_path},
+        )
+
+    @app.post("/login", response_class=HTMLResponse)
+    async def login(request: Request) -> Response:
+        settings = cast(DashboardSettings, request.app.state.dashboard_settings)
+        form = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
+        username = form.get("username", [""])[0]
+        password = form.get("password", [""])[0]
+        next_path = _safe_next_path(form.get("next", ["/"])[0])
+
+        username_ok = secrets.compare_digest(username, settings.username)
+        password_ok = secrets.compare_digest(password, settings.password)
+        if not (username_ok and password_ok):
+            return templates.TemplateResponse(
+                request=request,
+                name="login.html",
+                context={
+                    "error": "The username or password is incorrect.",
+                    "next_path": next_path,
+                },
+                status_code=status.HTTP_401_UNAUTHORIZED,
+            )
+
+        request.session.clear()
+        request.session[SESSION_USER_KEY] = settings.username
+        return RedirectResponse(url=next_path, status_code=status.HTTP_303_SEE_OTHER)
+
+    @app.post("/logout")
+    def logout(request: Request) -> RedirectResponse:
+        request.session.clear()
+        return RedirectResponse(url="/login", status_code=status.HTTP_303_SEE_OTHER)
+
     @app.get("/", response_class=HTMLResponse)
     def index(
         request: Request,
-        _username: Annotated[str, Depends(require_user)],
+        username: Annotated[str, Depends(require_user)],
         session: Annotated[Session, Depends(get_session)],
         page: Annotated[int, Query(ge=1)] = 1,
         page_size: Annotated[int, Query(ge=1, le=MAX_PAGE_SIZE)] = DEFAULT_PAGE_SIZE,
@@ -73,14 +125,19 @@ def register_routes(app: FastAPI) -> None:
         return templates.TemplateResponse(
             request=request,
             name="index.html",
-            context={"task_page": task_page, "page_size": page_size},
+            context={
+                "active_page": "tasks",
+                "dashboard_user": username,
+                "task_page": task_page,
+                "page_size": page_size,
+            },
         )
 
     @app.get("/tasks/{task_id}", response_class=HTMLResponse)
     def task_detail(
         request: Request,
         task_id: UUID,
-        _username: Annotated[str, Depends(require_user)],
+        username: Annotated[str, Depends(require_user)],
         session: Annotated[Session, Depends(get_session)],
     ) -> Response:
         detail = get_task_detail(session, task_id)
@@ -89,13 +146,17 @@ def register_routes(app: FastAPI) -> None:
         return templates.TemplateResponse(
             request=request,
             name="task_detail.html",
-            context={"detail": detail},
+            context={
+                "active_page": "tasks",
+                "dashboard_user": username,
+                "detail": detail,
+            },
         )
 
     @app.get("/usage", response_class=HTMLResponse)
     def usage(
         request: Request,
-        _username: Annotated[str, Depends(require_user)],
+        username: Annotated[str, Depends(require_user)],
         session: Annotated[Session, Depends(get_session)],
         from_date: Annotated[str | None, Query(alias="from")] = None,
         to_date: Annotated[str | None, Query(alias="to")] = None,
@@ -107,6 +168,8 @@ def register_routes(app: FastAPI) -> None:
             request=request,
             name="usage.html",
             context={
+                "active_page": "usage",
+                "dashboard_user": username,
                 "aggregate": aggregate,
                 "from_date": from_date or "",
                 "to_date": to_date or "",
@@ -122,20 +185,16 @@ def register_routes(app: FastAPI) -> None:
 
 def require_user(
     request: Request,
-    credentials: Annotated[HTTPBasicCredentials, Depends(security)],
 ) -> str:
-    """Require dashboard HTTP Basic Auth."""
+    """Require a dashboard login session."""
 
-    settings = cast(DashboardSettings, request.app.state.dashboard_settings)
-    username_ok = secrets.compare_digest(credentials.username, settings.username)
-    password_ok = secrets.compare_digest(credentials.password, settings.password)
-    if not (username_ok and password_ok):
+    username = _session_username(request)
+    if username is None:
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect username or password",
-            headers={"WWW-Authenticate": "Basic"},
+            status_code=status.HTTP_303_SEE_OTHER,
+            headers={"Location": _login_url_for(request)},
         )
-    return credentials.username
+    return username
 
 
 def get_session(request: Request) -> Iterator[Session]:
@@ -144,6 +203,26 @@ def get_session(request: Request) -> Iterator[Session]:
     factory = cast(sessionmaker[Session], request.app.state.session_factory)
     with factory() as session:
         yield session
+
+
+def _session_username(request: Request) -> str | None:
+    username = request.session.get(SESSION_USER_KEY)
+    if isinstance(username, str) and username:
+        return username
+    return None
+
+
+def _login_url_for(request: Request) -> str:
+    next_path = request.url.path
+    if request.url.query:
+        next_path = f"{next_path}?{request.url.query}"
+    return f"/login?next={quote(next_path, safe='')}"
+
+
+def _safe_next_path(value: str | None) -> str:
+    if not value or not value.startswith("/") or value.startswith("//"):
+        return "/"
+    return value
 
 
 def _money(value: Decimal | int | float | str | None) -> str:

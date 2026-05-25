@@ -8,18 +8,41 @@
   </head>
   <body>
     <a class="skip-link" href="#main">Skip to dashboard content</a>
-    <header class="topbar">
-      <div class="brand-lockup">
-        <a class="brand" href="/">Kortny</a>
-        <span class="subtitle">Operator Dashboard</span>
+    <div class="dashboard-layout">
+      <aside class="sidebar" aria-label="Dashboard navigation">
+        <div class="sidebar-header">
+          <a class="brand" href="/">Kortny</a>
+          <span class="subtitle">Operator Dashboard</span>
+        </div>
+        <nav class="sidebar-nav">
+          <a class="nav-item {{ 'active' if active_page == 'tasks' else '' }}" href="/" {% if active_page == 'tasks' %}aria-current="page"{% endif %}>Tasks</a>
+          <a class="nav-item {{ 'active' if active_page == 'usage' else '' }}" href="/usage" {% if active_page == 'usage' %}aria-current="page"{% endif %}>Usage</a>
+        </nav>
+        <div class="sidebar-footer">
+          <div class="user-pill">
+            <span>Signed in as</span>
+            <strong>{{ dashboard_user }}</strong>
+          </div>
+          <form method="post" action="/logout">
+            <button class="btn-ghost sidebar-logout" type="submit">Log out</button>
+          </form>
+        </div>
+      </aside>
+      <div class="content-column">
+        <header class="mobile-bar">
+          <div>
+            <a class="brand" href="/">Kortny</a>
+            <span class="subtitle">Operator Dashboard</span>
+          </div>
+          <nav class="mobile-nav">
+            <a class="nav-item {{ 'active' if active_page == 'tasks' else '' }}" href="/" {% if active_page == 'tasks' %}aria-current="page"{% endif %}>Tasks</a>
+            <a class="nav-item {{ 'active' if active_page == 'usage' else '' }}" href="/usage" {% if active_page == 'usage' %}aria-current="page"{% endif %}>Usage</a>
+          </nav>
+        </header>
+        <main id="main" class="shell" tabindex="-1">
+          {% block content %}{% endblock %}
+        </main>
       </div>
-      <nav class="nav">
-        <a href="/">Tasks</a>
-        <a href="/usage">Usage</a>
-      </nav>
-    </header>
-    <main id="main" class="shell" tabindex="-1">
-      {% block content %}{% endblock %}
-    </main>
+    </div>
   </body>
 </html>

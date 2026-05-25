@@ -8,6 +8,7 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from fastapi.testclient import TestClient
+from httpx import Response
 from sqlalchemy import Engine, delete
 from sqlalchemy.orm import Session
 
@@ -72,6 +73,7 @@ def client(db_session: Session, engine: Engine) -> Iterator[tuple[TestClient, Se
         postgres_url=TEST_POSTGRES_URL,
         username="admin",
         password="secret",
+        session_secret="test-dashboard-session-secret",
     )
     with TestClient(
         create_app(settings=settings, session_factory=session_factory)
@@ -79,15 +81,52 @@ def client(db_session: Session, engine: Engine) -> Iterator[tuple[TestClient, Se
         yield test_client, db_session
 
 
-def test_dashboard_requires_basic_auth(
+def test_dashboard_redirects_unauthenticated_users_to_login(
     client: tuple[TestClient, Session],
 ) -> None:
     test_client, _session = client
 
-    response = test_client.get("/")
+    response = test_client.get("/", follow_redirects=False)
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "/login?next=%2F"
+
+
+def test_dashboard_login_rejects_invalid_credentials(
+    client: tuple[TestClient, Session],
+) -> None:
+    test_client, _session = client
+
+    response = test_client.post(
+        "/login",
+        data={"username": "admin", "password": "wrong"},
+        follow_redirects=False,
+    )
 
     assert response.status_code == 401
-    assert response.headers["www-authenticate"] == "Basic"
+    assert "The username or password is incorrect." in response.text
+
+
+def test_dashboard_login_and_logout_flow(
+    client: tuple[TestClient, Session],
+) -> None:
+    test_client, _session = client
+
+    login_response = login(test_client)
+    assert login_response.status_code == 303
+    assert login_response.headers["location"] == "/"
+
+    page_response = test_client.get("/")
+    assert page_response.status_code == 200
+    assert "Signed in as" in page_response.text
+    assert "admin" in page_response.text
+
+    logout_response = test_client.post("/logout", follow_redirects=False)
+    assert logout_response.status_code == 303
+    assert logout_response.headers["location"] == "/login"
+
+    locked_response = test_client.get("/", follow_redirects=False)
+    assert locked_response.status_code == 303
 
 
 def test_dashboard_task_list_shows_cost_models_and_turns(
@@ -95,8 +134,9 @@ def test_dashboard_task_list_shows_cost_models_and_turns(
 ) -> None:
     test_client, session = client
     task = create_dashboard_task(session)
+    login(test_client)
 
-    response = test_client.get("/", auth=("admin", "secret"))
+    response = test_client.get("/")
 
     assert response.status_code == 200
     assert "CCost" in response.text
@@ -107,6 +147,7 @@ def test_dashboard_task_list_shows_cost_models_and_turns(
     assert 'class="card"' in response.text
     assert 'class="table"' in response.text
     assert 'class="badge status-succeeded"' in response.text
+    assert 'class="sidebar"' in response.text
 
 
 def test_dashboard_task_detail_shows_events_usage_and_artifacts(
@@ -114,8 +155,9 @@ def test_dashboard_task_detail_shows_events_usage_and_artifacts(
 ) -> None:
     test_client, session = client
     task = create_dashboard_task(session)
+    login(test_client)
 
-    response = test_client.get(f"/tasks/{task.id}", auth=("admin", "secret"))
+    response = test_client.get(f"/tasks/{task.id}")
 
     assert response.status_code == 200
     assert "Create a usage dashboard" in response.text
@@ -131,10 +173,10 @@ def test_dashboard_usage_rollups_by_model_user_and_day(
 ) -> None:
     test_client, session = client
     create_dashboard_task(session)
+    login(test_client)
 
     response = test_client.get(
         "/usage?from=2026-05-24&to=2026-05-24",
-        auth=("admin", "secret"),
     )
 
     assert response.status_code == 200
@@ -143,6 +185,14 @@ def test_dashboard_usage_rollups_by_model_user_and_day(
     assert "2026-05-24" in response.text
     assert "$0.004200" in response.text
     assert 'class="input" type="date"' in response.text
+
+
+def login(test_client: TestClient) -> Response:
+    return test_client.post(
+        "/login",
+        data={"username": "admin", "password": "secret", "next": "/"},
+        follow_redirects=False,
+    )
 
 
 def create_dashboard_task(session: Session) -> Task:

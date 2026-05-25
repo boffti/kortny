@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Sign In - Kortny Dashboard</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='/dashboard.css') }}">
+  </head>
+  <body class="login-body">
+    <main class="login-shell">
+      <section class="card login-card" aria-labelledby="login-title">
+        <header>
+          <span class="login-kicker">Kortny</span>
+          <h1 id="login-title">Sign in to the operator dashboard</h1>
+          <p>Inspect task costs, model usage, artifacts, and execution logs.</p>
+        </header>
+        <form class="login-form" method="post" action="/login">
+          <input type="hidden" name="next" value="{{ next_path }}">
+          <label>
+            Username
+            <input class="input" name="username" autocomplete="username" required autofocus>
+          </label>
+          <label>
+            Password
+            <input class="input" name="password" type="password" autocomplete="current-password" required>
+          </label>
+          {% if error %}
+            <p class="form-error" role="alert">{{ error }}</p>
+          {% endif %}
+          <button class="btn login-submit" type="submit">Sign in</button>
+        </form>
+      </section>
+    </main>
+  </body>
+</html>

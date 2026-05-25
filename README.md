@@ -112,6 +112,8 @@ COMPOSIO_API_KEY=...
 BRAVE_SEARCH_API_KEY=...
 DASHBOARD_USERNAME=kortny
 DASHBOARD_PASSWORD=change-me
+DASHBOARD_SESSION_SECRET=change-me-dashboard-session-secret
+DASHBOARD_SECURE_COOKIES=false
 POSTGRES_URL=postgresql://kortny:kortny@localhost:5432/kortny
 POSTGRES_DB=kortny
 POSTGRES_USER=kortny
@@ -131,8 +133,10 @@ read-only operator dashboard at `http://localhost:8080`.
 
 This does not start optional observability services such as Phoenix.
 
-The dashboard is protected with HTTP Basic Auth using `DASHBOARD_USERNAME` and
-`DASHBOARD_PASSWORD`. It is bound to `127.0.0.1` by default; change
+The dashboard has a local login page backed by a signed session cookie. Use
+`DASHBOARD_USERNAME` and `DASHBOARD_PASSWORD` to sign in, and change
+`DASHBOARD_SESSION_SECRET` before exposing the dashboard beyond local
+development. It is bound to `127.0.0.1` by default; change
 `DASHBOARD_HOST_PORT` only if you need a different local port.
 
 ### 4. Develop against the local database

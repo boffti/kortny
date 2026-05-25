@@ -30,8 +30,16 @@ class DashboardSettings(BaseSettings):
     password: str = Field(
         default="change-me", validation_alias="DASHBOARD_PASSWORD", min_length=1
     )
+    session_secret: str = Field(
+        default="change-me-dashboard-session-secret",
+        validation_alias="DASHBOARD_SESSION_SECRET",
+        min_length=16,
+    )
+    secure_cookies: bool = Field(
+        default=False, validation_alias="DASHBOARD_SECURE_COOKIES"
+    )
 
-    @field_validator("username", "password")
+    @field_validator("username", "password", "session_secret")
     @classmethod
     def _strip_required_string(cls, value: str) -> str:
         stripped = value.strip()

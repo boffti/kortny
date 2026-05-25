@@ -103,6 +103,8 @@ services:
     environment:
       DASHBOARD_USERNAME: ${DASHBOARD_USERNAME:-kortny}
       DASHBOARD_PASSWORD: ${DASHBOARD_PASSWORD:-change-me}
+      DASHBOARD_SESSION_SECRET: ${DASHBOARD_SESSION_SECRET:-change-me-dashboard-session-secret}
+      DASHBOARD_SECURE_COOKIES: ${DASHBOARD_SECURE_COOKIES:-false}
       POSTGRES_URL: postgresql://${POSTGRES_USER:-kortny}:${POSTGRES_PASSWORD:-kortny}@postgres:5432/${POSTGRES_DB:-kortny}
       UV_CACHE_DIR: /tmp/uv-cache
       UV_LINK_MODE: copy

@@ -328,6 +328,22 @@ p {
   white-space: nowrap;
 }
 
+.identity-name {
+  color: var(--foreground);
+  display: block;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+
+.identity-id {
+  color: var(--muted-foreground);
+  display: block;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  margin-top: 2px;
+  overflow-wrap: anywhere;
+}
+
 .badge {
   align-items: center;
   border: 1px solid transparent;

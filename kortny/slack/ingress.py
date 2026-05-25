@@ -35,6 +35,7 @@ from kortny.slack.acknowledgement import (
     StaticAcknowledgementGenerator,
     generate_acknowledgement,
 )
+from kortny.slack.identity import SlackIdentityService
 from kortny.slack.reactions import (
     ACK_REACTION_ADD_FAILED_MESSAGE,
     ACK_REACTION_ADDED_MESSAGE,
@@ -378,6 +379,13 @@ class SlackIngress:
             message_ts=message_ts,
             intent_decision=intent_decision,
         )
+        self._refresh_slack_identities(
+            task=task,
+            installation=installation,
+            source=source,
+            channel_id=channel_id,
+            user_id=user_id,
+        )
 
         if _should_skip_visible_ack(event, source=source):
             logger.info(
@@ -430,6 +438,43 @@ class SlackIngress:
             created=True,
             thread_ts=thread_ts,
             acknowledgement_ts=acknowledgement_ts,
+        )
+
+    def _refresh_slack_identities(
+        self,
+        *,
+        task: Task,
+        installation: Installation,
+        source: str,
+        channel_id: str,
+        user_id: str,
+    ) -> None:
+        identity_service = SlackIdentityService(self.session)
+        user_result = identity_service.ensure_user(
+            installation_id=installation.id,
+            user_id=user_id,
+            client=self.client,
+        )
+        channel_result = identity_service.ensure_channel(
+            installation_id=installation.id,
+            channel_id=channel_id,
+            client=self.client,
+        )
+        self.task_service.append_event(
+            task,
+            TaskEventType.log,
+            {
+                "message": "slack_identity_cache_checked",
+                "source": source,
+                "user_id": user_id,
+                "channel_id": channel_id,
+                "user_cached": user_result.identity is not None,
+                "channel_cached": channel_result.identity is not None,
+                "user_refreshed": user_result.refreshed,
+                "channel_refreshed": channel_result.refreshed,
+                "user_refresh_reason": user_result.reason,
+                "channel_refresh_reason": channel_result.reason,
+            },
         )
 
     def _find_existing_task(

@@ -13,10 +13,13 @@
     <tbody>
       {% for row in rows %}
         <tr>
-          <td>{{ row.key }}</td>
-          <td class="num">{{ row.calls }}</td>
-          <td class="num">{{ row.input_tokens }}</td>
-          <td class="num">{{ row.output_tokens }}</td>
+          <td>
+            <span class="identity-name">{{ row.display_key }}</span>
+            {% if row.secondary_key %}<span class="identity-id">{{ row.secondary_key }}</span>{% endif %}
+          </td>
+          <td class="num">{{ row.calls|number }}</td>
+          <td class="num">{{ row.input_tokens|number }}</td>
+          <td class="num">{{ row.output_tokens|number }}</td>
           <td class="num">{{ row.cost_usd|money }}</td>
         </tr>
       {% else %}

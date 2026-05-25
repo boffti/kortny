@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import secrets
 from collections.abc import Iterator
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Annotated, cast
 from urllib.parse import parse_qs, quote
@@ -61,6 +61,7 @@ def create_app(
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
     templates.env.filters["money"] = _money
+    templates.env.filters["number"] = _number
     templates.env.filters["datetime"] = _datetime
     templates.env.filters["json"] = _json
 
@@ -230,6 +231,17 @@ def _money(value: Decimal | int | float | str | None) -> str:
     if value is None:
         return "$0.000000"
     return f"${Decimal(value):,.6f}"
+
+
+def _number(value: object) -> str:
+    if value is None or value == "":
+        return "-"
+    if isinstance(value, bool):
+        return str(value)
+    try:
+        return f"{int(Decimal(str(value))):,}"
+    except (InvalidOperation, ValueError):
+        return str(value)
 
 
 def _datetime(value: object) -> str:

@@ -60,9 +60,9 @@
           {% for row in aggregate.by_day %}
             <tr>
               <td>{{ row.day }}</td>
-              <td class="num">{{ row.calls }}</td>
-              <td class="num">{{ row.input_tokens }}</td>
-              <td class="num">{{ row.output_tokens }}</td>
+              <td class="num">{{ row.calls|number }}</td>
+              <td class="num">{{ row.input_tokens|number }}</td>
+              <td class="num">{{ row.output_tokens|number }}</td>
               <td class="num">{{ row.cost_usd|money }}</td>
             </tr>
           {% else %}

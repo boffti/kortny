@@ -302,6 +302,53 @@ class WorkspaceState(Base):
     )
 
 
+class SlackIdentity(Base):
+    __tablename__ = "slack_identities"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    installation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("installations.id", ondelete="CASCADE"), nullable=False
+    )
+    kind: Mapped[str] = mapped_column(String, nullable=False)
+    slack_id: Mapped[str] = mapped_column(String, nullable=False)
+    display_name: Mapped[str] = mapped_column(String, nullable=False)
+    raw_name: Mapped[str | None] = mapped_column(String)
+    is_deleted: Mapped[bool] = mapped_column(
+        nullable=False, server_default=text("false")
+    )
+    is_bot: Mapped[bool] = mapped_column(nullable=False, server_default=text("false"))
+    is_private: Mapped[bool] = mapped_column(
+        nullable=False, server_default=text("false")
+    )
+    raw_json: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    last_seen_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now()
+    )
+    refreshed_at: Mapped[datetime | None] = mapped_column(TZ)
+    created_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint("kind in ('user', 'channel')", name="ck_slack_identity_kind"),
+        UniqueConstraint(
+            "installation_id",
+            "kind",
+            "slack_id",
+            name="idx_slack_identity_unique",
+        ),
+        Index("idx_slack_identity_lookup", "installation_id", "kind", "slack_id"),
+        Index("idx_slack_identity_seen", "installation_id", "kind", "last_seen_at"),
+    )
+
+
 class Episode(Base):
     __tablename__ = "episodes"
 

@@ -6,6 +6,7 @@ import json
 import math
 import uuid
 from collections import defaultdict
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
@@ -16,7 +17,7 @@ from sqlalchemy.engine import Row
 from sqlalchemy.orm import Session
 from sqlalchemy.sql.elements import ColumnElement
 
-from kortny.db.models import Artifact, LLMUsage, Task, TaskEvent
+from kortny.db.models import Artifact, LLMUsage, SlackIdentity, Task, TaskEvent
 
 DEFAULT_PAGE_SIZE = 25
 MAX_PAGE_SIZE = 100
@@ -25,6 +26,8 @@ MAX_PAGE_SIZE = 100
 @dataclass(frozen=True)
 class TaskListItem:
     task: Task
+    channel: IdentityLabel
+    user: IdentityLabel
     models: tuple[str, ...]
     turn_count: int
 
@@ -58,10 +61,25 @@ class TaskListPage:
 @dataclass(frozen=True)
 class TaskDetail:
     task: Task
+    channel: IdentityLabel
+    user: IdentityLabel
     events: tuple[TaskEvent, ...]
     timeline: tuple[TimelineEvent, ...]
     usage: tuple[LLMUsage, ...]
     artifacts: tuple[Artifact, ...]
+
+
+@dataclass(frozen=True)
+class IdentityLabel:
+    name: str
+    slack_id: str
+    found: bool
+
+    @property
+    def secondary(self) -> str | None:
+        if self.found and self.name != self.slack_id:
+            return self.slack_id
+        return None
 
 
 @dataclass(frozen=True)
@@ -96,6 +114,19 @@ class AggregateRow:
     input_tokens: int
     output_tokens: int
     cost_usd: Decimal
+    label: IdentityLabel | None = None
+
+    @property
+    def display_key(self) -> str:
+        if self.label is not None:
+            return self.label.name
+        return self.key
+
+    @property
+    def secondary_key(self) -> str | None:
+        if self.label is not None:
+            return self.label.secondary
+        return None
 
 
 @dataclass(frozen=True)
@@ -138,9 +169,22 @@ def list_tasks(
         )
     )
     usage_by_task = _usage_by_task(session, [task.id for task in tasks])
+    identities = _identity_map(session, tasks)
     items = tuple(
         TaskListItem(
             task=task,
+            channel=_identity_label(
+                identities,
+                installation_id=task.installation_id,
+                kind="channel",
+                slack_id=task.slack_channel_id,
+            ),
+            user=_identity_label(
+                identities,
+                installation_id=task.installation_id,
+                kind="user",
+                slack_id=task.slack_user_id,
+            ),
             models=tuple(sorted({usage.model for usage in usage_by_task[task.id]})),
             turn_count=len(usage_by_task[task.id]),
         )
@@ -181,8 +225,21 @@ def get_task_detail(session: Session, task_id: uuid.UUID) -> TaskDetail | None:
             .order_by(Artifact.created_at.asc(), Artifact.id.asc())
         )
     )
+    identities = _identity_map(session, (task,))
     return TaskDetail(
         task=task,
+        channel=_identity_label(
+            identities,
+            installation_id=task.installation_id,
+            kind="channel",
+            slack_id=task.slack_channel_id,
+        ),
+        user=_identity_label(
+            identities,
+            installation_id=task.installation_id,
+            kind="user",
+            slack_id=task.slack_user_id,
+        ),
         events=events,
         timeline=tuple(_timeline_event(event) for event in events),
         usage=usage,
@@ -204,8 +261,9 @@ def get_usage_aggregate(
             func.sum(LLMUsage.cost_usd).desc()
         )
     ).all()
-    by_user_rows = session.execute(
+    by_user_raw_rows = session.execute(
         select(
+            Task.installation_id,
             Task.slack_user_id,
             func.count(LLMUsage.id),
             func.coalesce(func.sum(LLMUsage.input_tokens), 0),
@@ -214,9 +272,29 @@ def get_usage_aggregate(
         )
         .join(Task, Task.id == LLMUsage.task_id)
         .where(*usage_filter)
-        .group_by(Task.slack_user_id)
+        .group_by(Task.installation_id, Task.slack_user_id)
         .order_by(func.sum(LLMUsage.cost_usd).desc())
     ).all()
+    user_identities = _identity_map_from_keys(
+        session,
+        (
+            (row[0], "user", row[1])
+            for row in by_user_raw_rows
+            if row[0] is not None and row[1] is not None
+        ),
+    )
+    by_user_rows = tuple(
+        _aggregate_row(
+            (row[1], row[2], row[3], row[4], row[5]),
+            label=_identity_label(
+                user_identities,
+                installation_id=row[0],
+                kind="user",
+                slack_id=row[1],
+            ),
+        )
+        for row in by_user_raw_rows
+    )
     day_bucket = func.date_trunc("day", LLMUsage.created_at).label("day")
     by_day_rows = session.execute(
         select(
@@ -234,7 +312,7 @@ def get_usage_aggregate(
         start=start,
         end=end,
         by_model=tuple(_aggregate_row(row) for row in by_model_rows),
-        by_user=tuple(_aggregate_row(row) for row in by_user_rows),
+        by_user=by_user_rows,
         by_day=tuple(_daily_row(row) for row in by_day_rows),
     )
 
@@ -255,6 +333,59 @@ def parse_date_bound(
     if inclusive_end:
         return parsed + timedelta(days=1)
     return parsed
+
+
+IdentityKey = tuple[uuid.UUID, str, str]
+
+
+def _identity_map(
+    session: Session,
+    tasks: Sequence[Task],
+) -> dict[IdentityKey, SlackIdentity]:
+    keys: list[IdentityKey] = []
+    for task in tasks:
+        keys.append((task.installation_id, "channel", task.slack_channel_id))
+        keys.append((task.installation_id, "user", task.slack_user_id))
+    return _identity_map_from_keys(session, keys)
+
+
+def _identity_map_from_keys(
+    session: Session,
+    keys: Iterable[IdentityKey],
+) -> dict[IdentityKey, SlackIdentity]:
+    normalized = tuple({key for key in keys if key[2]})
+    if not normalized:
+        return {}
+    installation_ids = tuple({key[0] for key in normalized})
+    slack_ids = tuple({key[2] for key in normalized})
+    rows = session.scalars(
+        select(SlackIdentity).where(
+            SlackIdentity.installation_id.in_(installation_ids),
+            SlackIdentity.slack_id.in_(slack_ids),
+        )
+    )
+    return {
+        (row.installation_id, row.kind, row.slack_id): row
+        for row in rows
+        if (row.installation_id, row.kind, row.slack_id) in normalized
+    }
+
+
+def _identity_label(
+    identities: dict[IdentityKey, SlackIdentity],
+    *,
+    installation_id: uuid.UUID,
+    kind: str,
+    slack_id: str,
+) -> IdentityLabel:
+    identity = identities.get((installation_id, kind, slack_id))
+    if identity is None:
+        return IdentityLabel(name=slack_id, slack_id=slack_id, found=False)
+    return IdentityLabel(
+        name=identity.display_name,
+        slack_id=identity.slack_id,
+        found=True,
+    )
 
 
 def _timeline_event(event: TaskEvent) -> TimelineEvent:
@@ -335,7 +466,7 @@ def _event_summary(event_type: str, payload: dict[str, Any], message: str) -> st
         return "Task status changed."
     if event_type == "llm_call":
         model = _payload_string(payload, "model") or "model"
-        total_tokens = _payload_string(payload, "total_tokens")
+        total_tokens = _payload_number(payload, "total_tokens")
         cost = _payload_string(payload, "cost_usd")
         pieces = [f"Completed by {model}"]
         if total_tokens:
@@ -471,7 +602,11 @@ def _event_metrics(
     )
     metrics: list[TimelineMetric] = []
     for key in keys:
-        value = _payload_string(payload, key)
+        value = (
+            _payload_number(payload, key)
+            if key in _NUMERIC_PAYLOAD_KEYS
+            else _payload_string(payload, key)
+        )
         if value:
             metrics.append(TimelineMetric(label=_humanize_slug(key), value=value))
     if event_type == "context_assembled" or message == "context_assembled":
@@ -499,6 +634,31 @@ def _payload_string(payload: dict[str, Any], key: str) -> str:
     if isinstance(value, dict):
         return json.dumps(value, sort_keys=True, default=str)
     return str(value)
+
+
+_NUMERIC_PAYLOAD_KEYS = frozenset(
+    {
+        "latency_ms",
+        "input_tokens",
+        "output_tokens",
+        "total_tokens",
+        "tool_call_count",
+        "artifact_count",
+        "selected_count",
+        "size_bytes",
+        "turn",
+    }
+)
+
+
+def _payload_number(payload: dict[str, Any], key: str) -> str:
+    value = payload.get(key)
+    if value is None or value == "":
+        return ""
+    try:
+        return f"{int(value):,}"
+    except (TypeError, ValueError):
+        return _payload_string(payload, key)
 
 
 def _payload_list(payload: dict[str, Any], key: str) -> list[Any]:
@@ -563,7 +723,10 @@ def _aggregate_query(key: Any, filters: list[ColumnElement[bool]]) -> Select[Any
     )
 
 
-def _aggregate_row(row: Row[Any]) -> AggregateRow:
+def _aggregate_row(
+    row: Row[Any] | tuple[Any, ...],
+    label: IdentityLabel | None = None,
+) -> AggregateRow:
     key, calls, input_tokens, output_tokens, cost_usd = row
     return AggregateRow(
         key=str(key),
@@ -571,6 +734,7 @@ def _aggregate_row(row: Row[Any]) -> AggregateRow:
         input_tokens=int(input_tokens),
         output_tokens=int(output_tokens),
         cost_usd=Decimal(cost_usd),
+        label=label,
     )
 
 

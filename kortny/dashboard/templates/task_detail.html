@@ -22,11 +22,11 @@
     </div>
     <div class="card metric-card">
       <span>Input Tokens</span>
-      <strong>{{ detail.task.total_input_tokens }}</strong>
+      <strong>{{ detail.task.total_input_tokens|number }}</strong>
     </div>
     <div class="card metric-card">
       <span>Output Tokens</span>
-      <strong>{{ detail.task.total_output_tokens }}</strong>
+      <strong>{{ detail.task.total_output_tokens|number }}</strong>
     </div>
   </section>
 
@@ -37,9 +37,15 @@
     </header>
     <dl class="meta">
       <dt>Channel</dt>
-      <dd>{{ detail.task.slack_channel_id }}</dd>
+      <dd>
+        <span class="identity-name">{{ detail.channel.name }}</span>
+        {% if detail.channel.secondary %}<span class="identity-id">{{ detail.channel.secondary }}</span>{% endif %}
+      </dd>
       <dt>User</dt>
-      <dd>{{ detail.task.slack_user_id }}</dd>
+      <dd>
+        <span class="identity-name">{{ detail.user.name }}</span>
+        {% if detail.user.secondary %}<span class="identity-id">{{ detail.user.secondary }}</span>{% endif %}
+      </dd>
       <dt>Thread</dt>
       <dd>{{ detail.task.slack_thread_ts or "-" }}</dd>
       <dt>Created</dt>
@@ -82,8 +88,8 @@
               <td>{{ usage.provider.value }}</td>
               <td>{{ usage.model }}</td>
               <td>{{ usage.model_tier or "-" }}</td>
-              <td class="num">{{ usage.input_tokens }}</td>
-              <td class="num">{{ usage.output_tokens }}</td>
+              <td class="num">{{ usage.input_tokens|number }}</td>
+              <td class="num">{{ usage.output_tokens|number }}</td>
               <td class="num">{{ usage.cost_usd|money }}</td>
             </tr>
           {% else %}
@@ -117,7 +123,7 @@
               <td>{{ artifact.created_at|datetime }}</td>
               <td>{{ artifact.filename }}</td>
               <td>{{ artifact.mime_type or "-" }}</td>
-              <td class="num">{{ artifact.size_bytes or "-" }}</td>
+              <td class="num">{{ artifact.size_bytes|number }}</td>
               <td>{{ artifact.slack_file_id or "-" }}</td>
             </tr>
           {% else %}

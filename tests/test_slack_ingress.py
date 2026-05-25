@@ -15,6 +15,7 @@ from kortny.db.models import (
     Installation,
     LLMUsage,
     ModelPricing,
+    SlackIdentity,
     Task,
     TaskEvent,
     TaskEventType,
@@ -37,10 +38,21 @@ TEST_POSTGRES_URL = os.environ.get("KORTNY_TEST_POSTGRES_URL")
 
 
 class FakeSlackClient:
-    def __init__(self, *, reaction_error: Exception | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        reaction_error: Exception | None = None,
+        user_info: dict[str, Any] | None = None,
+        channel_info: dict[str, Any] | None = None,
+        identity_error: Exception | None = None,
+    ) -> None:
         self.calls: list[dict[str, Any]] = []
         self.reactions: list[dict[str, Any]] = []
+        self.identity_calls: list[dict[str, str]] = []
         self.reaction_error = reaction_error
+        self.user_info = user_info
+        self.channel_info = channel_info
+        self.identity_error = identity_error
 
     def chat_postMessage(
         self,
@@ -78,6 +90,22 @@ class FakeSlackClient:
             }
         )
         return {"ok": True}
+
+    def users_info(self, *, user: str) -> dict[str, Any]:
+        self.identity_calls.append({"method": "users_info", "id": user})
+        if self.identity_error is not None:
+            raise self.identity_error
+        if self.user_info is None:
+            raise RuntimeError("users_info not configured")
+        return self.user_info
+
+    def conversations_info(self, *, channel: str) -> dict[str, Any]:
+        self.identity_calls.append({"method": "conversations_info", "id": channel})
+        if self.identity_error is not None:
+            raise self.identity_error
+        if self.channel_info is None:
+            raise RuntimeError("conversations_info not configured")
+        return self.channel_info
 
 
 class FakeAcknowledgementGenerator:
@@ -255,6 +283,69 @@ def test_app_mention_creates_task_and_adds_reaction_ack(
         event.payload.get("message") == ACK_REACTION_ADDED_MESSAGE
         and event.payload.get("reaction") == "page_facing_up"
         and event.payload.get("reaction_intent") == "document"
+        for event in events
+    )
+
+
+def test_app_mention_refreshes_slack_identity_cache(
+    db_session: Session,
+) -> None:
+    client = FakeSlackClient(
+        user_info={
+            "ok": True,
+            "user": {
+                "id": "U123",
+                "name": "aneesh",
+                "real_name": "Aneesh Melkot",
+                "profile": {"display_name": "Aneesh"},
+            },
+        },
+        channel_info={
+            "ok": True,
+            "channel": {
+                "id": "C123",
+                "name": "general",
+                "is_private": False,
+            },
+        },
+    )
+
+    result = SlackIngress(session=db_session, client=client).handle_app_mention(
+        body=app_mention_body(event_id="EvMentionIdentity"),
+        event=app_mention_event(text="<@UBOT> summarize this channel"),
+    )
+    db_session.commit()
+
+    user_identity = db_session.scalar(
+        select(SlackIdentity).where(
+            SlackIdentity.installation_id == result.task.installation_id,
+            SlackIdentity.kind == "user",
+            SlackIdentity.slack_id == "U123",
+        )
+    )
+    channel_identity = db_session.scalar(
+        select(SlackIdentity).where(
+            SlackIdentity.installation_id == result.task.installation_id,
+            SlackIdentity.kind == "channel",
+            SlackIdentity.slack_id == "C123",
+        )
+    )
+    events = task_events(db_session, result.task)
+
+    assert user_identity is not None
+    assert user_identity.display_name == "Aneesh"
+    assert channel_identity is not None
+    assert channel_identity.display_name == "#general"
+    assert client.identity_calls == [
+        {"method": "users_info", "id": "U123"},
+        {"method": "conversations_info", "id": "C123"},
+    ]
+    assert any(
+        event.payload.get("message") == "slack_identity_cache_checked"
+        and event.payload.get("user_cached") is True
+        and event.payload.get("channel_cached") is True
+        and event.payload.get("user_refreshed") is True
+        and event.payload.get("channel_refreshed") is True
         for event in events
     )
 
@@ -1043,6 +1134,7 @@ def cleanup_database(session: Session) -> None:
         TaskEvent,
         Task,
         ModelPricing,
+        SlackIdentity,
         EncryptedSecret,
         Installation,
     ):

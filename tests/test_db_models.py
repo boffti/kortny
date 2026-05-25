@@ -8,6 +8,7 @@ def test_mvp_schema_declares_all_core_tables() -> None:
         "tasks",
         "task_events",
         "workspace_state",
+        "slack_identities",
         "episodes",
         "llm_usage",
         "artifacts",
@@ -85,3 +86,12 @@ def test_episode_table_has_bounded_retrieval_indexes() -> None:
         "idx_episodes_channel",
         "idx_episodes_user",
     } <= index_names
+
+
+def test_slack_identity_table_has_lookup_constraints_and_indexes() -> None:
+    identities = Base.metadata.tables["slack_identities"]
+    constraint_names = {constraint.name for constraint in identities.constraints}
+    index_names = {index.name for index in identities.indexes}
+
+    assert {"ck_slack_identity_kind", "idx_slack_identity_unique"} <= constraint_names
+    assert {"idx_slack_identity_lookup", "idx_slack_identity_seen"} <= index_names

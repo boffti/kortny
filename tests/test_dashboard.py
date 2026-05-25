@@ -22,6 +22,7 @@ from kortny.db.models import (
     LLMProvider,
     LLMUsage,
     ModelPricing,
+    SlackIdentity,
     Task,
     TaskEvent,
     TaskEventType,
@@ -139,7 +140,9 @@ def test_dashboard_task_list_shows_cost_models_and_turns(
     response = test_client.get("/")
 
     assert response.status_code == 200
+    assert "#ops-desk" in response.text
     assert "CCost" in response.text
+    assert "Aneesh Melkot" in response.text
     assert "UCost" in response.text
     assert "openai/gpt-5.4-mini" in response.text
     assert "$0.004200" in response.text
@@ -161,12 +164,17 @@ def test_dashboard_task_detail_shows_events_usage_and_artifacts(
 
     assert response.status_code == 200
     assert "Create a usage dashboard" in response.text
+    assert "#ops-desk" in response.text
+    assert "Aneesh Melkot" in response.text
     assert "Done with cost summary" in response.text
     assert "status_changed" in response.text
     assert "Task created" in response.text
     assert "LLM call started" in response.text
     assert "LLM call completed" in response.text
     assert "Tool result recorded" in response.text
+    assert "1,200" in response.text
+    assert "1,500 tokens" in response.text
+    assert "12,345" in response.text
     assert "Raw payload" in response.text
     assert "&#34;source&#34;: &#34;test&#34;" in response.text
     assert "{&#x27;source&#x27;: &#x27;test&#x27;}" not in response.text
@@ -189,8 +197,10 @@ def test_dashboard_usage_rollups_by_model_user_and_day(
 
     assert response.status_code == 200
     assert "openai/gpt-5.4-mini" in response.text
+    assert "Aneesh Melkot" in response.text
     assert "UCost" in response.text
     assert "2026-05-24" in response.text
+    assert "1,200" in response.text
     assert "$0.004200" in response.text
     assert 'class="input" type="date"' in response.text
 
@@ -226,6 +236,31 @@ def create_dashboard_task(session: Session) -> Task:
     )
     session.add(task)
     session.flush()
+
+    session.add_all(
+        [
+            SlackIdentity(
+                installation_id=installation.id,
+                kind="channel",
+                slack_id="CCost",
+                display_name="#ops-desk",
+                raw_name="ops-desk",
+                raw_json={"id": "CCost", "name": "ops-desk"},
+                refreshed_at=datetime(2026, 5, 24, 11, 59, tzinfo=UTC),
+                last_seen_at=datetime(2026, 5, 24, 11, 59, tzinfo=UTC),
+            ),
+            SlackIdentity(
+                installation_id=installation.id,
+                kind="user",
+                slack_id="UCost",
+                display_name="Aneesh Melkot",
+                raw_name="Aneesh Melkot",
+                raw_json={"id": "UCost", "profile": {"real_name": "Aneesh Melkot"}},
+                refreshed_at=datetime(2026, 5, 24, 11, 59, tzinfo=UTC),
+                last_seen_at=datetime(2026, 5, 24, 11, 59, tzinfo=UTC),
+            ),
+        ]
+    )
 
     session.add_all(
         [
@@ -326,6 +361,7 @@ def cleanup_database(session: Session) -> None:
         LLMUsage,
         WorkspaceState,
         Episode,
+        SlackIdentity,
         TaskEvent,
         Task,
         ModelPricing,

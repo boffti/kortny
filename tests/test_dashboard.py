@@ -1,7 +1,7 @@
 import os
 import uuid
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -216,6 +216,74 @@ def test_dashboard_usage_rollups_by_model_user_and_day(
     assert 'class="input" type="date"' in response.text
 
 
+def test_dashboard_users_list_shows_rollups_and_detail_links(
+    client: tuple[TestClient, Session],
+) -> None:
+    test_client, session = client
+    create_dashboard_task(session)
+    login(test_client)
+
+    response = test_client.get("/users?from=2026-05-24&to=2026-05-24")
+
+    assert response.status_code == 200
+    assert "User Activity" in response.text
+    assert "Aneesh Melkot" in response.text
+    assert "UCost" in response.text
+    assert "/users/UCost?from=2026-05-24&to=2026-05-24" in response.text
+    assert "1,200" in response.text
+    assert "300" in response.text
+    assert "$0.004200" in response.text
+    assert "dashboard_report.pdf" not in response.text
+
+
+def test_dashboard_user_detail_shows_tasks_usage_artifacts_and_trace_links(
+    client: tuple[TestClient, Session],
+) -> None:
+    test_client, session = client
+    task = create_dashboard_task(session)
+    login(test_client)
+
+    response = test_client.get("/users/UCost?from=2026-05-24&to=2026-05-24")
+
+    assert response.status_code == 200
+    assert "Aneesh Melkot" in response.text
+    assert "Recent Tasks" in response.text
+    assert "LLM Usage" in response.text
+    assert "Artifacts" in response.text
+    assert "Create a usage dashboard" in response.text
+    assert "#ops-desk" in response.text
+    assert "1,200" in response.text
+    assert "$0.004200" in response.text
+    assert "dashboard_report.pdf" in response.text
+    assert f"/tasks/{task.id}" in response.text
+
+
+def test_dashboard_users_list_shows_empty_state_for_date_filter(
+    client: tuple[TestClient, Session],
+) -> None:
+    test_client, session = client
+    create_dashboard_task(session)
+    login(test_client)
+
+    response = test_client.get("/users?from=2026-05-25&to=2026-05-25")
+
+    assert response.status_code == 200
+    assert "No user activity in this range." in response.text
+    assert "Aneesh Melkot" not in response.text
+
+
+def test_dashboard_user_detail_returns_404_when_date_filter_has_no_tasks(
+    client: tuple[TestClient, Session],
+) -> None:
+    test_client, session = client
+    create_dashboard_task(session)
+    login(test_client)
+
+    response = test_client.get("/users/UCost?from=2026-05-25&to=2026-05-25")
+
+    assert response.status_code == 404
+
+
 def login(test_client: TestClient) -> Response:
     return test_client.post(
         "/login",
@@ -230,7 +298,10 @@ def create_dashboard_task(
     slack_channel_id: str = "CCost",
     slack_user_id: str = "UCost",
     input_text: str = "Create a usage dashboard",
+    created_at: datetime | None = None,
 ) -> Task:
+    task_created_at = created_at or datetime(2026, 5, 24, 12, 0, tzinfo=UTC)
+    task_finished_at = task_created_at + timedelta(minutes=1)
     installation = Installation(slack_team_id=f"T{uuid.uuid4().hex}")
     session.add(installation)
     session.flush()
@@ -248,8 +319,8 @@ def create_dashboard_task(
         total_input_tokens=1200,
         total_output_tokens=300,
         total_cost_usd=Decimal("0.004200"),
-        created_at=datetime(2026, 5, 24, 12, 0, tzinfo=UTC),
-        finished_at=datetime(2026, 5, 24, 12, 1, tzinfo=UTC),
+        created_at=task_created_at,
+        finished_at=task_finished_at,
     )
     session.add(task)
     session.flush()
@@ -292,7 +363,7 @@ def create_dashboard_task(
                     "slack_thread_ts": task.slack_thread_ts,
                     "slack_event_id": task.slack_event_id,
                 },
-                created_at=datetime(2026, 5, 24, 12, 0, tzinfo=UTC),
+                created_at=task_created_at,
             ),
             TaskEvent(
                 task_id=task.id,
@@ -306,7 +377,7 @@ def create_dashboard_task(
                     "prompt_name": "kortny.agent_coordinator.system",
                     "route_reason": "intent_classifier",
                 },
-                created_at=datetime(2026, 5, 24, 12, 0, 20, tzinfo=UTC),
+                created_at=task_created_at + timedelta(seconds=20),
             ),
             TaskEvent(
                 task_id=task.id,
@@ -324,7 +395,7 @@ def create_dashboard_task(
                     "latency_ms": 890,
                     "prompt_name": "kortny.agent_coordinator.system",
                 },
-                created_at=datetime(2026, 5, 24, 12, 0, 30, tzinfo=UTC),
+                created_at=task_created_at + timedelta(seconds=30),
             ),
             TaskEvent(
                 task_id=task.id,
@@ -338,14 +409,14 @@ def create_dashboard_task(
                     "artifact_count": 0,
                     "recoverable": False,
                 },
-                created_at=datetime(2026, 5, 24, 12, 0, 45, tzinfo=UTC),
+                created_at=task_created_at + timedelta(seconds=45),
             ),
             TaskEvent(
                 task_id=task.id,
                 seq=5,
                 type=TaskEventType.status_changed,
                 payload={"from": "running", "to": "succeeded"},
-                created_at=datetime(2026, 5, 24, 12, 1, tzinfo=UTC),
+                created_at=task_finished_at,
             ),
             LLMUsage(
                 task_id=task.id,
@@ -355,7 +426,7 @@ def create_dashboard_task(
                 input_tokens=1200,
                 output_tokens=300,
                 cost_usd=Decimal("0.004200"),
-                created_at=datetime(2026, 5, 24, 12, 0, 30, tzinfo=UTC),
+                created_at=task_created_at + timedelta(seconds=30),
             ),
             Artifact(
                 task_id=task.id,
@@ -363,8 +434,8 @@ def create_dashboard_task(
                 mime_type="application/pdf",
                 size_bytes=12345,
                 slack_file_id="Fdashboard",
-                posted_at=datetime(2026, 5, 24, 12, 1, tzinfo=UTC),
-                created_at=datetime(2026, 5, 24, 12, 1, tzinfo=UTC),
+                posted_at=task_finished_at,
+                created_at=task_finished_at,
             ),
         ]
     )

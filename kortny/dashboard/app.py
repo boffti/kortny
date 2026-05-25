@@ -23,7 +23,9 @@ from kortny.dashboard.data import (
     MAX_PAGE_SIZE,
     get_task_detail,
     get_usage_aggregate,
+    get_user_detail,
     list_tasks,
+    list_users,
     parse_date_bound,
 )
 from kortny.dashboard.settings import DashboardSettings, load_dashboard_settings
@@ -173,6 +175,60 @@ def register_routes(app: FastAPI) -> None:
                 "active_page": "usage",
                 "dashboard_user": username,
                 "aggregate": aggregate,
+                "from_date": from_date or "",
+                "to_date": to_date or "",
+            },
+        )
+
+    @app.get("/users", response_class=HTMLResponse)
+    def users(
+        request: Request,
+        username: Annotated[str, Depends(require_user)],
+        session: Annotated[Session, Depends(get_session)],
+        from_date: Annotated[str | None, Query(alias="from")] = None,
+        to_date: Annotated[str | None, Query(alias="to")] = None,
+    ) -> Response:
+        start = parse_date_bound(from_date)
+        end = parse_date_bound(to_date, inclusive_end=True)
+        directory = list_users(session, start=start, end=end)
+        return templates.TemplateResponse(
+            request=request,
+            name="users.html",
+            context={
+                "active_page": "users",
+                "dashboard_user": username,
+                "directory": directory,
+                "from_date": from_date or "",
+                "to_date": to_date or "",
+            },
+        )
+
+    @app.get("/users/{slack_user_id}", response_class=HTMLResponse)
+    def user_detail(
+        request: Request,
+        slack_user_id: str,
+        username: Annotated[str, Depends(require_user)],
+        session: Annotated[Session, Depends(get_session)],
+        from_date: Annotated[str | None, Query(alias="from")] = None,
+        to_date: Annotated[str | None, Query(alias="to")] = None,
+    ) -> Response:
+        start = parse_date_bound(from_date)
+        end = parse_date_bound(to_date, inclusive_end=True)
+        detail = get_user_detail(
+            session,
+            slack_user_id,
+            start=start,
+            end=end,
+        )
+        if detail is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+        return templates.TemplateResponse(
+            request=request,
+            name="user_detail.html",
+            context={
+                "active_page": "users",
+                "dashboard_user": username,
+                "detail": detail,
                 "from_date": from_date or "",
                 "to_date": to_date or "",
             },

@@ -1,0 +1,188 @@
+{% extends "base.html" %}
+
+{% block title %}User {{ detail.user.slack_id }} - Kortny Dashboard{% endblock %}
+
+{% block content %}
+  <section class="page-heading">
+    <div>
+      <h1>{{ detail.user.name }}</h1>
+      {% if detail.user.secondary %}<p>{{ detail.user.secondary }}</p>{% else %}<p>{{ detail.user.slack_id }}</p>{% endif %}
+    </div>
+    <a class="btn-ghost" href="/users{% if from_date or to_date %}?from={{ from_date }}&to={{ to_date }}{% endif %}">Back to Users</a>
+  </section>
+
+  <section class="card detail-section">
+    <header>
+      <h2>Filter</h2>
+      <p>Use the same date bounds as Usage for user-level inspection.</p>
+    </header>
+    <form class="filters panel-filters" method="get" action="/users/{{ detail.user.slack_id }}">
+      <label>
+        From
+        <input class="input" type="date" name="from" value="{{ from_date }}">
+      </label>
+      <label>
+        To
+        <input class="input" type="date" name="to" value="{{ to_date }}">
+      </label>
+      <button class="btn" type="submit">Apply</button>
+    </form>
+  </section>
+
+  <section class="summary-grid">
+    <div class="card metric-card">
+      <span>Tasks</span>
+      <strong>{{ detail.task_count|number }}</strong>
+    </div>
+    <div class="card metric-card">
+      <span>Failures</span>
+      <strong>{{ detail.failed_task_count|number }}</strong>
+    </div>
+    <div class="card metric-card">
+      <span>Cost</span>
+      <strong>{{ detail.total_cost_usd|money }}</strong>
+    </div>
+    <div class="card metric-card">
+      <span>Artifacts</span>
+      <strong>{{ detail.artifact_count|number }}</strong>
+    </div>
+  </section>
+
+  <section class="summary-grid">
+    <div class="card metric-card">
+      <span>Input Tokens</span>
+      <strong>{{ detail.total_input_tokens|number }}</strong>
+    </div>
+    <div class="card metric-card">
+      <span>Output Tokens</span>
+      <strong>{{ detail.total_output_tokens|number }}</strong>
+    </div>
+    <div class="card metric-card">
+      <span>LLM Calls Shown</span>
+      <strong>{{ detail.usage_call_count|number }}</strong>
+    </div>
+    <div class="card metric-card">
+      <span>Last Activity</span>
+      <strong class="metric-time">{{ detail.last_activity_at|datetime }}</strong>
+    </div>
+  </section>
+
+  <section class="card detail-section">
+    <header>
+      <h2>Recent Tasks</h2>
+      <p>Latest user tasks with cost, status, artifacts, and trace links.</p>
+    </header>
+    <div class="overflow-x-auto">
+      <table class="table">
+        <caption>Recent tasks for this user.</caption>
+        <thead>
+          <tr>
+            <th>Created</th>
+            <th>Channel</th>
+            <th>Status</th>
+            <th>Request</th>
+            <th class="num">LLM Calls</th>
+            <th class="num">Artifacts</th>
+            <th class="num">Cost</th>
+            <th>Trace</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in detail.tasks %}
+            <tr>
+              <td>{{ row.task.created_at|datetime }}</td>
+              <td>
+                <span class="identity-name">{{ row.channel.name }}</span>
+                {% if row.channel.secondary %}<span class="identity-id">{{ row.channel.secondary }}</span>{% endif %}
+              </td>
+              <td><span class="badge status-{{ row.task.status.value }}">{{ row.task.status.value }}</span></td>
+              <td class="truncate-cell">{{ row.task.input }}</td>
+              <td class="num">{{ row.usage_count|number }}</td>
+              <td class="num">{{ row.artifact_count|number }}</td>
+              <td class="num">{{ row.task.total_cost_usd|money }}</td>
+              <td><a href="/tasks/{{ row.task.id }}">Open</a></td>
+            </tr>
+          {% else %}
+            <tr><td colspan="8" class="empty">No tasks in this range.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="card detail-section">
+    <header>
+      <h2>LLM Usage</h2>
+      <p>Recent model calls for this user.</p>
+    </header>
+    <div class="overflow-x-auto">
+      <table class="table">
+        <caption>Recent LLM usage for this user.</caption>
+        <thead>
+          <tr>
+            <th>Created</th>
+            <th>Provider</th>
+            <th>Model</th>
+            <th>Tier</th>
+            <th class="num">Input</th>
+            <th class="num">Output</th>
+            <th class="num">Cost</th>
+            <th>Task</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for usage in detail.usage %}
+            <tr>
+              <td>{{ usage.created_at|datetime }}</td>
+              <td>{{ usage.provider.value }}</td>
+              <td>{{ usage.model }}</td>
+              <td>{{ usage.model_tier or "-" }}</td>
+              <td class="num">{{ usage.input_tokens|number }}</td>
+              <td class="num">{{ usage.output_tokens|number }}</td>
+              <td class="num">{{ usage.cost_usd|money }}</td>
+              <td><a href="/tasks/{{ usage.task_id }}">Open</a></td>
+            </tr>
+          {% else %}
+            <tr><td colspan="8" class="empty">No LLM calls in this range.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="card detail-section">
+    <header>
+      <h2>Artifacts</h2>
+      <p>Files generated by this user's tasks.</p>
+    </header>
+    <div class="overflow-x-auto">
+      <table class="table">
+        <caption>Artifacts created by this user.</caption>
+        <thead>
+          <tr>
+            <th>Created</th>
+            <th>Filename</th>
+            <th>MIME</th>
+            <th class="num">Bytes</th>
+            <th>Slack File</th>
+            <th>Task</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in detail.artifacts %}
+            <tr>
+              <td>{{ row.artifact.created_at|datetime }}</td>
+              <td>{{ row.artifact.filename }}</td>
+              <td>{{ row.artifact.mime_type or "-" }}</td>
+              <td class="num">{{ row.artifact.size_bytes|number }}</td>
+              <td>{{ row.artifact.slack_file_id or "-" }}</td>
+              <td><a href="/tasks/{{ row.task.id }}">Open</a></td>
+            </tr>
+          {% else %}
+            <tr><td colspan="6" class="empty">No artifacts in this range.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+{% endblock %}

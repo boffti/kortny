@@ -416,6 +416,13 @@ p {
   font-variant-numeric: tabular-nums;
 }
 
+.metric-card .metric-time {
+  display: block;
+  font-size: 13px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
 .detail-section {
   margin-top: 20px;
 }
@@ -674,6 +681,10 @@ pre {
   gap: 10px;
 }
 
+.panel-filters {
+  padding: 14px 16px 16px;
+}
+
 .filters label {
   color: var(--muted-foreground);
   display: grid;
@@ -763,6 +774,11 @@ pre {
 .empty {
   color: var(--muted-foreground);
   text-align: center;
+}
+
+.truncate-cell {
+  max-width: 360px;
+  overflow-wrap: anywhere;
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+
+{% block title %}Users - Kortny Dashboard{% endblock %}
+
+{% block content %}
+  <section class="page-heading">
+    <div>
+      <h1>Users</h1>
+      <p>User-level task volume, spend, failures, and latest activity.</p>
+    </div>
+    <form class="filters" method="get" action="/users">
+      <label>
+        From
+        <input class="input" type="date" name="from" value="{{ from_date }}">
+      </label>
+      <label>
+        To
+        <input class="input" type="date" name="to" value="{{ to_date }}">
+      </label>
+      <button class="btn" type="submit">Apply</button>
+    </form>
+  </section>
+
+  <section class="card">
+    <header>
+      <h2>User Activity</h2>
+      <p>Click a user to inspect tasks, traces, artifacts, and LLM usage.</p>
+    </header>
+    <div class="overflow-x-auto">
+      <table class="table">
+        <caption>Kortny usage by Slack user.</caption>
+        <thead>
+          <tr>
+            <th>User</th>
+            <th class="num">Tasks</th>
+            <th class="num">Failures</th>
+            <th class="num">Input Tokens</th>
+            <th class="num">Output Tokens</th>
+            <th class="num">Artifacts</th>
+            <th class="num">Cost</th>
+            <th>Last Activity</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for item in directory.users %}
+            <tr>
+              <td>
+                <a href="/users/{{ item.user.slack_id }}{% if from_date or to_date %}?from={{ from_date }}&to={{ to_date }}{% endif %}">
+                  <span class="identity-name">{{ item.user.name }}</span>
+                  {% if item.user.secondary %}<span class="identity-id">{{ item.user.secondary }}</span>{% endif %}
+                </a>
+              </td>
+              <td class="num">{{ item.task_count|number }}</td>
+              <td class="num">{{ item.failed_task_count|number }}</td>
+              <td class="num">{{ item.total_input_tokens|number }}</td>
+              <td class="num">{{ item.total_output_tokens|number }}</td>
+              <td class="num">{{ item.artifact_count|number }}</td>
+              <td class="num">{{ item.total_cost_usd|money }}</td>
+              <td>{{ item.last_activity_at|datetime }}</td>
+            </tr>
+          {% else %}
+            <tr><td colspan="8" class="empty">No user activity in this range.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+{% endblock %}

@@ -17,6 +17,7 @@
         <nav class="sidebar-nav">
           <a class="nav-item {{ 'active' if active_page == 'tasks' else '' }}" href="/" {% if active_page == 'tasks' %}aria-current="page"{% endif %}>Tasks</a>
           <a class="nav-item {{ 'active' if active_page == 'usage' else '' }}" href="/usage" {% if active_page == 'usage' %}aria-current="page"{% endif %}>Usage</a>
+          <a class="nav-item {{ 'active' if active_page == 'users' else '' }}" href="/users" {% if active_page == 'users' %}aria-current="page"{% endif %}>Users</a>
         </nav>
         <div class="sidebar-footer">
           <div class="user-pill">
@@ -37,6 +38,7 @@
           <nav class="mobile-nav">
             <a class="nav-item {{ 'active' if active_page == 'tasks' else '' }}" href="/" {% if active_page == 'tasks' %}aria-current="page"{% endif %}>Tasks</a>
             <a class="nav-item {{ 'active' if active_page == 'usage' else '' }}" href="/usage" {% if active_page == 'usage' %}aria-current="page"{% endif %}>Usage</a>
+            <a class="nav-item {{ 'active' if active_page == 'users' else '' }}" href="/users" {% if active_page == 'users' %}aria-current="page"{% endif %}>Users</a>
           </nav>
         </header>
         <main id="main" class="shell" tabindex="-1">

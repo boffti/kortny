@@ -12,12 +12,19 @@ from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import Select, func, select
+from sqlalchemy import Select, case, func, select
 from sqlalchemy.engine import Row
 from sqlalchemy.orm import Session
 from sqlalchemy.sql.elements import ColumnElement
 
-from kortny.db.models import Artifact, LLMUsage, SlackIdentity, Task, TaskEvent
+from kortny.db.models import (
+    Artifact,
+    LLMUsage,
+    SlackIdentity,
+    Task,
+    TaskEvent,
+    TaskStatus,
+)
 
 DEFAULT_PAGE_SIZE = 25
 MAX_PAGE_SIZE = 100
@@ -146,6 +153,57 @@ class UsageAggregate:
     by_user: tuple[AggregateRow, ...]
     by_channel: tuple[AggregateRow, ...]
     by_day: tuple[DailyUsageRow, ...]
+
+
+@dataclass(frozen=True)
+class UserListItem:
+    user: IdentityLabel
+    task_count: int
+    failed_task_count: int
+    artifact_count: int
+    total_input_tokens: int
+    total_output_tokens: int
+    total_cost_usd: Decimal
+    last_activity_at: datetime | None
+
+
+@dataclass(frozen=True)
+class UserDirectory:
+    start: datetime | None
+    end: datetime | None
+    users: tuple[UserListItem, ...]
+
+
+@dataclass(frozen=True)
+class UserTaskRow:
+    task: Task
+    channel: IdentityLabel
+    usage_count: int
+    artifact_count: int
+
+
+@dataclass(frozen=True)
+class UserArtifactRow:
+    artifact: Artifact
+    task: Task
+
+
+@dataclass(frozen=True)
+class UserDetail:
+    user: IdentityLabel
+    start: datetime | None
+    end: datetime | None
+    task_count: int
+    failed_task_count: int
+    artifact_count: int
+    usage_call_count: int
+    total_input_tokens: int
+    total_output_tokens: int
+    total_cost_usd: Decimal
+    last_activity_at: datetime | None
+    tasks: tuple[UserTaskRow, ...]
+    usage: tuple[LLMUsage, ...]
+    artifacts: tuple[UserArtifactRow, ...]
 
 
 def list_tasks(
@@ -353,6 +411,164 @@ def get_usage_aggregate(
     )
 
 
+def list_users(
+    session: Session,
+    *,
+    start: datetime | None = None,
+    end: datetime | None = None,
+) -> UserDirectory:
+    """Return user-level task/cost rollups."""
+
+    task_filter = _task_filter(start=start, end=end)
+    rows = session.execute(
+        select(
+            Task.installation_id,
+            Task.slack_user_id,
+            func.count(Task.id),
+            func.coalesce(func.sum(_failed_task_case()), 0),
+            func.coalesce(func.sum(Task.total_input_tokens), 0),
+            func.coalesce(func.sum(Task.total_output_tokens), 0),
+            func.coalesce(func.sum(Task.total_cost_usd), 0),
+            func.max(Task.created_at),
+        )
+        .where(*task_filter)
+        .group_by(Task.installation_id, Task.slack_user_id)
+        .order_by(
+            func.sum(Task.total_cost_usd).desc(), func.max(Task.created_at).desc()
+        )
+    ).all()
+    artifact_counts = _artifact_counts_by_user(session, task_filter)
+    identities = _identity_map_from_keys(
+        session,
+        (
+            (row[0], "user", row[1])
+            for row in rows
+            if row[0] is not None and row[1] is not None
+        ),
+    )
+    users = tuple(
+        UserListItem(
+            user=_identity_label(
+                identities,
+                installation_id=row[0],
+                kind="user",
+                slack_id=row[1],
+            ),
+            task_count=int(row[2]),
+            failed_task_count=int(row[3]),
+            total_input_tokens=int(row[4]),
+            total_output_tokens=int(row[5]),
+            total_cost_usd=Decimal(row[6]),
+            last_activity_at=row[7],
+            artifact_count=artifact_counts.get((row[0], row[1]), 0),
+        )
+        for row in rows
+    )
+    return UserDirectory(start=start, end=end, users=users)
+
+
+def get_user_detail(
+    session: Session,
+    slack_user_id: str,
+    *,
+    start: datetime | None = None,
+    end: datetime | None = None,
+) -> UserDetail | None:
+    """Return one user's tasks, usage, and artifacts."""
+
+    task_filter = [
+        Task.slack_user_id == slack_user_id,
+        *_task_filter(start=start, end=end),
+    ]
+    stats = session.execute(
+        select(
+            func.count(Task.id),
+            func.coalesce(func.sum(_failed_task_case()), 0),
+            func.coalesce(func.sum(Task.total_input_tokens), 0),
+            func.coalesce(func.sum(Task.total_output_tokens), 0),
+            func.coalesce(func.sum(Task.total_cost_usd), 0),
+            func.max(Task.created_at),
+        ).where(*task_filter)
+    ).one()
+    task_count = int(stats[0])
+    if task_count == 0:
+        return None
+
+    tasks = tuple(
+        session.scalars(
+            select(Task)
+            .where(*task_filter)
+            .order_by(Task.created_at.desc(), Task.id.desc())
+            .limit(25)
+        )
+    )
+    task_ids = [task.id for task in tasks]
+    usage_by_task = _usage_by_task(session, task_ids)
+    artifact_counts = _artifact_counts_by_task(session, task_ids)
+    identities = _identity_map(session, tasks)
+    user_label = _user_label_for_tasks(
+        session,
+        slack_user_id=slack_user_id,
+        tasks=tasks,
+    )
+
+    usage_filter = [
+        Task.slack_user_id == slack_user_id,
+        *_usage_filter(start=start, end=end),
+    ]
+    usage = tuple(
+        session.scalars(
+            select(LLMUsage)
+            .join(Task, Task.id == LLMUsage.task_id)
+            .where(*usage_filter)
+            .order_by(LLMUsage.created_at.desc(), LLMUsage.id.desc())
+            .limit(25)
+        )
+    )
+    artifact_rows = tuple(
+        session.execute(
+            select(Artifact, Task)
+            .join(Task, Task.id == Artifact.task_id)
+            .where(*task_filter)
+            .order_by(Artifact.created_at.desc(), Artifact.id.desc())
+            .limit(25)
+        )
+    )
+    artifacts = tuple(
+        UserArtifactRow(artifact=row[0], task=row[1]) for row in artifact_rows
+    )
+
+    return UserDetail(
+        user=user_label,
+        start=start,
+        end=end,
+        task_count=task_count,
+        failed_task_count=int(stats[1]),
+        total_input_tokens=int(stats[2]),
+        total_output_tokens=int(stats[3]),
+        total_cost_usd=Decimal(stats[4]),
+        last_activity_at=stats[5],
+        usage_call_count=len(usage),
+        artifact_count=_artifact_count_for_user(session, task_filter),
+        tasks=tuple(
+            UserTaskRow(
+                task=task,
+                channel=_identity_label(
+                    identities,
+                    installation_id=task.installation_id,
+                    kind="channel",
+                    slack_id=task.slack_channel_id,
+                ),
+                usage_count=len(usage_by_task[task.id]),
+                artifact_count=artifact_counts.get(task.id, 0),
+            )
+            for task in tasks
+        ),
+        usage=usage,
+        artifacts=artifacts,
+    )
+
+
 def parse_date_bound(
     value: str | None, *, inclusive_end: bool = False
 ) -> datetime | None:
@@ -421,6 +637,77 @@ def _identity_label(
         name=identity.display_name,
         slack_id=identity.slack_id,
         found=True,
+    )
+
+
+def _user_label_for_tasks(
+    session: Session,
+    *,
+    slack_user_id: str,
+    tasks: Sequence[Task],
+) -> IdentityLabel:
+    keys = [
+        (task.installation_id, "user", slack_user_id)
+        for task in tasks
+        if task.slack_user_id == slack_user_id
+    ]
+    identities = _identity_map_from_keys(session, keys)
+    for key in keys:
+        identity = identities.get(key)
+        if identity is not None:
+            return IdentityLabel(
+                name=identity.display_name,
+                slack_id=identity.slack_id,
+                found=True,
+            )
+    return IdentityLabel(name=slack_user_id, slack_id=slack_user_id, found=False)
+
+
+def _failed_task_case() -> Any:
+    return case(
+        (Task.status.in_((TaskStatus.failed, TaskStatus.crashed)), 1),
+        else_=0,
+    )
+
+
+def _artifact_counts_by_user(
+    session: Session,
+    task_filter: Sequence[ColumnElement[bool]],
+) -> dict[tuple[uuid.UUID, str], int]:
+    rows = session.execute(
+        select(Task.installation_id, Task.slack_user_id, func.count(Artifact.id))
+        .join(Artifact, Artifact.task_id == Task.id)
+        .where(*task_filter)
+        .group_by(Task.installation_id, Task.slack_user_id)
+    )
+    return {(row[0], row[1]): int(row[2]) for row in rows}
+
+
+def _artifact_counts_by_task(
+    session: Session,
+    task_ids: Sequence[uuid.UUID],
+) -> dict[uuid.UUID, int]:
+    if not task_ids:
+        return {}
+    rows = session.execute(
+        select(Artifact.task_id, func.count(Artifact.id))
+        .where(Artifact.task_id.in_(task_ids))
+        .group_by(Artifact.task_id)
+    )
+    return {row[0]: int(row[1]) for row in rows}
+
+
+def _artifact_count_for_user(
+    session: Session,
+    task_filter: Sequence[ColumnElement[bool]],
+) -> int:
+    return int(
+        session.scalar(
+            select(func.count(Artifact.id))
+            .join(Task, Task.id == Artifact.task_id)
+            .where(*task_filter)
+        )
+        or 0
     )
 
 
@@ -742,6 +1029,17 @@ def _usage_filter(
         filters.append(LLMUsage.created_at >= start)
     if end is not None:
         filters.append(LLMUsage.created_at < end)
+    return filters
+
+
+def _task_filter(
+    *, start: datetime | None, end: datetime | None
+) -> list[ColumnElement[bool]]:
+    filters: list[ColumnElement[bool]] = []
+    if start is not None:
+        filters.append(Task.created_at >= start)
+    if end is not None:
+        filters.append(Task.created_at < end)
     return filters
 
 

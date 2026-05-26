@@ -1,3 +1,4 @@
+import json
 import os
 import uuid
 from collections.abc import Iterator, Sequence
@@ -585,6 +586,129 @@ def test_agent_executor_humanizes_final_text_before_posting(
     )
     assert completed.payload["changed"] is True
     assert completed.payload["reason"] == "llm_humanizer"
+    record_event = next(
+        event
+        for event in events
+        if event.payload.get("message") == "response_record_built"
+    )
+    assert record_event.payload["response_mode"] == "quick_answer"
+    humanizer_payload = provider.calls[1][0][1].content
+    assert humanizer_payload is not None
+    response_record = json.loads(humanizer_payload)["response_record"]
+    assert response_record["response_mode"] == "quick_answer"
+    assert response_record["user_request"] == task.input
+
+
+def test_agent_executor_builds_research_response_record_for_tool_results(
+    db_session: Session,
+    worker_session_factory: sessionmaker[Session],
+    tmp_path: Path,
+) -> None:
+    claim_time = datetime(2026, 5, 23, 9, 51, tzinfo=UTC)
+    task = create_task(db_session, event_id="EvAgentWorkerResearchHumanizer")
+    task.input = (
+        "Research current Python tempfile guidance and summarize the practical "
+        "points."
+    )
+    task.available_at = claim_time - timedelta(seconds=1)
+    db_session.add(
+        ModelPricing(
+            provider=LLMProvider.openrouter,
+            model="openai/gpt-4o-mini",
+            input_price_per_mtok=Decimal("1.000000"),
+            output_price_per_mtok=Decimal("2.000000"),
+            effective_from=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+    )
+    db_session.commit()
+
+    raw_answer = (
+        "I searched for Python tempfile guidance and found that the standard "
+        "library documentation is still the best source for the main practical "
+        "points. TemporaryDirectory is useful for scoped workspace cleanup, "
+        "NamedTemporaryFile is useful when a visible path is required, and code "
+        "should avoid hard-coded shared temp paths."
+    )
+    humanized_answer = (
+        "*Practical take:* use the stdlib helpers and keep temp file lifetime "
+        "explicit.\n\n"
+        "- Use `TemporaryDirectory` for scoped cleanup.\n"
+        "- Use `NamedTemporaryFile` when another process needs a visible path.\n"
+        "- Avoid shared hard-coded temp paths."
+    )
+    slack_client = FakeSlackClient()
+    provider = FakeAgentProvider(
+        [
+            Completion(
+                content=None,
+                tool_calls=(
+                    ToolCall(
+                        id="call-search-tempfile",
+                        name="web_search",
+                        arguments={
+                            "query": "Python tempfile best practices",
+                            "count": 2,
+                        },
+                    ),
+                ),
+                usage=TokenUsage(input_tokens=220, output_tokens=40),
+                model="openai/gpt-4o-mini",
+            ),
+            Completion(
+                content=raw_answer,
+                tool_calls=(),
+                usage=TokenUsage(input_tokens=300, output_tokens=90),
+                model="openai/gpt-4o-mini",
+            ),
+            Completion(
+                content=humanized_answer,
+                tool_calls=(),
+                usage=TokenUsage(input_tokens=420, output_tokens=85),
+                model="openai/gpt-4o-mini",
+            ),
+        ]
+    )
+
+    result = TaskWorker(
+        session_factory=worker_session_factory,
+        worker_id="agent-worker-test",
+        executor=AgentTaskExecutor(
+            settings=make_settings(),
+            llm_provider=provider,
+            provider_name=LLMProvider.openrouter,
+            web_search_tool=StaticWebSearchTool(),
+            slack_client=slack_client,
+            workspace_base_dir=tmp_path,
+        ),
+    ).run_once(now=claim_time)
+
+    db_session.refresh(task)
+    events = task_events(db_session, task)
+
+    assert result.status == TaskStatus.succeeded.value, task.error
+    assert slack_client.messages == [
+        {
+            "channel": "C123",
+            "text": humanized_answer,
+            "thread_ts": "EvAgentWorkerResearchHumanizer",
+        }
+    ]
+    record_event = next(
+        event
+        for event in events
+        if event.payload.get("message") == "response_record_built"
+    )
+    assert record_event.payload["response_mode"] == "research_summary"
+    assert record_event.payload["action_count"] == 1
+    assert record_event.payload["evidence_count"] == 1
+    humanizer_payload = provider.calls[2][0][1].content
+    assert humanizer_payload is not None
+    response_record = json.loads(humanizer_payload)["response_record"]
+    assert response_record["response_mode"] == "research_summary"
+    assert response_record["actions_taken"][0]["tool"] == "web_search"
+    assert response_record["evidence"][0]["urls"] == [
+        "https://docs.python.org/3/library/tempfile.html"
+    ]
 
 
 def test_agent_executor_removes_ack_reaction_after_success(

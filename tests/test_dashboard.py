@@ -692,11 +692,16 @@ def test_dashboard_composio_detail_shows_disconnect_for_active_connection(
     response = test_client.get("/composio/notion")
 
     assert response.status_code == 200
-    assert "Connected Account" in response.text
+    assert "notion is connected" in response.text
     assert "Notion personal" in response.text
     assert f'action="/composio/connections/{connection.id}/scope"' in response.text
+    assert "Visibility Scope" in response.text
+    assert response.text.count("Visibility Scope") == 1
+    assert "Change visibility to Workspace for this connected account?" in response.text
     assert 'name="visibility_scope_type" value="workspace"' in response.text
-    assert "Save Visibility" in response.text
+    assert "Current" in response.text
+    assert 'type="radio"' not in response.text
+    assert "Save Visibility" not in response.text
     assert f'action="/composio/connections/{connection.id}/disconnect"' in response.text
     assert "Connect notion" not in response.text
 

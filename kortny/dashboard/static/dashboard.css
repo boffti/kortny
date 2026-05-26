@@ -2037,13 +2037,12 @@ pre {
   border-radius: var(--radius);
   display: grid;
   gap: 14px;
-  grid-template-columns: minmax(240px, 0.8fr) minmax(320px, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) minmax(240px, 0.36fr);
   padding: 16px;
 }
 
 .connected-account-summary,
-.connection-scope-form,
-.connection-scope-note {
+.connected-account-actions-card {
   background: var(--card);
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -2111,44 +2110,87 @@ pre {
   padding: 4px 6px;
 }
 
-.connection-scope-form {
+.connected-account-actions-card {
   display: grid;
-  gap: 12px;
+  gap: 10px;
 }
 
-.compact-scope-fieldset {
-  background: transparent;
-  border: 0;
+.connected-account-actions-card p {
+  margin: 0;
+}
+
+.connected-account-actions-card form {
+  margin: 0;
+}
+
+.scope-update-card {
+  display: grid;
+  gap: 14px;
+}
+
+.scope-update-card header {
+  margin-bottom: 0;
+}
+
+.scope-action-grid {
+  align-items: stretch;
+}
+
+.scope-action-form {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.scope-action-card {
+  appearance: none;
+  cursor: pointer;
+  font: inherit;
+  height: 100%;
+  min-height: 168px;
+  text-align: left;
+  transition: background-color 160ms ease, border-color 160ms ease, box-shadow 160ms ease, transform 160ms ease;
+  width: 100%;
+}
+
+.scope-action-card:hover {
+  border-color: var(--accent-border);
+  transform: translateY(-1px);
+}
+
+.scope-action-card.selected {
+  background: var(--success-bg);
+  border-color: color-mix(in srgb, var(--success) 30%, var(--border));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--success) 18%, transparent);
+}
+
+.scope-action-card:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+.scope-channel-field {
+  color: var(--muted-foreground);
+  display: grid;
+  font-size: 12px;
+  font-weight: 800;
   gap: 6px;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  margin-top: 6px;
-  padding: 0;
+  text-transform: uppercase;
 }
 
-.compact-scope-fieldset legend {
-  clip: rect(0 0 0 0);
-  clip-path: inset(50%);
-  height: 1px;
-  overflow: hidden;
-  position: absolute;
-  white-space: nowrap;
-  width: 1px;
-}
-
-.connection-scope-form .form-field {
+.scope-channel-field .input {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--foreground);
+  font: inherit;
+  min-height: 36px;
+  padding: 7px 10px;
   text-transform: none;
 }
 
-.connection-scope-note p {
-  margin: 6px 0 0;
-}
-
-.connected-account-actions {
-  justify-self: end;
-}
-
-.connected-account-actions form {
-  margin: 0;
+.scope-channel-row {
+  max-width: 420px;
 }
 
 .connect-advanced {
@@ -2958,15 +3000,14 @@ pre {
 
   .connection-actions,
   .connection-actions form,
-  .connected-account-actions,
-  .connected-account-actions form,
+  .connected-account-actions-card form,
   .connected-account-panel form {
     justify-self: stretch;
     width: 100%;
   }
 
-  .connected-account-actions .btn-ghost,
-  .connection-scope-form .btn-ghost {
+  .connected-account-actions-card .btn-ghost,
+  .scope-action-card {
     width: 100%;
   }
 

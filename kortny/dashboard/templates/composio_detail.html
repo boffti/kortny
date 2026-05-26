@@ -137,10 +137,10 @@
     <article class="card composio-action-card composio-connect-card {{ 'connected' if active_connection else '' }}">
       <header class="connect-card-header">
         <div>
-          <span class="composio-kicker">Connection</span>
+          <span class="composio-kicker">{{ "Account" if active_connection else "Connection" }}</span>
           <h2>
             {% if active_connection %}
-              Connected Account
+              {{ integration_name }} is connected
             {% elif member_scope %}
               Connect Your Account
             {% else %}
@@ -168,8 +168,8 @@
         <div class="connected-account-panel">
           <div class="connected-account-summary">
             <div class="connected-account-title">
-              <span class="badge badge-success">Active</span>
               <strong>{{ active_connection.display_name }}</strong>
+              <span class="badge badge-success">Active</span>
             </div>
             <dl class="connected-account-meta">
               <div>
@@ -189,46 +189,9 @@
             </dl>
           </div>
 
-          {% if dashboard_is_admin %}
-            <form class="connection-scope-form" method="post" action="/composio/connections/{{ active_connection.id }}/scope">
-              <input type="hidden" name="next" value="{{ detail_base_path }}/{{ detail.slug }}">
-              <div>
-                <span class="form-label">Visibility</span>
-                <fieldset class="scope-fieldset compact-scope-fieldset">
-                  <legend>Visibility</legend>
-                  <label>
-                    <input type="radio" name="visibility_scope_type" value="user" {{ 'checked' if active_connection.visibility_scope_type == 'user' else '' }}>
-                    Personal
-                  </label>
-                  <label>
-                    <input type="radio" name="visibility_scope_type" value="channel" {{ 'checked' if active_connection.visibility_scope_type == 'channel' else '' }}>
-                    Channel
-                  </label>
-                  <label>
-                    <input type="radio" name="visibility_scope_type" value="workspace" {{ 'checked' if active_connection.visibility_scope_type == 'workspace' else '' }}>
-                    Workspace
-                  </label>
-                </fieldset>
-              </div>
-              <label class="form-field">
-                Channel scope
-                <input class="input" name="channel_scope_id" list="slack-channels" value="{{ active_connection.visibility_scope_id if active_connection.visibility_scope_type == 'channel' else '' }}" placeholder="Required for channel visibility">
-                <datalist id="slack-channels">
-                  {% for channel in detail.channel_options %}
-                    <option value="{{ channel.slack_id }}">{{ channel.name }}</option>
-                  {% endfor %}
-                </datalist>
-              </label>
-              <button class="btn-ghost" type="submit">Save Visibility</button>
-            </form>
-          {% else %}
-            <div class="connection-scope-note">
-              <span class="form-label">Visibility</span>
-              <p>Personal to your Slack account. Admins can widen visibility for team or channel use.</p>
-            </div>
-          {% endif %}
-
-          <div class="connected-account-actions">
+          <div class="connected-account-actions-card">
+            <span class="form-label">Account Actions</span>
+            <p>Disconnecting disables the Composio account for Kortny while preserving local history.</p>
             <form method="post" action="/composio/connections/{{ active_connection.id }}/disconnect">
               <input type="hidden" name="next" value="{{ detail_base_path }}/{{ detail.slug }}">
               <button class="btn-ghost btn-danger" type="submit">Disconnect</button>
@@ -345,28 +308,68 @@
 
   {% if dashboard_is_admin %}
     <section class="composio-full-section">
-      <article class="card scope-options-card">
-        <header>
-          <h2>Visibility Scope</h2>
-          <p>New connections should default to personal scope. Wider scopes need explicit intent.</p>
-        </header>
-        <div class="scope-option-grid">
-          {% for option in detail.scope_options %}
-            <article class="scope-option {{ 'default' if option.default else '' }}">
-              <div>
-                <h3>{{ option.name }}</h3>
-                {% if option.default %}
-                  <span class="badge badge-success">Default</span>
+      {% if active_connection %}
+        <article class="card scope-options-card scope-update-card">
+          <header>
+            <h2>Visibility Scope</h2>
+            <p>Choose where Kortny can use this connected account. Wider scopes need explicit intent.</p>
+          </header>
+          <div class="scope-option-grid scope-action-grid">
+            {% for option in detail.scope_options %}
+              <form id="scope-form-{{ option.key }}" class="scope-action-form" method="post" action="/composio/connections/{{ active_connection.id }}/scope" onsubmit="return confirm('Change visibility to {{ option.name }} for this connected account?')">
+                <input type="hidden" name="next" value="{{ detail_base_path }}/{{ detail.slug }}">
+                <input type="hidden" name="visibility_scope_type" value="{{ option.key }}">
+                <button class="scope-option scope-action-card {{ 'selected' if active_connection.visibility_scope_type == option.key else '' }}" type="submit">
+                  <div>
+                    <h3>{{ option.name }}</h3>
+                    {% if active_connection.visibility_scope_type == option.key %}
+                      <span class="badge badge-success">Current</span>
+                    {% elif option.default %}
+                      <span class="badge badge-neutral">Default</span>
+                    {% endif %}
+                  </div>
+                  <p>{{ option.description }}</p>
+                  {% if option.risk %}
+                    <small>{{ option.risk }}</small>
+                  {% endif %}
+                </button>
+              </form>
+            {% endfor %}
+          </div>
+          <label class="scope-channel-field scope-channel-row">
+            Channel scope
+            <input class="input" form="scope-form-channel" name="channel_scope_id" list="slack-channels" value="{{ active_connection.visibility_scope_id if active_connection.visibility_scope_type == 'channel' else '' }}" placeholder="Required only when changing to Channel" required>
+            <datalist id="slack-channels">
+              {% for channel in detail.channel_options %}
+                <option value="{{ channel.slack_id }}">{{ channel.name }}</option>
+              {% endfor %}
+            </datalist>
+          </label>
+        </article>
+      {% else %}
+        <article class="card scope-options-card">
+          <header>
+            <h2>Visibility Scope</h2>
+            <p>New connections should default to personal scope. Wider scopes need explicit intent.</p>
+          </header>
+          <div class="scope-option-grid">
+            {% for option in detail.scope_options %}
+              <article class="scope-option {{ 'default' if option.default else '' }}">
+                <div>
+                  <h3>{{ option.name }}</h3>
+                  {% if option.default %}
+                    <span class="badge badge-success">Default</span>
+                  {% endif %}
+                </div>
+                <p>{{ option.description }}</p>
+                {% if option.risk %}
+                  <small>{{ option.risk }}</small>
                 {% endif %}
-              </div>
-              <p>{{ option.description }}</p>
-              {% if option.risk %}
-                <small>{{ option.risk }}</small>
-              {% endif %}
-            </article>
-          {% endfor %}
-        </div>
-      </article>
+              </article>
+            {% endfor %}
+          </div>
+        </article>
+      {% endif %}
     </section>
   {% endif %}
 

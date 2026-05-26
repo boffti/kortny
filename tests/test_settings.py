@@ -16,6 +16,9 @@ SETTINGS_ENV_VARS = {
     "LLM_DOCUMENT_MODEL",
     "LLM_HIGH_REASONING_MODEL",
     "COMPOSIO_API_KEY",
+    "COMPOSIO_CATALOG_ENABLED",
+    "COMPOSIO_CATALOG_LIMIT",
+    "COMPOSIO_REQUEST_TIMEOUT_SECONDS",
     "BRAVE_SEARCH_API_KEY",
     "OBSERVABILITY_ENABLED",
     "OBSERVABILITY_CAPTURE_CONTENT",
@@ -62,6 +65,9 @@ def test_settings_loads_required_environment(monkeypatch: pytest.MonkeyPatch) ->
     assert settings.postgres_url == "postgresql://kortny:kortny@localhost/kortny"
     assert settings.slack_file_read_max_bytes == 25 * 1024 * 1024
     assert settings.slack_app_name == "kortny"
+    assert settings.composio_catalog_enabled is True
+    assert settings.composio_catalog_limit == 60
+    assert settings.composio_request_timeout_seconds == 10.0
     assert settings.observability_enabled is True
     assert settings.observability_capture_content == "metadata"
     assert settings.otel_service_name == "kortny"
@@ -72,6 +78,9 @@ def test_settings_loads_optional_environment(monkeypatch: pytest.MonkeyPatch) ->
     clear_settings_env(monkeypatch)
     set_required_settings_env(monkeypatch)
     monkeypatch.setenv("COMPOSIO_API_KEY", "composio-key")
+    monkeypatch.setenv("COMPOSIO_CATALOG_ENABLED", "false")
+    monkeypatch.setenv("COMPOSIO_CATALOG_LIMIT", "120")
+    monkeypatch.setenv("COMPOSIO_REQUEST_TIMEOUT_SECONDS", "2.5")
     monkeypatch.setenv("BRAVE_SEARCH_API_KEY", "brave-key")
     monkeypatch.setenv("SLACK_FILE_READ_MAX_BYTES", "1024")
     monkeypatch.setenv("SLACK_APP_NAME", "Courtney")
@@ -93,6 +102,9 @@ def test_settings_loads_optional_environment(monkeypatch: pytest.MonkeyPatch) ->
     settings = load_settings(env_file=None)
 
     assert settings.composio_api_key == "composio-key"
+    assert settings.composio_catalog_enabled is False
+    assert settings.composio_catalog_limit == 120
+    assert settings.composio_request_timeout_seconds == 2.5
     assert settings.brave_search_api_key == "brave-key"
     assert settings.slack_file_read_max_bytes == 1024
     assert settings.slack_app_name == "Courtney"

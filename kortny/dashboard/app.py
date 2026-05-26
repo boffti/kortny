@@ -282,11 +282,15 @@ def register_routes(app: FastAPI) -> None:
     def integrations(
         request: Request,
         username: Annotated[str, Depends(require_user)],
+        session: Annotated[Session, Depends(get_session)],
+        composio_q: Annotated[str | None, Query(alias="composio_q")] = None,
     ) -> Response:
         runtime_settings, runtime_error = _load_runtime_settings()
         integration_dashboard = get_integration_dashboard(
+            session=session,
             runtime_settings=runtime_settings,
             runtime_error=runtime_error,
+            composio_query=composio_q,
         )
         return templates.TemplateResponse(
             request=request,
@@ -295,6 +299,7 @@ def register_routes(app: FastAPI) -> None:
                 "active_page": "integrations",
                 "dashboard_user": username,
                 "integrations": integration_dashboard,
+                "composio_q": composio_q or "",
             },
         )
 

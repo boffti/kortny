@@ -349,6 +349,78 @@ class SlackIdentity(Base):
     )
 
 
+class ComposioConnection(Base):
+    __tablename__ = "composio_connections"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    installation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("installations.id", ondelete="CASCADE"), nullable=False
+    )
+    toolkit_slug: Mapped[str] = mapped_column(String, nullable=False)
+    auth_config_id: Mapped[str | None] = mapped_column(String)
+    connected_account_id: Mapped[str | None] = mapped_column(String)
+    connection_request_id: Mapped[str | None] = mapped_column(String)
+    composio_user_id: Mapped[str] = mapped_column(String, nullable=False)
+    owner_slack_user_id: Mapped[str] = mapped_column(String, nullable=False)
+    visibility_scope_type: Mapped[str] = mapped_column(String, nullable=False)
+    visibility_scope_id: Mapped[str | None] = mapped_column(String)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    display_name: Mapped[str | None] = mapped_column(String)
+    external_account_label: Mapped[str | None] = mapped_column(String)
+    metadata_json: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "visibility_scope_type in ('workspace', 'channel', 'user')",
+            name="ck_composio_connections_visibility_scope_type",
+        ),
+        CheckConstraint(
+            "status in ('pending', 'active', 'expired', 'failed', 'disabled')",
+            name="ck_composio_connections_status",
+        ),
+        CheckConstraint(
+            "(visibility_scope_type = 'workspace' and visibility_scope_id is null) or "
+            "(visibility_scope_type in ('channel', 'user') and visibility_scope_id is not null)",
+            name="ck_composio_connections_visibility_scope_id",
+        ),
+        Index(
+            "idx_composio_connections_connected_account",
+            "installation_id",
+            "connected_account_id",
+            unique=True,
+            postgresql_where=text("connected_account_id IS NOT NULL"),
+        ),
+        Index(
+            "idx_composio_connections_allowed_lookup",
+            "installation_id",
+            "status",
+            "visibility_scope_type",
+            "visibility_scope_id",
+        ),
+        Index(
+            "idx_composio_connections_owner",
+            "installation_id",
+            "owner_slack_user_id",
+        ),
+        Index(
+            "idx_composio_connections_toolkit",
+            "installation_id",
+            "toolkit_slug",
+            "status",
+        ),
+    )
+
+
 class Episode(Base):
     __tablename__ = "episodes"
 

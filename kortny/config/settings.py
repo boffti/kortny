@@ -58,6 +58,15 @@ class Settings(BaseSettings):
     composio_api_key: str | None = Field(
         default=None, validation_alias="COMPOSIO_API_KEY"
     )
+    composio_catalog_enabled: bool = Field(
+        default=True, validation_alias="COMPOSIO_CATALOG_ENABLED"
+    )
+    composio_catalog_limit: int = Field(
+        default=60, validation_alias="COMPOSIO_CATALOG_LIMIT"
+    )
+    composio_request_timeout_seconds: float = Field(
+        default=10.0, validation_alias="COMPOSIO_REQUEST_TIMEOUT_SECONDS"
+    )
     brave_search_api_key: str | None = Field(
         default=None, validation_alias="BRAVE_SEARCH_API_KEY"
     )
@@ -154,6 +163,20 @@ class Settings(BaseSettings):
     def _positive_file_read_limit(cls, value: int) -> int:
         if value < 1:
             raise ValueError("SLACK_FILE_READ_MAX_BYTES must be at least 1")
+        return value
+
+    @field_validator("composio_catalog_limit")
+    @classmethod
+    def _valid_composio_catalog_limit(cls, value: int) -> int:
+        if value < 1 or value > 1000:
+            raise ValueError("COMPOSIO_CATALOG_LIMIT must be between 1 and 1000")
+        return value
+
+    @field_validator("composio_request_timeout_seconds")
+    @classmethod
+    def _valid_composio_timeout(cls, value: float) -> float:
+        if value <= 0:
+            raise ValueError("COMPOSIO_REQUEST_TIMEOUT_SECONDS must be positive")
         return value
 
     @field_validator("otel_trace_sampling_ratio")

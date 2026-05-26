@@ -18,10 +18,16 @@ from sqlalchemy.engine import Row
 from sqlalchemy.orm import Session
 from sqlalchemy.sql.elements import ColumnElement
 
+from kortny.composio import (
+    ComposioCatalogError,
+    ComposioClient,
+    ComposioToolkit,
+)
 from kortny.config import Settings
 from kortny.dashboard.settings import DashboardSettings
 from kortny.db.models import (
     Artifact,
+    ComposioConnection,
     Episode,
     LLMUsage,
     SlackIdentity,
@@ -450,6 +456,50 @@ class IntegrationCard:
 
 
 @dataclass(frozen=True)
+class ComposioToolkitRow:
+    slug: str
+    name: str
+    description: str
+    categories: tuple[str, ...]
+    auth_schemes: tuple[str, ...]
+    managed_auth_schemes: tuple[str, ...]
+    tools_count: int
+    triggers_count: int
+    no_auth: bool
+    connection_status: str
+    connection_tone: str
+
+
+@dataclass(frozen=True)
+class ComposioConnectionRow:
+    toolkit_slug: str
+    status: str
+    tone: str
+    display_name: str
+    scope_label: str
+    owner: IdentityLabel
+    connected_account_id: str | None
+    auth_config_id: str | None
+    updated_at: datetime
+
+
+@dataclass(frozen=True)
+class ComposioCatalogView:
+    enabled: bool
+    configured: bool
+    status: str
+    tone: str
+    query: str
+    total_items: int | None
+    visible_count: int
+    connection_count: int
+    active_connection_count: int
+    error: str | None
+    toolkits: tuple[ComposioToolkitRow, ...]
+    connections: tuple[ComposioConnectionRow, ...]
+
+
+@dataclass(frozen=True)
 class ToolCapability:
     name: str
     group: str
@@ -472,6 +522,7 @@ class ToolCapabilityGroup:
 class IntegrationDashboard:
     metrics: tuple[SystemMetric, ...]
     integrations: tuple[IntegrationCard, ...]
+    composio_catalog: ComposioCatalogView
     tool_groups: tuple[ToolCapabilityGroup, ...]
     runtime_error: str | None
 
@@ -1135,12 +1186,21 @@ def get_system_health(
 
 def get_integration_dashboard(
     *,
+    session: Session | None = None,
     runtime_settings: Settings | None = None,
     runtime_error: str | None = None,
+    composio_query: str | None = None,
+    composio_client: ComposioClient | None = None,
 ) -> IntegrationDashboard:
     """Return configured integration and tool-registry state."""
 
     integrations = _integration_cards(runtime_settings, runtime_error)
+    composio_catalog = _composio_catalog_view(
+        session=session,
+        settings=runtime_settings,
+        query=composio_query,
+        client=composio_client,
+    )
     tool_groups = _tool_capability_groups(runtime_settings)
     configured_count = sum(1 for card in integrations if card.tone == "success")
     setup_gap_count = sum(
@@ -1168,14 +1228,21 @@ def get_integration_dashboard(
         ),
         SystemMetric(
             label="External Adapters",
-            value="1 planned",
-            detail="Composio is tracked separately in HIG-35",
-            tone="neutral",
+            value=(
+                f"{composio_catalog.total_items:,}"
+                if composio_catalog.total_items is not None
+                else "1 planned"
+            ),
+            detail="Composio supported toolkits"
+            if composio_catalog.total_items is not None
+            else "Composio is tracked separately in HIG-35",
+            tone=composio_catalog.tone,
         ),
     )
     return IntegrationDashboard(
         metrics=metrics,
         integrations=integrations,
+        composio_catalog=composio_catalog,
         tool_groups=tool_groups,
         runtime_error=runtime_error,
     )
@@ -1670,23 +1737,233 @@ def _integration_cards(
         IntegrationCard(
             name="Composio",
             category="External tools",
-            status="Key present, adapter pending"
+            status="Key present, catalog available"
             if settings.composio_api_key
             else "Planned",
             tone="warning" if settings.composio_api_key else "neutral",
-            description="Future MCP/tool adapter for third-party app integrations.",
+            description="Third-party app catalog and scoped connected-account adapter.",
             details=(
                 (
-                    "COMPOSIO_API_KEY is present, but the runtime adapter is intentionally not active yet."
+                    "COMPOSIO_API_KEY is present; HIG-35 is wiring catalog and scoped-account metadata before runtime tool use."
                     if settings.composio_api_key
                     else "No key configured. HIG-35 tracks the actual integration adapter."
                 ),
+                "Runtime tool execution stays disabled until per-task visibility gates are in place.",
             ),
-            env_vars=("COMPOSIO_API_KEY",),
-            action="Use HIG-35 for OAuth/account connection and runtime adapter work.",
+            env_vars=(
+                "COMPOSIO_API_KEY",
+                "COMPOSIO_CATALOG_ENABLED",
+                "COMPOSIO_CATALOG_LIMIT",
+            ),
+            action="Catalog is read-only first; OAuth connect and runtime execution are follow-up slices.",
         ),
     ]
     return tuple(integrations)
+
+
+def _composio_catalog_view(
+    *,
+    session: Session | None,
+    settings: Settings | None,
+    query: str | None,
+    client: ComposioClient | None,
+) -> ComposioCatalogView:
+    normalized_query = (query or "").strip()
+    connections = _composio_connection_rows(session)
+    active_count = sum(1 for connection in connections if connection.status == "active")
+    if settings is None or not settings.composio_api_key:
+        return ComposioCatalogView(
+            enabled=False,
+            configured=False,
+            status="Not configured",
+            tone="neutral",
+            query=normalized_query,
+            total_items=None,
+            visible_count=0,
+            connection_count=len(connections),
+            active_connection_count=active_count,
+            error=None,
+            toolkits=(),
+            connections=connections,
+        )
+    if not settings.composio_catalog_enabled:
+        return ComposioCatalogView(
+            enabled=False,
+            configured=True,
+            status="Catalog disabled",
+            tone="warning",
+            query=normalized_query,
+            total_items=None,
+            visible_count=0,
+            connection_count=len(connections),
+            active_connection_count=active_count,
+            error="COMPOSIO_CATALOG_ENABLED is false.",
+            toolkits=(),
+            connections=connections,
+        )
+
+    resolved_client = client or ComposioClient(
+        api_key=settings.composio_api_key,
+        timeout_seconds=settings.composio_request_timeout_seconds,
+    )
+    try:
+        catalog = resolved_client.list_toolkits(
+            search=normalized_query or None,
+            limit=settings.composio_catalog_limit,
+        )
+    except ComposioCatalogError as exc:
+        return ComposioCatalogView(
+            enabled=True,
+            configured=True,
+            status="Catalog unavailable",
+            tone="danger",
+            query=normalized_query,
+            total_items=None,
+            visible_count=0,
+            connection_count=len(connections),
+            active_connection_count=active_count,
+            error=_short_error(str(exc)),
+            toolkits=(),
+            connections=connections,
+        )
+
+    connection_statuses = _composio_status_by_toolkit(connections)
+    toolkits = tuple(
+        _composio_toolkit_row(toolkit, connection_statuses)
+        for toolkit in catalog.items
+    )
+    return ComposioCatalogView(
+        enabled=True,
+        configured=True,
+        status="Catalog synced",
+        tone="success",
+        query=normalized_query,
+        total_items=catalog.total_items,
+        visible_count=len(toolkits),
+        connection_count=len(connections),
+        active_connection_count=active_count,
+        error=None,
+        toolkits=toolkits,
+        connections=connections,
+    )
+
+
+def _composio_connection_rows(session: Session | None) -> tuple[ComposioConnectionRow, ...]:
+    if session is None:
+        return ()
+    rows = tuple(
+        session.scalars(
+            select(ComposioConnection).order_by(
+                ComposioConnection.updated_at.desc(),
+                ComposioConnection.id.desc(),
+            )
+        )
+    )
+    identity_keys: list[IdentityKey] = []
+    for row in rows:
+        identity_keys.append((row.installation_id, "user", row.owner_slack_user_id))
+        if row.visibility_scope_type == "channel" and row.visibility_scope_id:
+            identity_keys.append((row.installation_id, "channel", row.visibility_scope_id))
+        elif row.visibility_scope_type == "user" and row.visibility_scope_id:
+            identity_keys.append((row.installation_id, "user", row.visibility_scope_id))
+    identities = _identity_map_from_keys(session, identity_keys)
+    return tuple(_composio_connection_row(row, identities) for row in rows)
+
+
+def _composio_connection_row(
+    row: ComposioConnection,
+    identities: dict[IdentityKey, SlackIdentity],
+) -> ComposioConnectionRow:
+    owner = _identity_label(
+        identities,
+        installation_id=row.installation_id,
+        kind="user",
+        slack_id=row.owner_slack_user_id,
+    )
+    return ComposioConnectionRow(
+        toolkit_slug=row.toolkit_slug,
+        status=row.status,
+        tone=_composio_connection_tone(row.status),
+        display_name=row.display_name or row.external_account_label or row.toolkit_slug,
+        scope_label=_composio_scope_label(row, identities),
+        owner=owner,
+        connected_account_id=row.connected_account_id,
+        auth_config_id=row.auth_config_id,
+        updated_at=row.updated_at,
+    )
+
+
+def _composio_scope_label(
+    row: ComposioConnection,
+    identities: dict[IdentityKey, SlackIdentity],
+) -> str:
+    if row.visibility_scope_type == "workspace":
+        return "Workspace"
+    if row.visibility_scope_id is None:
+        return row.visibility_scope_type.title()
+    kind = "channel" if row.visibility_scope_type == "channel" else "user"
+    label = _identity_label(
+        identities,
+        installation_id=row.installation_id,
+        kind=kind,
+        slack_id=row.visibility_scope_id,
+    )
+    return label.name
+
+
+def _composio_status_by_toolkit(
+    connections: tuple[ComposioConnectionRow, ...],
+) -> dict[str, str]:
+    statuses: dict[str, str] = {}
+    priority = {"active": 4, "pending": 3, "expired": 2, "failed": 1, "disabled": 0}
+    for connection in connections:
+        current = statuses.get(connection.toolkit_slug)
+        if current is None or priority.get(connection.status, -1) > priority.get(current, -1):
+            statuses[connection.toolkit_slug] = connection.status
+    return statuses
+
+
+def _composio_toolkit_row(
+    toolkit: ComposioToolkit,
+    connection_statuses: dict[str, str],
+) -> ComposioToolkitRow:
+    status = connection_statuses.get(toolkit.slug)
+    if status is None:
+        connection_status = "Available"
+        connection_tone = "neutral"
+    else:
+        connection_status = status.title()
+        connection_tone = _composio_connection_tone(status)
+    return ComposioToolkitRow(
+        slug=toolkit.slug,
+        name=toolkit.name,
+        description=toolkit.description,
+        categories=toolkit.categories,
+        auth_schemes=toolkit.auth_schemes,
+        managed_auth_schemes=toolkit.managed_auth_schemes,
+        tools_count=toolkit.tools_count,
+        triggers_count=toolkit.triggers_count,
+        no_auth=toolkit.no_auth,
+        connection_status=connection_status,
+        connection_tone=connection_tone,
+    )
+
+
+def _composio_connection_tone(status: str) -> str:
+    return {
+        "active": "success",
+        "pending": "warning",
+        "expired": "warning",
+        "failed": "danger",
+        "disabled": "neutral",
+    }.get(status, "neutral")
+
+
+def _short_error(value: str, *, max_chars: int = 220) -> str:
+    cleaned = " ".join(value.split())
+    if len(cleaned) <= max_chars:
+        return cleaned
+    return cleaned[: max_chars - 1].rstrip() + "..."
 
 
 def _tool_capability_groups(

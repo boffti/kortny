@@ -16,6 +16,7 @@ from kortny.dashboard.app import create_app
 from kortny.dashboard.settings import DashboardSettings
 from kortny.db.models import (
     Artifact,
+    ComposioConnection,
     EncryptedSecret,
     Episode,
     Installation,
@@ -160,6 +161,8 @@ def test_dashboard_system_page_shows_health_and_redacted_config(
     monkeypatch.setenv("SLACK_APP_TOKEN", "xapp-system-secret")
     monkeypatch.setenv("SLACK_SIGNING_SECRET", "system-signing-secret")
     monkeypatch.setenv("SLACK_APP_NAME", "kortny")
+    monkeypatch.setenv("COMPOSIO_CATALOG_ENABLED", "false")
+    monkeypatch.setenv("COMPOSIO_REQUEST_TIMEOUT_SECONDS", "0.2")
     monkeypatch.setenv("LLM_PROVIDER", "openrouter")
     monkeypatch.setenv("LLM_API_KEY", "llm-system-secret")
     monkeypatch.setenv("LLM_MODEL", "openai/gpt-5.4-mini")
@@ -214,7 +217,8 @@ def test_dashboard_integrations_page_shows_providers_tools_and_redacts_secrets(
     assert "PDF generation" in response.text
     assert "Workspace memory" in response.text
     assert "Composio" in response.text
-    assert "Key present, adapter pending" in response.text
+    assert "Key present, catalog available" in response.text
+    assert "Composio Catalog" in response.text
     assert "web_search" in response.text
     assert "pdf_generator" in response.text
     assert "slack_channel_history" in response.text
@@ -908,6 +912,7 @@ def cleanup_database(session: Session) -> None:
         LLMUsage,
         WorkspaceState,
         Episode,
+        ComposioConnection,
         SlackIdentity,
         TaskEvent,
         Task,

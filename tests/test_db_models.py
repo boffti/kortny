@@ -9,6 +9,7 @@ def test_mvp_schema_declares_all_core_tables() -> None:
         "task_events",
         "workspace_state",
         "slack_identities",
+        "composio_connections",
         "episodes",
         "llm_usage",
         "artifacts",
@@ -95,3 +96,21 @@ def test_slack_identity_table_has_lookup_constraints_and_indexes() -> None:
 
     assert {"ck_slack_identity_kind", "idx_slack_identity_unique"} <= constraint_names
     assert {"idx_slack_identity_lookup", "idx_slack_identity_seen"} <= index_names
+
+
+def test_composio_connection_table_has_visibility_constraints_and_indexes() -> None:
+    connections = Base.metadata.tables["composio_connections"]
+    constraint_names = {constraint.name for constraint in connections.constraints}
+    index_names = {index.name for index in connections.indexes}
+
+    assert {
+        "ck_composio_connections_visibility_scope_type",
+        "ck_composio_connections_status",
+        "ck_composio_connections_visibility_scope_id",
+    } <= constraint_names
+    assert {
+        "idx_composio_connections_connected_account",
+        "idx_composio_connections_allowed_lookup",
+        "idx_composio_connections_owner",
+        "idx_composio_connections_toolkit",
+    } <= index_names

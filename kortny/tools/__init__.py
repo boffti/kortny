@@ -1,5 +1,6 @@
 """Tool contracts and registry helpers."""
 
+from kortny.tools.composio_execute import ComposioExecuteTool
 from kortny.tools.echo import EchoTool
 from kortny.tools.pdf_generator import PdfGeneratorTool
 from kortny.tools.registry import DuplicateToolError, ToolNotFoundError, ToolRegistry
@@ -18,6 +19,7 @@ from kortny.tools.workspace_memory import (
 )
 
 __all__ = [
+    "ComposioExecuteTool",
     "DuplicateToolError",
     "EchoTool",
     "ForgetFactTool",

@@ -64,6 +64,15 @@ class ComposioCatalog:
     next_cursor: str | None
 
 
+@dataclass(frozen=True)
+class ComposioToolExecution:
+    data: dict[str, Any] | list[Any] | str | int | float | bool | None
+    successful: bool
+    error: Any | None
+    log_id: str | None
+    session_info: dict[str, Any] | None
+
+
 class ComposioClient:
     """Minimal Composio API wrapper used by the dashboard and future adapters."""
 
@@ -232,6 +241,39 @@ class ComposioClient:
         payload = response.json()
         success = payload.get("success")
         return bool(success) if success is not None else True
+
+    def execute_tool(
+        self,
+        *,
+        tool_slug: str,
+        user_id: str,
+        connected_account_id: str,
+        arguments: dict[str, Any],
+        version: str | None = None,
+    ) -> ComposioToolExecution:
+        payload: dict[str, Any] = {
+            "user_id": user_id,
+            "connected_account_id": connected_account_id,
+            "arguments": arguments,
+        }
+        if version:
+            payload["version"] = version
+
+        response = self._post(
+            f"/api/v3.1/tools/execute/{tool_slug}",
+            json_payload=payload,
+        )
+        response_payload = response.json()
+        if not isinstance(response_payload, dict):
+            raise ComposioConnectionError("Composio tool response was invalid")
+        session_info = response_payload.get("session_info")
+        return ComposioToolExecution(
+            data=response_payload.get("data"),
+            successful=bool(response_payload.get("successful", True)),
+            error=response_payload.get("error"),
+            log_id=_optional_str(response_payload.get("log_id")),
+            session_info=session_info if isinstance(session_info, dict) else None,
+        )
 
     def _get(self, path: str, *, params: dict[str, str | int]) -> httpx.Response:
         client = self.http_client or httpx.Client(timeout=self.timeout_seconds)

@@ -327,3 +327,45 @@ def test_composio_client_disables_connected_account() -> None:
     )
 
     assert client.set_connected_account_enabled("ca_123", enabled=False) is True
+
+
+def test_composio_client_executes_tool_with_connected_account() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v3.1/tools/execute/FIRECRAWL_SCRAPE"
+        assert request.method == "POST"
+        payload = json.loads(request.read().decode())
+        assert payload == {
+            "user_id": "slack:installation:user",
+            "connected_account_id": "ca_firecrawl",
+            "arguments": {"url": "https://example.com"},
+            "version": "latest",
+        }
+        return httpx.Response(
+            200,
+            json={
+                "data": {"markdown": "# Example"},
+                "successful": True,
+                "error": None,
+                "log_id": "log_123",
+                "session_info": {"session_id": "session_123"},
+            },
+        )
+
+    client = ComposioClient(
+        api_key="test-key",
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    execution = client.execute_tool(
+        tool_slug="FIRECRAWL_SCRAPE",
+        user_id="slack:installation:user",
+        connected_account_id="ca_firecrawl",
+        arguments={"url": "https://example.com"},
+        version="latest",
+    )
+
+    assert execution.successful is True
+    assert execution.data == {"markdown": "# Example"}
+    assert execution.error is None
+    assert execution.log_id == "log_123"
+    assert execution.session_info == {"session_id": "session_123"}

@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from kortny.agent import AgentCoordinator
 from kortny.agent.coordinator import DEFAULT_SYSTEM_PROMPT
 from kortny.agent.thread_context import ThreadTranscriptProvider
+from kortny.composio import ComposioClient
 from kortny.config import Settings, load_settings
 from kortny.db.models import Artifact, Task, TaskEvent, TaskEventType
 from kortny.db.models import LLMProvider as DbLLMProvider
@@ -37,6 +38,7 @@ from kortny.slack.reactions import (
 from kortny.slack.thread_context import SlackThreadTranscriptProvider
 from kortny.tasks import TaskCancelledError, TaskService
 from kortny.tools import (
+    ComposioExecuteTool,
     ForgetFactTool,
     InspectMemoryTool,
     PdfGeneratorTool,
@@ -283,18 +285,46 @@ class AgentTaskExecutor:
         recall_fact = RecallFactTool(service=memory_service, task=task)
         inspect_memory = InspectMemoryTool(service=memory_service, task=task)
         forget_fact = ForgetFactTool(service=memory_service, task=task)
-        return ToolRegistry(
-            [
-                web_search,
-                pdf_generator,
-                slack_channel_history,
-                slack_file_read,
-                remember_fact,
-                recall_fact,
-                inspect_memory,
-                forget_fact,
-            ]
+        tools: list[Tool] = [
+            web_search,
+            pdf_generator,
+            slack_channel_history,
+            slack_file_read,
+            remember_fact,
+            recall_fact,
+            inspect_memory,
+            forget_fact,
+        ]
+        composio_execute = self._build_composio_execute_tool(
+            settings=settings,
+            session=session,
+            task=task,
         )
+        if composio_execute is not None:
+            tools.append(composio_execute)
+        return ToolRegistry(tools)
+
+    def _build_composio_execute_tool(
+        self,
+        *,
+        settings: Settings,
+        session: Session,
+        task: Task,
+    ) -> Tool | None:
+        if settings.composio_api_key is None:
+            return None
+
+        tool = ComposioExecuteTool(
+            session=session,
+            task=task,
+            client=ComposioClient(
+                api_key=settings.composio_api_key,
+                timeout_seconds=settings.composio_request_timeout_seconds,
+            ),
+        )
+        if not tool.has_available_connections:
+            return None
+        return tool
 
     def _build_slack_history_client(self, settings: Settings) -> Any:
         if self.slack_client is not None and hasattr(

@@ -9,6 +9,8 @@ def test_mvp_schema_declares_all_core_tables() -> None:
         "task_events",
         "workspace_state",
         "slack_identities",
+        "dashboard_users",
+        "dashboard_oauth_states",
         "composio_connections",
         "episodes",
         "llm_usage",

@@ -25,6 +25,12 @@ from kortny.agent.context import (
     DEFAULT_THREAD_TRANSCRIPT_LIMIT,
     ContextAssembler,
 )
+from kortny.agent.execution import (
+    ExecutionGuardrailLimits,
+    ExecutionPlan,
+    ToolAttemptRecord,
+    make_default_execution_plan,
+)
 from kortny.agent.thread_context import ThreadTranscriptProvider
 from kortny.db.models import Task, TaskEventType
 from kortny.llm import ChatMessage, Completion, ToolCall
@@ -110,6 +116,10 @@ class AgentTurnLimitError(AgentLoopError):
     """Raised when the coordinator exhausts its maximum LLM turns."""
 
 
+class AgentExecutionGuardrailError(AgentLoopError):
+    """Raised when execution guardrails stop a task."""
+
+
 @dataclass(frozen=True, slots=True)
 class AgentRunResult:
     """Final coordinator result."""
@@ -138,6 +148,7 @@ class AgentCoordinator:
         thread_transcript_limit: int = DEFAULT_THREAD_TRANSCRIPT_LIMIT,
         known_facts_max_chars: int = DEFAULT_KNOWN_FACTS_MAX_CHARS,
         context_assembler: ContextAssembler | None = None,
+        guardrail_limits: ExecutionGuardrailLimits | None = None,
     ) -> None:
         if max_turns < 1:
             raise ValueError("max_turns must be at least 1")
@@ -154,7 +165,10 @@ class AgentCoordinator:
         self.llm = llm
         self.registry = registry
         self.task_service = task_service or TaskService(session)
-        self.max_turns = max_turns
+        self.guardrail_limits = guardrail_limits or ExecutionGuardrailLimits(
+            max_turns=max_turns
+        )
+        self.max_turns = self.guardrail_limits.max_turns
         self.context_assembler = context_assembler or ContextAssembler(
             session=session,
             task_service=self.task_service,
@@ -173,6 +187,25 @@ class AgentCoordinator:
         messages = self._initial_messages(task_obj)
         schemas = self.registry.schemas()
         artifact_count = 0
+        plan = self._create_execution_plan(task_obj)
+        self._append_execution_log(
+            task_obj,
+            "execution_plan_created",
+            plan,
+            {
+                "plan": plan.to_payload(),
+            },
+        )
+        step = plan.start()
+        self._append_execution_log(
+            task_obj,
+            "execution_step_started",
+            plan,
+            {
+                "step": step.to_payload(),
+                "budget_remaining": plan.budget.remaining(plan.limits),
+            },
+        )
 
         self._append_log(
             task_obj,
@@ -195,13 +228,19 @@ class AgentCoordinator:
             )
 
             if not completion.tool_calls:
-                return self._finish_with_text(task_obj, completion.content, turn)
+                return self._finish_with_text(
+                    task_obj,
+                    completion.content,
+                    turn,
+                    plan=plan,
+                )
 
             turn_artifacts = self._invoke_tool_calls(
                 task_obj=task_obj,
                 messages=messages,
                 completion=completion,
                 turn=turn,
+                plan=plan,
             )
             artifact_count += turn_artifacts
             if turn_artifacts:
@@ -209,10 +248,20 @@ class AgentCoordinator:
                     task_obj,
                     turn=turn,
                     artifact_count=artifact_count,
+                    plan=plan,
                 )
 
         error = AgentTurnLimitError(
             f"Agent exceeded max_turns={self.max_turns} for task {task_obj.id}"
+        )
+        self._fail_execution_plan(
+            task_obj,
+            plan,
+            error,
+            {
+                "reason": "max_turns_exceeded",
+                "max_turns": self.max_turns,
+            },
         )
         self._append_error(task_obj, error, {"max_turns": self.max_turns})
         raise error
@@ -266,6 +315,7 @@ class AgentCoordinator:
         messages: list[ChatMessage],
         completion: Completion,
         turn: int,
+        plan: ExecutionPlan,
     ) -> int:
         artifact_count = 0
         for tool_call in completion.tool_calls:
@@ -273,6 +323,13 @@ class AgentCoordinator:
                 task_obj, phase=f"before_tool_{tool_call.name}"
             )
             arguments = self._tool_arguments(task_obj, tool_call)
+            attempt = self._record_tool_attempt(
+                task_obj=task_obj,
+                plan=plan,
+                tool_call=tool_call,
+                arguments=arguments,
+                turn=turn,
+            )
             self.task_service.append_event(
                 task_obj,
                 TaskEventType.tool_call,
@@ -280,6 +337,9 @@ class AgentCoordinator:
                     "turn": turn,
                     "tool_call_id": tool_call.id,
                     "tool": tool_call.name,
+                    "step_id": plan.current_step.step_id,
+                    "normalized_args_hash": attempt.normalized_args_hash,
+                    "attempt_no": attempt.attempt_no,
                     "argument_keys": sorted(arguments),
                     "arguments": arguments,
                 },
@@ -291,10 +351,14 @@ class AgentCoordinator:
                 turn=turn,
                 tool_call_id=tool_call.id,
                 tool=tool_call.name,
+                step_id=plan.current_step.step_id,
+                normalized_args_hash=attempt.normalized_args_hash,
+                attempt_no=attempt.attempt_no,
                 argument_keys=sorted(arguments),
             )
             started = time.perf_counter()
             recoverable_error: RecoverableToolError | None = None
+            recoverable_budget_exceeded = False
             result: ToolResult
             try:
                 with start_span(
@@ -305,6 +369,8 @@ class AgentCoordinator:
                         "agent.turn": turn,
                         "tool.name": tool_call.name,
                         "tool.call_id": tool_call.id,
+                        "tool.normalized_args_hash": attempt.normalized_args_hash,
+                        "tool.attempt_no": attempt.attempt_no,
                         "tool.argument_keys": sorted(arguments),
                     },
                 ):
@@ -354,6 +420,14 @@ class AgentCoordinator:
                 raise
 
             if recoverable_error is not None:
+                recoverable_budget_exceeded = self._record_recoverable_failure(
+                    task_obj=task_obj,
+                    plan=plan,
+                    attempt=attempt,
+                    error=recoverable_error,
+                    turn=turn,
+                    tool_call_id=tool_call.id,
+                )
                 log_observation(
                     logger,
                     "tool_call_recoverable_failed",
@@ -362,6 +436,9 @@ class AgentCoordinator:
                     turn=turn,
                     tool_call_id=tool_call.id,
                     tool=tool_call.name,
+                    step_id=plan.current_step.step_id,
+                    normalized_args_hash=attempt.normalized_args_hash,
+                    attempt_no=attempt.attempt_no,
                     latency_ms=_latency_ms(started),
                     error_code=recoverable_error.code,
                     error_summary=recoverable_error.message,
@@ -380,6 +457,9 @@ class AgentCoordinator:
                     "turn": turn,
                     "tool_call_id": tool_call.id,
                     "tool": tool_call.name,
+                    "step_id": plan.current_step.step_id,
+                    "normalized_args_hash": attempt.normalized_args_hash,
+                    "attempt_no": attempt.attempt_no,
                     "latency_ms": latency_ms,
                     "output_shape": _output_shape(result.output),
                     "artifact_count": len(result.artifacts),
@@ -407,6 +487,36 @@ class AgentCoordinator:
                     tool_call_id=tool_call.id,
                 )
             )
+            if recoverable_budget_exceeded and recoverable_error is not None:
+                error = AgentExecutionGuardrailError(
+                    "Recoverable tool failure budget exceeded for "
+                    f"{tool_call.name}:{recoverable_error.code}"
+                )
+                self._fail_execution_plan(
+                    task_obj,
+                    plan,
+                    error,
+                    {
+                        "reason": "recoverable_failure_budget_exceeded",
+                        "tool": tool_call.name,
+                        "tool_call_id": tool_call.id,
+                        "error_code": recoverable_error.code,
+                        "normalized_args_hash": attempt.normalized_args_hash,
+                        "attempt_no": attempt.attempt_no,
+                        "budget_remaining": plan.budget.remaining(plan.limits),
+                    },
+                )
+                self._append_error(
+                    task_obj,
+                    error,
+                    {
+                        "phase": "tool_invoke",
+                        "tool": tool_call.name,
+                        "tool_call_id": tool_call.id,
+                        "error_code": recoverable_error.code,
+                    },
+                )
+                raise error
 
         return artifact_count
 
@@ -423,10 +533,18 @@ class AgentCoordinator:
         task: Task,
         content: str | None,
         turn: int,
+        *,
+        plan: ExecutionPlan,
     ) -> AgentRunResult:
         summary = (content or "").strip()
         if not summary:
             error = AgentLoopError("Agent returned no final content or tool calls")
+            self._fail_execution_plan(
+                task,
+                plan,
+                error,
+                {"turn": turn, "phase": "final_content"},
+            )
             self._append_error(task, error, {"turn": turn, "phase": "final_content"})
             raise error
 
@@ -436,6 +554,7 @@ class AgentCoordinator:
             turn=turn,
             artifact_count=0,
             reason="final_answer",
+            plan=plan,
         )
 
     def _finish_with_artifacts(
@@ -444,6 +563,7 @@ class AgentCoordinator:
         *,
         turn: int,
         artifact_count: int,
+        plan: ExecutionPlan,
     ) -> AgentRunResult:
         artifact_word = "artifact" if artifact_count == 1 else "artifacts"
         return self._finish(
@@ -452,6 +572,7 @@ class AgentCoordinator:
             turn=turn,
             artifact_count=artifact_count,
             reason="artifact",
+            plan=plan,
         )
 
     def _finish(
@@ -462,9 +583,23 @@ class AgentCoordinator:
         turn: int,
         artifact_count: int,
         reason: str,
+        plan: ExecutionPlan,
     ) -> AgentRunResult:
         task.result_summary = summary
         self.session.flush()
+        step = plan.complete()
+        self._append_execution_log(
+            task,
+            "execution_step_completed",
+            plan,
+            {
+                "step": step.to_payload(),
+                "turns": turn,
+                "reason": reason,
+                "artifact_count": artifact_count,
+                "budget_remaining": plan.budget.remaining(plan.limits),
+            },
+        )
         self._append_log(
             task,
             "agent_completed",
@@ -479,6 +614,240 @@ class AgentCoordinator:
             result_summary=summary,
             turns=turn,
             artifact_count=artifact_count,
+        )
+
+    def _create_execution_plan(self, task: Task) -> ExecutionPlan:
+        return make_default_execution_plan(
+            task_id=task.id,
+            user_input=task.input,
+            selected_tool_names=list(self.registry.names()),
+            limits=self.guardrail_limits,
+        )
+
+    def _record_tool_attempt(
+        self,
+        *,
+        task_obj: Task,
+        plan: ExecutionPlan,
+        tool_call: ToolCall,
+        arguments: JsonObject,
+        turn: int,
+    ) -> ToolAttemptRecord:
+        step = plan.current_step
+        attempt = plan.budget.record_tool_attempt(
+            task_id=task_obj.id,
+            step_id=step.step_id,
+            tool_name=tool_call.name,
+            arguments=arguments,
+        )
+        step.tool_call_count += 1
+        self._append_execution_log(
+            task_obj,
+            "execution_budget_updated",
+            plan,
+            {
+                "turn": turn,
+                "step_id": step.step_id,
+                "tool_call_id": tool_call.id,
+                "tool": tool_call.name,
+                "attempt": attempt.to_payload(),
+                "budget_remaining": plan.budget.remaining(plan.limits),
+            },
+        )
+        if plan.budget.tool_call_count > plan.limits.max_tool_calls:
+            error = AgentExecutionGuardrailError(
+                f"Execution exceeded max_tool_calls={plan.limits.max_tool_calls}"
+            )
+            self._append_execution_log(
+                task_obj,
+                "execution_budget_exceeded",
+                plan,
+                {
+                    "reason": "max_tool_calls_exceeded",
+                    "turn": turn,
+                    "step_id": step.step_id,
+                    "tool_call_id": tool_call.id,
+                    "tool": tool_call.name,
+                    "attempt": attempt.to_payload(),
+                    "budget_remaining": plan.budget.remaining(plan.limits),
+                },
+            )
+            self._fail_execution_plan(
+                task_obj,
+                plan,
+                error,
+                {
+                    "reason": "max_tool_calls_exceeded",
+                    "tool": tool_call.name,
+                    "tool_call_id": tool_call.id,
+                },
+            )
+            self._append_error(
+                task_obj,
+                error,
+                {
+                    "phase": "tool_attempt",
+                    "tool": tool_call.name,
+                    "tool_call_id": tool_call.id,
+                },
+            )
+            raise error
+        if attempt.attempt_no > plan.limits.max_same_tool_call:
+            error = AgentExecutionGuardrailError(
+                "Execution circuit breaker tripped for repeated tool call "
+                f"{tool_call.name}"
+            )
+            self._append_execution_log(
+                task_obj,
+                "execution_circuit_breaker_tripped",
+                plan,
+                {
+                    "reason": "same_tool_call_repeated",
+                    "turn": turn,
+                    "step_id": step.step_id,
+                    "tool_call_id": tool_call.id,
+                    "tool": tool_call.name,
+                    "attempt": attempt.to_payload(),
+                    "budget_remaining": plan.budget.remaining(plan.limits),
+                },
+            )
+            self._fail_execution_plan(
+                task_obj,
+                plan,
+                error,
+                {
+                    "reason": "same_tool_call_repeated",
+                    "tool": tool_call.name,
+                    "tool_call_id": tool_call.id,
+                    "normalized_args_hash": attempt.normalized_args_hash,
+                    "attempt_no": attempt.attempt_no,
+                },
+            )
+            self._append_error(
+                task_obj,
+                error,
+                {
+                    "phase": "tool_attempt",
+                    "tool": tool_call.name,
+                    "tool_call_id": tool_call.id,
+                    "normalized_args_hash": attempt.normalized_args_hash,
+                    "attempt_no": attempt.attempt_no,
+                },
+            )
+            raise error
+        return attempt
+
+    def _record_recoverable_failure(
+        self,
+        *,
+        task_obj: Task,
+        plan: ExecutionPlan,
+        attempt: ToolAttemptRecord,
+        error: RecoverableToolError,
+        turn: int,
+        tool_call_id: str,
+    ) -> bool:
+        step = plan.current_step
+        same_error_count = plan.budget.record_recoverable_failure(
+            tool_name=attempt.tool_name,
+            normalized_args_hash=attempt.normalized_args_hash,
+            error_code=error.code,
+        )
+        step.recoverable_failure_count += 1
+        step.observations.append(error.message)
+        self._append_execution_log(
+            task_obj,
+            "execution_recoverable_failure_recorded",
+            plan,
+            {
+                "turn": turn,
+                "step_id": step.step_id,
+                "tool_call_id": tool_call_id,
+                "tool": attempt.tool_name,
+                "normalized_args_hash": attempt.normalized_args_hash,
+                "attempt_no": attempt.attempt_no,
+                "error_code": error.code,
+                "recoverable": True,
+                "same_error_count": same_error_count,
+                "recoverable_failure_count": plan.budget.recoverable_failure_count,
+                "budget_remaining": plan.budget.remaining(plan.limits),
+            },
+        )
+        exceeded_total = (
+            plan.budget.recoverable_failure_count
+            > plan.limits.max_recoverable_failures
+        )
+        exceeded_same_error = same_error_count > plan.limits.max_same_recoverable_error
+        if exceeded_total or exceeded_same_error:
+            self._append_execution_log(
+                task_obj,
+                "execution_budget_exceeded",
+                plan,
+                {
+                    "reason": (
+                        "same_recoverable_error_exceeded"
+                        if exceeded_same_error
+                        else "max_recoverable_failures_exceeded"
+                    ),
+                    "turn": turn,
+                    "step_id": step.step_id,
+                    "tool_call_id": tool_call_id,
+                    "tool": attempt.tool_name,
+                    "normalized_args_hash": attempt.normalized_args_hash,
+                    "attempt_no": attempt.attempt_no,
+                    "error_code": error.code,
+                    "same_error_count": same_error_count,
+                    "recoverable_failure_count": plan.budget.recoverable_failure_count,
+                    "budget_remaining": plan.budget.remaining(plan.limits),
+                },
+            )
+            return True
+        return False
+
+    def _fail_execution_plan(
+        self,
+        task: Task,
+        plan: ExecutionPlan,
+        error: Exception,
+        payload: JsonObject | None = None,
+    ) -> None:
+        step = plan.fail(
+            {
+                "type": type(error).__name__,
+                "message": str(error),
+                **(payload or {}),
+            }
+        )
+        self._append_execution_log(
+            task,
+            "execution_step_failed",
+            plan,
+            {
+                "step": step.to_payload(),
+                "error_type": type(error).__name__,
+                "error_summary": str(error),
+                **(payload or {}),
+            },
+        )
+
+    def _append_execution_log(
+        self,
+        task: Task,
+        message: str,
+        plan: ExecutionPlan,
+        payload: JsonObject | None = None,
+    ) -> None:
+        self._append_log(
+            task,
+            message,
+            {
+                "plan_id": plan.plan_id,
+                "plan_version": plan.plan_version,
+                "mode": plan.mode.value,
+                "plan_status": plan.status.value,
+                "current_step_id": plan.current_step_id,
+                **(payload or {}),
+            },
         )
 
     def _append_log(

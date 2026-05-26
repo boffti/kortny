@@ -3,7 +3,16 @@ import pytest
 from kortny.dashboard.settings import DashboardAuthMode, DashboardSettings
 
 
-def test_dashboard_settings_defaults_to_bootstrap_login() -> None:
+def test_dashboard_settings_defaults_to_bootstrap_login(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in (
+        "DASHBOARD_AUTH_MODE",
+        "DASHBOARD_SLACK_CLIENT_ID",
+        "DASHBOARD_SLACK_CLIENT_SECRET",
+        "DASHBOARD_SLACK_REDIRECT_URI",
+    ):
+        monkeypatch.delenv(name, raising=False)
     settings = DashboardSettings(
         _env_file=None,
         postgres_url="postgresql://kortny:kortny@localhost/kortny",

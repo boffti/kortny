@@ -11,7 +11,13 @@ from alembic.config import Config
 from sqlalchemy import Engine, delete, select, update
 from sqlalchemy.orm import Session
 
-from kortny.agent import AgentCoordinator, AgentTurnLimitError, ContextAssembler
+from kortny.agent import (
+    AgentCoordinator,
+    AgentExecutionGuardrailError,
+    AgentTurnLimitError,
+    ContextAssembler,
+    ExecutionGuardrailLimits,
+)
 from kortny.agent.thread_context import ThreadTranscriptMessage
 from kortny.db.models import (
     Artifact,
@@ -235,12 +241,23 @@ def test_coordinator_finishes_with_final_answer(db_session: Session) -> None:
     assert event_messages(events) == [
         "episode_retrieval_completed",
         "context_assembled",
+        "execution_plan_created",
+        "execution_step_started",
         "agent_started",
         "agent_llm_turn_started",
         "agent_llm_turn_completed",
+        "execution_step_completed",
         "agent_completed",
     ]
     assert events[-1].payload["reason"] == "final_answer"
+    plan_event = next(
+        event
+        for event in events
+        if event.payload.get("message") == "execution_plan_created"
+    )
+    assert plan_event.payload["mode"] == "inline"
+    assert plan_event.payload["plan_version"] == 1
+    assert plan_event.payload["plan"]["steps"][0]["step_id"] == "step-1"
     context_event = next(
         event for event in events if event.payload.get("message") == "context_assembled"
     )
@@ -1404,6 +1421,181 @@ def test_coordinator_feeds_recoverable_tool_errors_back_to_llm(
         "missing_required_arguments"
     )
     assert not any(event.type is TaskEventType.error for event in events)
+
+
+def test_coordinator_records_tool_attempt_metadata(db_session: Session) -> None:
+    task = create_task(db_session, input_text="echo hi")
+    llm = FakeLLM(
+        [
+            Completion(
+                content=None,
+                tool_calls=(
+                    ToolCall(
+                        id="call-1",
+                        name="echo_json",
+                        arguments={"message": "hi"},
+                    ),
+                ),
+                usage=TokenUsage(input_tokens=20, output_tokens=3),
+            ),
+            Completion(
+                content="Echoed hi.",
+                tool_calls=(),
+                usage=TokenUsage(input_tokens=25, output_tokens=6),
+            ),
+        ]
+    )
+
+    AgentCoordinator(
+        session=db_session,
+        llm=llm,
+        registry=ToolRegistry([EchoJsonTool()]),
+    ).run(task)
+
+    events = task_events(db_session, task)
+    budget_event = next(
+        event
+        for event in events
+        if event.payload.get("message") == "execution_budget_updated"
+    )
+    tool_call_event = next(
+        event for event in events if event.type is TaskEventType.tool_call
+    )
+
+    assert budget_event.payload["mode"] == "inline"
+    assert budget_event.payload["current_step_id"] == "step-1"
+    assert budget_event.payload["attempt"]["tool_name"] == "echo_json"
+    assert budget_event.payload["attempt"]["attempt_no"] == 1
+    assert len(budget_event.payload["attempt"]["normalized_args_hash"]) == 64
+    assert tool_call_event.payload["step_id"] == "step-1"
+    assert tool_call_event.payload["attempt_no"] == 1
+    assert tool_call_event.payload["normalized_args_hash"] == (
+        budget_event.payload["attempt"]["normalized_args_hash"]
+    )
+
+
+def test_coordinator_trips_circuit_breaker_for_repeated_tool_call(
+    db_session: Session,
+) -> None:
+    task = create_task(db_session, input_text="keep searching")
+    search_tool = RecordingSearchTool()
+    llm = FakeLLM(
+        [
+            Completion(
+                content=None,
+                tool_calls=(
+                    ToolCall(
+                        id="call-1",
+                        name="web_search",
+                        arguments={"query": "same"},
+                    ),
+                ),
+                usage=TokenUsage(input_tokens=20, output_tokens=3),
+            ),
+            Completion(
+                content=None,
+                tool_calls=(
+                    ToolCall(
+                        id="call-2",
+                        name="web_search",
+                        arguments={"query": "same"},
+                    ),
+                ),
+                usage=TokenUsage(input_tokens=25, output_tokens=3),
+            ),
+            Completion(
+                content=None,
+                tool_calls=(
+                    ToolCall(
+                        id="call-3",
+                        name="web_search",
+                        arguments={"query": "same"},
+                    ),
+                ),
+                usage=TokenUsage(input_tokens=30, output_tokens=3),
+            ),
+        ]
+    )
+
+    with pytest.raises(AgentExecutionGuardrailError):
+        AgentCoordinator(
+            session=db_session,
+            llm=llm,
+            registry=ToolRegistry([search_tool]),
+        ).run(task)
+
+    assert search_tool.calls == [{"query": "same"}, {"query": "same"}]
+    events = task_events(db_session, task)
+    circuit_event = next(
+        event
+        for event in events
+        if event.payload.get("message") == "execution_circuit_breaker_tripped"
+    )
+    assert circuit_event.payload["tool"] == "web_search"
+    assert circuit_event.payload["attempt"]["attempt_no"] == 3
+    assert circuit_event.payload["reason"] == "same_tool_call_repeated"
+    assert events[-1].type is TaskEventType.error
+    assert events[-1].payload["type"] == "AgentExecutionGuardrailError"
+
+
+def test_coordinator_bounds_recoverable_tool_failures(db_session: Session) -> None:
+    task = create_task(db_session, input_text="check notion")
+    llm = FakeLLM(
+        [
+            Completion(
+                content=None,
+                tool_calls=(
+                    ToolCall(
+                        id="call-1",
+                        name="query_database",
+                        arguments={"page_size": 10},
+                    ),
+                ),
+                usage=TokenUsage(input_tokens=20, output_tokens=3),
+            ),
+            Completion(
+                content=None,
+                tool_calls=(
+                    ToolCall(
+                        id="call-2",
+                        name="query_database",
+                        arguments={"page_size": 10},
+                    ),
+                ),
+                usage=TokenUsage(input_tokens=25, output_tokens=3),
+            ),
+        ]
+    )
+
+    with pytest.raises(AgentExecutionGuardrailError):
+        AgentCoordinator(
+            session=db_session,
+            llm=llm,
+            registry=ToolRegistry([MissingRequiredContextTool()]),
+            guardrail_limits=ExecutionGuardrailLimits(
+                max_turns=6,
+                max_tool_calls=12,
+                max_recoverable_failures=1,
+                max_same_tool_call=5,
+                max_same_recoverable_error=5,
+            ),
+        ).run(task)
+
+    events = task_events(db_session, task)
+    recoverable_events = [
+        event
+        for event in events
+        if event.payload.get("message") == "execution_recoverable_failure_recorded"
+    ]
+    assert len(recoverable_events) == 2
+    budget_event = next(
+        event
+        for event in events
+        if event.payload.get("message") == "execution_budget_exceeded"
+    )
+    assert budget_event.payload["reason"] == "max_recoverable_failures_exceeded"
+    assert budget_event.payload["recoverable_failure_count"] == 2
+    assert events[-1].type is TaskEventType.error
 
 
 def test_coordinator_stops_when_tool_returns_artifact(db_session: Session) -> None:

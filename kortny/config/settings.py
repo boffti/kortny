@@ -54,6 +54,12 @@ class Settings(BaseSettings):
     llm_high_reasoning_model: str | None = Field(
         default=None, validation_alias="LLM_HIGH_REASONING_MODEL"
     )
+    response_humanizer_enabled: bool = Field(
+        default=True, validation_alias="RESPONSE_HUMANIZER_ENABLED"
+    )
+    response_humanizer_min_chars: int = Field(
+        default=120, validation_alias="RESPONSE_HUMANIZER_MIN_CHARS"
+    )
 
     composio_api_key: str | None = Field(
         default=None, validation_alias="COMPOSIO_API_KEY"
@@ -177,6 +183,13 @@ class Settings(BaseSettings):
     def _valid_composio_timeout(cls, value: float) -> float:
         if value <= 0:
             raise ValueError("COMPOSIO_REQUEST_TIMEOUT_SECONDS must be positive")
+        return value
+
+    @field_validator("response_humanizer_min_chars")
+    @classmethod
+    def _valid_response_humanizer_min_chars(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("RESPONSE_HUMANIZER_MIN_CHARS cannot be negative")
         return value
 
     @field_validator("otel_trace_sampling_ratio")

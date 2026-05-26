@@ -488,6 +488,105 @@ def test_agent_executor_builds_routed_llm_from_task_input(
     )
 
 
+def test_agent_executor_humanizes_final_text_before_posting(
+    db_session: Session,
+    worker_session_factory: sessionmaker[Session],
+    tmp_path: Path,
+) -> None:
+    claim_time = datetime(2026, 5, 23, 9, 50, tzinfo=UTC)
+    task = create_task(db_session, event_id="EvAgentWorkerHumanizer")
+    task.input = (
+        "Compare current AI observability tools for Kortny and tell me which "
+        "two matter most."
+    )
+    task.available_at = claim_time - timedelta(seconds=1)
+    db_session.add(
+        ModelPricing(
+            provider=LLMProvider.openrouter,
+            model="openai/gpt-4o-mini",
+            input_price_per_mtok=Decimal("1.000000"),
+            output_price_per_mtok=Decimal("2.000000"),
+            effective_from=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+    )
+    db_session.commit()
+
+    raw_answer = (
+        "Here is a detailed comparison of AI observability tooling. "
+        "1. Langfuse is open-source and strong for traces, prompts, and evals. "
+        "2. Arize Phoenix is strong for OpenTelemetry-native traces and evals. "
+        "If you want, I can turn this into a PDF report."
+    )
+    humanized_answer = (
+        "*Quick take:* Kortny should care most about Langfuse and Arize Phoenix.\n\n"
+        "- *Langfuse* is the better default for traces, prompts, and evals.\n"
+        "- *Arize Phoenix* is the strongest complement for OTel-native debugging."
+    )
+    slack_client = FakeSlackClient()
+    provider = FakeAgentProvider(
+        [
+            Completion(
+                content=raw_answer,
+                tool_calls=(),
+                usage=TokenUsage(input_tokens=200, output_tokens=60),
+                model="openai/gpt-4o-mini",
+            ),
+            Completion(
+                content=humanized_answer,
+                tool_calls=(),
+                usage=TokenUsage(input_tokens=260, output_tokens=70),
+                model="openai/gpt-4o-mini",
+            ),
+        ]
+    )
+
+    result = TaskWorker(
+        session_factory=worker_session_factory,
+        worker_id="agent-worker-test",
+        executor=AgentTaskExecutor(
+            settings=make_settings(),
+            llm_provider=provider,
+            provider_name=LLMProvider.openrouter,
+            web_search_tool=StaticWebSearchTool(),
+            slack_client=slack_client,
+            workspace_base_dir=tmp_path,
+        ),
+    ).run_once(now=claim_time)
+
+    db_session.refresh(task)
+    events = task_events(db_session, task)
+    usage_rows = list(
+        db_session.scalars(select(LLMUsage).where(LLMUsage.task_id == task.id))
+    )
+
+    assert result.status == TaskStatus.succeeded.value, task.error
+    assert task.result_summary == raw_answer
+    assert slack_client.messages == [
+        {
+            "channel": "C123",
+            "text": humanized_answer,
+            "thread_ts": "EvAgentWorkerHumanizer",
+        }
+    ]
+    assert len(usage_rows) == 2
+    assert any(
+        event.type is TaskEventType.llm_call
+        and event.payload.get("prompt_name") == "kortny.response_humanizer"
+        for event in events
+    )
+    assert any(
+        event.payload.get("message") == "response_humanizer_started"
+        for event in events
+    )
+    completed = next(
+        event
+        for event in events
+        if event.payload.get("message") == "response_humanizer_completed"
+    )
+    assert completed.payload["changed"] is True
+    assert completed.payload["reason"] == "llm_humanizer"
+
+
 def test_agent_executor_removes_ack_reaction_after_success(
     db_session: Session,
     worker_session_factory: sessionmaker[Session],

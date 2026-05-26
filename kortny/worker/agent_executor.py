@@ -30,6 +30,12 @@ from kortny.slack.comments import (
     LLMArtifactCommentGenerator,
     generate_artifact_comment,
 )
+from kortny.slack.humanizer import (
+    LLMResponseSynthesizer,
+    ResponseSynthesizer,
+    StaticResponseSynthesizer,
+    synthesize_response,
+)
 from kortny.slack.posting import SlackPostingClient
 from kortny.slack.reactions import (
     ACK_REACTION_ADDED_MESSAGE,
@@ -106,6 +112,7 @@ class AgentTaskExecutor:
         reaction_provider: ReactionProvider | None = None,
         tool_selector: ToolSelector | None = None,
         composio_client: Any | None = None,
+        response_synthesizer: ResponseSynthesizer | None = None,
     ) -> None:
         self.settings = settings
         self.llm_provider = llm_provider
@@ -119,6 +126,7 @@ class AgentTaskExecutor:
         self.reaction_provider = reaction_provider or LibraryReactionProvider()
         self.tool_selector = tool_selector
         self.composio_client = composio_client
+        self.response_synthesizer = response_synthesizer
 
     def execute(
         self,
@@ -259,6 +267,20 @@ class AgentTaskExecutor:
         if self.artifact_comment_generator is not None:
             return self.artifact_comment_generator
         return LLMArtifactCommentGenerator(settings=settings)
+
+    def _build_response_synthesizer(
+        self,
+        settings: Settings,
+    ) -> ResponseSynthesizer:
+        if self.response_synthesizer is not None:
+            return self.response_synthesizer
+        if not settings.response_humanizer_enabled:
+            return StaticResponseSynthesizer()
+        return LLMResponseSynthesizer(
+            settings=settings,
+            provider=self.llm_provider,
+            provider_name=self.provider_name,
+        )
 
     def _build_registry(
         self,
@@ -540,7 +562,14 @@ class AgentTaskExecutor:
                 )
                 return
             logger.info("posting final message task_id=%s", task.id)
-            poster.post_message(thread, result_summary)
+            response_text = synthesize_response(
+                self._build_response_synthesizer(settings),
+                session=session,
+                task=task,
+                raw_text=result_summary,
+                task_service=task_service,
+            )
+            poster.post_message(thread, response_text)
             return
 
         for index, artifact in enumerate(artifacts):

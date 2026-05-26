@@ -12,6 +12,12 @@ from kortny.slack.comments import (
     StaticArtifactCommentGenerator,
 )
 from kortny.slack.formatting import normalize_slack_mrkdwn
+from kortny.slack.humanizer import (
+    LLMResponseSynthesizer,
+    ResponseSynthesisResult,
+    StaticResponseSynthesizer,
+    synthesize_response,
+)
 from kortny.slack.ingress import AppMentionResult, SlackIngress
 from kortny.slack.posting import (
     SlackPoster,
@@ -24,6 +30,8 @@ __all__ = [
     "ARTIFACT_COMMENT_FALLBACK_TEXT",
     "LLMArtifactCommentGenerator",
     "LLMAcknowledgementGenerator",
+    "LLMResponseSynthesizer",
+    "ResponseSynthesisResult",
     "ROOT_ACK_FALLBACK_TEXT",
     "SlackPoster",
     "SlackPostingError",
@@ -31,8 +39,10 @@ __all__ = [
     "SlackIngress",
     "StaticArtifactCommentGenerator",
     "StaticAcknowledgementGenerator",
+    "StaticResponseSynthesizer",
     "acknowledge_then_handle",
     "create_bolt_app",
     "normalize_slack_mrkdwn",
     "run_socket_mode",
+    "synthesize_response",
 ]

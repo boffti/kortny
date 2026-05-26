@@ -349,6 +349,84 @@ class SlackIdentity(Base):
     )
 
 
+class DashboardUser(Base):
+    __tablename__ = "dashboard_users"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    installation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("installations.id", ondelete="CASCADE"), nullable=False
+    )
+    slack_user_id: Mapped[str] = mapped_column(String, nullable=False)
+    email: Mapped[str | None] = mapped_column(String)
+    display_name: Mapped[str] = mapped_column(String, nullable=False)
+    avatar_url: Mapped[str | None] = mapped_column(String)
+    role: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    last_login_at: Mapped[datetime | None] = mapped_column(TZ)
+    created_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "role in ('owner', 'admin', 'member')",
+            name="ck_dashboard_users_role",
+        ),
+        CheckConstraint(
+            "status in ('active', 'disabled')",
+            name="ck_dashboard_users_status",
+        ),
+        UniqueConstraint(
+            "installation_id",
+            "slack_user_id",
+            name="idx_dashboard_users_slack_user_unique",
+        ),
+        Index("idx_dashboard_users_installation_role", "installation_id", "role"),
+        Index("idx_dashboard_users_status", "installation_id", "status"),
+        Index(
+            "idx_dashboard_users_email_unique",
+            "installation_id",
+            "email",
+            unique=True,
+            postgresql_where=text("email IS NOT NULL"),
+        ),
+    )
+
+
+class DashboardOAuthState(Base):
+    __tablename__ = "dashboard_oauth_states"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    provider: Mapped[str] = mapped_column(String, nullable=False)
+    state: Mapped[str] = mapped_column(String, nullable=False, unique=True)
+    redirect_path: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now()
+    )
+    expires_at: Mapped[datetime] = mapped_column(TZ, nullable=False)
+    used_at: Mapped[datetime | None] = mapped_column(TZ)
+
+    __table_args__ = (
+        CheckConstraint(
+            "provider in ('slack')",
+            name="ck_dashboard_oauth_states_provider",
+        ),
+        Index(
+            "idx_dashboard_oauth_states_lookup",
+            "provider",
+            "state",
+            "expires_at",
+        ),
+    )
+
+
 class ComposioConnection(Base):
     __tablename__ = "composio_connections"
 

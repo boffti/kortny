@@ -2,11 +2,20 @@
 
 from __future__ import annotations
 
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
 from pydantic import Field, ValidationError, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class DashboardAuthMode(StrEnum):
+    """Supported dashboard authentication modes."""
+
+    bootstrap = "bootstrap"
+    slack = "slack"
+    hybrid = "hybrid"
 
 
 class DashboardSettings(BaseSettings):
@@ -38,6 +47,25 @@ class DashboardSettings(BaseSettings):
     secure_cookies: bool = Field(
         default=False, validation_alias="DASHBOARD_SECURE_COOKIES"
     )
+    auth_mode: DashboardAuthMode = Field(
+        default=DashboardAuthMode.bootstrap,
+        validation_alias="DASHBOARD_AUTH_MODE",
+    )
+    slack_client_id: str | None = Field(
+        default=None, validation_alias="DASHBOARD_SLACK_CLIENT_ID"
+    )
+    slack_client_secret: str | None = Field(
+        default=None, validation_alias="DASHBOARD_SLACK_CLIENT_SECRET"
+    )
+    slack_redirect_uri: str | None = Field(
+        default=None, validation_alias="DASHBOARD_SLACK_REDIRECT_URI"
+    )
+    slack_oauth_state_ttl_minutes: int = Field(
+        default=10,
+        validation_alias="DASHBOARD_SLACK_OAUTH_STATE_TTL_MINUTES",
+        ge=1,
+        le=60,
+    )
 
     @field_validator("username", "password", "session_secret")
     @classmethod
@@ -46,6 +74,42 @@ class DashboardSettings(BaseSettings):
         if not stripped:
             raise ValueError("cannot be blank")
         return stripped
+
+    @field_validator("slack_client_id", "slack_client_secret", "slack_redirect_uri")
+    @classmethod
+    def _strip_optional_string(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = value.strip()
+        return stripped or None
+
+    @property
+    def bootstrap_login_enabled(self) -> bool:
+        """Whether the environment username/password login should be shown."""
+
+        return self.auth_mode in {
+            DashboardAuthMode.bootstrap,
+            DashboardAuthMode.hybrid,
+        }
+
+    @property
+    def slack_login_configured(self) -> bool:
+        """Whether Slack OpenID settings are complete enough to start login."""
+
+        return bool(
+            self.slack_client_id
+            and self.slack_client_secret
+            and self.slack_redirect_uri
+        )
+
+    @property
+    def slack_login_enabled(self) -> bool:
+        """Whether Slack login is enabled and configured."""
+
+        return (
+            self.auth_mode in {DashboardAuthMode.slack, DashboardAuthMode.hybrid}
+            and self.slack_login_configured
+        )
 
 
 class DashboardSettingsError(RuntimeError):

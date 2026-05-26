@@ -110,10 +110,14 @@ LLM_API_KEY=sk-...
 LLM_MODEL=gpt-4o             # or claude-3-5-sonnet, etc.
 COMPOSIO_API_KEY=...
 BRAVE_SEARCH_API_KEY=...
+DASHBOARD_AUTH_MODE=bootstrap
 DASHBOARD_USERNAME=kortny
 DASHBOARD_PASSWORD=change-me
 DASHBOARD_SESSION_SECRET=change-me-dashboard-session-secret
 DASHBOARD_SECURE_COOKIES=false
+DASHBOARD_SLACK_CLIENT_ID=
+DASHBOARD_SLACK_CLIENT_SECRET=
+DASHBOARD_SLACK_REDIRECT_URI=http://localhost:8080/auth/slack/callback
 POSTGRES_URL=postgresql://kortny:kortny@localhost:5432/kortny
 POSTGRES_DB=kortny
 POSTGRES_USER=kortny
@@ -133,11 +137,17 @@ read-only operator dashboard at `http://localhost:8080`.
 
 This does not start optional observability services such as Phoenix.
 
-The dashboard has a local login page backed by a signed session cookie. Use
-`DASHBOARD_USERNAME` and `DASHBOARD_PASSWORD` to sign in, and change
+The dashboard has a local bootstrap login backed by a signed session cookie.
+Use `DASHBOARD_USERNAME` and `DASHBOARD_PASSWORD` to sign in, and change
 `DASHBOARD_SESSION_SECRET` before exposing the dashboard beyond local
 development. It is bound to `127.0.0.1` by default; change
 `DASHBOARD_HOST_PORT` only if you need a different local port.
+
+For per-user dashboard identity, set `DASHBOARD_AUTH_MODE=hybrid` or
+`DASHBOARD_AUTH_MODE=slack`, configure the `DASHBOARD_SLACK_*` OpenID values,
+and add `http://localhost:8080/auth/slack/callback` as a Slack OAuth redirect
+URL. Slack login uses Sign in with Slack and stores a local dashboard user for
+future personal dashboards and user-scoped integrations.
 
 ### 4. Develop against the local database
 
@@ -145,8 +155,13 @@ Host-side commands use the same `POSTGRES_URL` from `.env`:
 
 ```
 make migrate
-KORTNY_TEST_POSTGRES_URL=postgresql://kortny:kortny@localhost:5432/kortny uv run pytest tests/test_task_service.py tests/test_queue.py
+docker compose exec postgres createdb -U kortny kortny_test
+KORTNY_TEST_POSTGRES_URL=postgresql://kortny:kortny@localhost:5432/kortny_test uv run pytest tests/test_task_service.py tests/test_queue.py
 ```
+
+Use a dedicated test database for integration tests. Some dashboard tests
+perform destructive cleanup and will refuse to run against the default
+`localhost:5432/kortny` development database unless explicitly overridden.
 
 To process at most one pending task from your host shell:
 

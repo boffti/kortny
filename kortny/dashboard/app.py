@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import secrets
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Annotated, cast
@@ -25,6 +26,12 @@ from kortny.composio import (
     ComposioConnectionError,
 )
 from kortny.config import Settings, SettingsError, load_settings
+from kortny.dashboard.auth import (
+    DashboardAuthError,
+    DashboardPrincipal,
+    SlackOpenIDClient,
+    upsert_dashboard_user,
+)
 from kortny.dashboard.data import (
     DEFAULT_PAGE_SIZE,
     MAX_PAGE_SIZE,
@@ -47,12 +54,22 @@ from kortny.dashboard.memory_actions import (
     supersede_fact,
 )
 from kortny.dashboard.settings import DashboardSettings, load_dashboard_settings
-from kortny.db.models import ComposioConnection, Installation, SlackIdentity
+from kortny.db.models import (
+    ComposioConnection,
+    DashboardOAuthState,
+    Installation,
+    SlackIdentity,
+)
 from kortny.db.session import make_session_factory
 
 TEMPLATE_DIR = Path(__file__).parent / "templates"
 STATIC_DIR = Path(__file__).parent / "static"
 SESSION_USER_KEY = "dashboard_user"
+SESSION_DASHBOARD_USER_ID_KEY = "dashboard_user_id"
+SESSION_DASHBOARD_ROLE_KEY = "dashboard_role"
+SESSION_DASHBOARD_SOURCE_KEY = "dashboard_source"
+SESSION_DASHBOARD_INSTALLATION_ID_KEY = "dashboard_installation_id"
+SESSION_DASHBOARD_SLACK_USER_ID_KEY = "dashboard_slack_user_id"
 
 templates = Jinja2Templates(directory=TEMPLATE_DIR)
 
@@ -95,15 +112,20 @@ def register_routes(app: FastAPI) -> None:
 
     @app.get("/login", response_class=HTMLResponse)
     def login_form(request: Request) -> Response:
+        settings = cast(DashboardSettings, request.app.state.dashboard_settings)
         next_path = _safe_next_path(request.query_params.get("next"))
-        if _session_username(request) is not None:
+        if _session_principal(request) is not None:
             return RedirectResponse(
                 url=next_path, status_code=status.HTTP_303_SEE_OTHER
             )
         return templates.TemplateResponse(
             request=request,
             name="login.html",
-            context={"error": None, "next_path": next_path},
+            context=_login_context(
+                settings=settings,
+                error=request.query_params.get("error"),
+                next_path=next_path,
+            ),
         )
 
     @app.post("/login", response_class=HTMLResponse)
@@ -114,22 +136,132 @@ def register_routes(app: FastAPI) -> None:
         password = form.get("password", [""])[0]
         next_path = _safe_next_path(form.get("next", ["/"])[0])
 
+        if not settings.bootstrap_login_enabled:
+            return templates.TemplateResponse(
+                request=request,
+                name="login.html",
+                context=_login_context(
+                    settings=settings,
+                    error="Password login is disabled for this dashboard.",
+                    next_path=next_path,
+                ),
+                status_code=status.HTTP_403_FORBIDDEN,
+            )
+
         username_ok = secrets.compare_digest(username, settings.username)
         password_ok = secrets.compare_digest(password, settings.password)
         if not (username_ok and password_ok):
             return templates.TemplateResponse(
                 request=request,
                 name="login.html",
-                context={
-                    "error": "The username or password is incorrect.",
-                    "next_path": next_path,
-                },
+                context=_login_context(
+                    settings=settings,
+                    error="The username or password is incorrect.",
+                    next_path=next_path,
+                ),
                 status_code=status.HTTP_401_UNAUTHORIZED,
             )
 
         request.session.clear()
-        request.session[SESSION_USER_KEY] = settings.username
+        _set_dashboard_session(
+            request,
+            DashboardPrincipal(
+                display_name=settings.username,
+                role="owner",
+                source="bootstrap",
+            ),
+        )
         return RedirectResponse(url=next_path, status_code=status.HTTP_303_SEE_OTHER)
+
+    @app.get("/auth/slack/start")
+    def slack_login_start(
+        request: Request,
+        session: Annotated[Session, Depends(get_session)],
+        next_path: Annotated[str | None, Query(alias="next")] = None,
+    ) -> RedirectResponse:
+        settings = cast(DashboardSettings, request.app.state.dashboard_settings)
+        safe_next = _safe_next_path(next_path)
+        if not settings.slack_login_enabled:
+            return _login_redirect_with_error(
+                "Slack login is not configured for this dashboard.",
+                next_path=safe_next,
+            )
+
+        state_value = secrets.token_urlsafe(32)
+        now = datetime.now(UTC)
+        session.add(
+            DashboardOAuthState(
+                provider="slack",
+                state=state_value,
+                redirect_path=safe_next,
+                expires_at=now
+                + timedelta(minutes=settings.slack_oauth_state_ttl_minutes),
+            )
+        )
+        session.commit()
+
+        client = _slack_openid_client(settings)
+        return RedirectResponse(
+            url=client.authorize_url(state=state_value),
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+
+    @app.get("/auth/slack/callback")
+    def slack_login_callback(
+        request: Request,
+        session: Annotated[Session, Depends(get_session)],
+        code: Annotated[str | None, Query()] = None,
+        state_value: Annotated[str | None, Query(alias="state")] = None,
+        error: Annotated[str | None, Query()] = None,
+    ) -> RedirectResponse:
+        settings = cast(DashboardSettings, request.app.state.dashboard_settings)
+        if error:
+            return _login_redirect_with_error(f"Slack login failed: {error}")
+        if not settings.slack_login_enabled:
+            return _login_redirect_with_error(
+                "Slack login is not configured for this dashboard."
+            )
+        if not code or not state_value:
+            return _login_redirect_with_error("Slack login did not return a code.")
+
+        oauth_state = session.scalar(
+            select(DashboardOAuthState).where(
+                DashboardOAuthState.provider == "slack",
+                DashboardOAuthState.state == state_value,
+            )
+        )
+        now = datetime.now(UTC)
+        if oauth_state is None or oauth_state.used_at is not None:
+            return _login_redirect_with_error("Slack login state is invalid.")
+        if oauth_state.expires_at < now:
+            return _login_redirect_with_error("Slack login state expired.")
+
+        try:
+            client = _slack_openid_client(settings)
+            access_token = client.exchange_code(code=code)
+            profile = client.user_info(access_token=access_token)
+            dashboard_user = upsert_dashboard_user(session, profile=profile, now=now)
+            oauth_state.used_at = now
+            session.commit()
+        except DashboardAuthError as exc:
+            session.rollback()
+            return _login_redirect_with_error(str(exc))
+
+        _set_dashboard_session(
+            request,
+            DashboardPrincipal(
+                dashboard_user_id=dashboard_user.id,
+                installation_id=dashboard_user.installation_id,
+                slack_user_id=dashboard_user.slack_user_id,
+                display_name=dashboard_user.display_name,
+                role=dashboard_user.role,
+                source="slack",
+            ),
+        )
+        return RedirectResponse(
+            url=oauth_state.redirect_path,
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
 
     @app.post("/logout")
     def logout(request: Request) -> RedirectResponse:
@@ -689,13 +821,13 @@ def require_user(
 ) -> str:
     """Require a dashboard login session."""
 
-    username = _session_username(request)
-    if username is None:
+    principal = _session_principal(request)
+    if principal is None:
         raise HTTPException(
             status_code=status.HTTP_303_SEE_OTHER,
             headers={"Location": _login_url_for(request)},
         )
-    return username
+    return principal.display_name
 
 
 def get_session(request: Request) -> Iterator[Session]:
@@ -777,11 +909,98 @@ def _load_runtime_settings() -> tuple[Settings | None, str | None]:
         return None, str(exc)
 
 
-def _session_username(request: Request) -> str | None:
-    username = request.session.get(SESSION_USER_KEY)
-    if isinstance(username, str) and username:
-        return username
-    return None
+def _session_principal(request: Request) -> DashboardPrincipal | None:
+    display_name = request.session.get(SESSION_USER_KEY)
+    if not isinstance(display_name, str) or not display_name:
+        return None
+    role = request.session.get(SESSION_DASHBOARD_ROLE_KEY)
+    source = request.session.get(SESSION_DASHBOARD_SOURCE_KEY)
+    dashboard_user_id = _session_uuid(request, SESSION_DASHBOARD_USER_ID_KEY)
+    installation_id = _session_uuid(request, SESSION_DASHBOARD_INSTALLATION_ID_KEY)
+    slack_user_id = request.session.get(SESSION_DASHBOARD_SLACK_USER_ID_KEY)
+    return DashboardPrincipal(
+        dashboard_user_id=dashboard_user_id,
+        installation_id=installation_id,
+        slack_user_id=slack_user_id if isinstance(slack_user_id, str) else None,
+        display_name=display_name,
+        role=role if isinstance(role, str) and role else "owner",
+        source=source if isinstance(source, str) and source else "bootstrap",
+    )
+
+
+def _set_dashboard_session(request: Request, principal: DashboardPrincipal) -> None:
+    request.session.clear()
+    request.session[SESSION_USER_KEY] = principal.display_name
+    request.session[SESSION_DASHBOARD_ROLE_KEY] = principal.role
+    request.session[SESSION_DASHBOARD_SOURCE_KEY] = principal.source
+    if principal.dashboard_user_id is not None:
+        request.session[SESSION_DASHBOARD_USER_ID_KEY] = str(
+            principal.dashboard_user_id
+        )
+    if principal.installation_id is not None:
+        request.session[SESSION_DASHBOARD_INSTALLATION_ID_KEY] = str(
+            principal.installation_id
+        )
+    if principal.slack_user_id:
+        request.session[SESSION_DASHBOARD_SLACK_USER_ID_KEY] = principal.slack_user_id
+
+
+def _session_uuid(request: Request, key: str) -> UUID | None:
+    raw_value = request.session.get(key)
+    if not isinstance(raw_value, str) or not raw_value:
+        return None
+    try:
+        return UUID(raw_value)
+    except ValueError:
+        return None
+
+
+def _login_context(
+    *,
+    settings: DashboardSettings,
+    error: str | None,
+    next_path: str,
+) -> dict[str, object]:
+    login_error = error
+    if (
+        login_error is None
+        and not settings.bootstrap_login_enabled
+        and not settings.slack_login_enabled
+    ):
+        login_error = "No dashboard login method is configured."
+    return {
+        "error": login_error,
+        "next_path": next_path,
+        "slack_login_path": f"/auth/slack/start?next={quote(next_path, safe='')}",
+        "bootstrap_login_enabled": settings.bootstrap_login_enabled,
+        "slack_login_enabled": settings.slack_login_enabled,
+    }
+
+
+def _slack_openid_client(settings: DashboardSettings) -> SlackOpenIDClient:
+    if not (
+        settings.slack_client_id
+        and settings.slack_client_secret
+        and settings.slack_redirect_uri
+    ):
+        raise DashboardAuthError("Slack login is not configured.")
+    return SlackOpenIDClient(
+        client_id=settings.slack_client_id,
+        client_secret=settings.slack_client_secret,
+        redirect_uri=settings.slack_redirect_uri,
+    )
+
+
+def _login_redirect_with_error(
+    error: str,
+    *,
+    next_path: str = "/",
+) -> RedirectResponse:
+    query = urlencode({"next": _safe_next_path(next_path), "error": error})
+    return RedirectResponse(
+        url=f"/login?{query}",
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
 
 
 def _login_url_for(request: Request) -> str:

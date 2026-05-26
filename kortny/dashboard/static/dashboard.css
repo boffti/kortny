@@ -2598,6 +2598,12 @@ pre {
   padding: 18px 24px 24px;
 }
 
+.login-actions {
+  display: grid;
+  gap: 12px;
+  padding: 18px 24px 0;
+}
+
 .login-form label {
   color: var(--foreground);
   display: grid;
@@ -2609,6 +2615,25 @@ pre {
 .login-submit {
   margin-top: 4px;
   width: 100%;
+}
+
+.login-divider {
+  align-items: center;
+  color: var(--muted-foreground);
+  display: grid;
+  font-size: 12px;
+  font-weight: 700;
+  grid-template-columns: 1fr auto 1fr;
+  gap: 10px;
+  padding: 16px 24px 0;
+  text-transform: uppercase;
+}
+
+.login-divider::before,
+.login-divider::after {
+  background: var(--border);
+  content: "";
+  height: 1px;
 }
 
 .form-error {

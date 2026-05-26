@@ -3,6 +3,8 @@ import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from urllib.parse import parse_qs as parse_url_qs
+from urllib.parse import urlsplit
 
 import pytest
 from alembic import command
@@ -14,10 +16,13 @@ from sqlalchemy.orm import Session
 
 from kortny.composio import ComposioAuthConfig, ComposioConnectionRequest
 from kortny.dashboard.app import create_app
-from kortny.dashboard.settings import DashboardSettings
+from kortny.dashboard.auth import SlackOpenIDProfile
+from kortny.dashboard.settings import DashboardAuthMode, DashboardSettings
 from kortny.db.models import (
     Artifact,
     ComposioConnection,
+    DashboardOAuthState,
+    DashboardUser,
     EncryptedSecret,
     Episode,
     Installation,
@@ -34,6 +39,7 @@ from kortny.db.models import (
 from kortny.db.session import make_engine, make_session_factory, normalize_database_url
 
 TEST_POSTGRES_URL = os.environ.get("KORTNY_TEST_POSTGRES_URL")
+ALLOW_DESTRUCTIVE_TEST_DB = os.environ.get("KORTNY_ALLOW_DESTRUCTIVE_TEST_DB") == "1"
 
 pytestmark = pytest.mark.skipif(
     TEST_POSTGRES_URL is None,
@@ -44,6 +50,7 @@ pytestmark = pytest.mark.skipif(
 @pytest.fixture(scope="session")
 def engine() -> Iterator[Engine]:
     assert TEST_POSTGRES_URL is not None
+    assert_safe_dashboard_test_database(TEST_POSTGRES_URL)
 
     config = Config("alembic.ini")
     config.set_main_option("sqlalchemy.url", normalize_database_url(TEST_POSTGRES_URL))
@@ -130,6 +137,180 @@ def test_dashboard_login_and_logout_flow(
 
     locked_response = test_client.get("/", follow_redirects=False)
     assert locked_response.status_code == 303
+
+
+def test_dashboard_slack_login_start_redirects_to_slack_and_stores_state(
+    db_session: Session,
+    engine: Engine,
+) -> None:
+    assert TEST_POSTGRES_URL is not None
+    session_factory = make_session_factory(engine=engine)
+    settings = DashboardSettings(
+        postgres_url=TEST_POSTGRES_URL,
+        username="admin",
+        password="secret",
+        session_secret="test-dashboard-session-secret",
+        auth_mode=DashboardAuthMode.hybrid,
+        slack_client_id="slack-client",
+        slack_client_secret="slack-secret",
+        slack_redirect_uri="http://testserver/auth/slack/callback",
+    )
+    with TestClient(
+        create_app(settings=settings, session_factory=session_factory)
+    ) as test_client:
+        response = test_client.get(
+            "/auth/slack/start?next=/composio",
+            follow_redirects=False,
+        )
+
+    assert response.status_code == 303
+    redirect = urlsplit(response.headers["location"])
+    assert redirect.scheme == "https"
+    assert redirect.netloc == "slack.com"
+    assert redirect.path == "/openid/connect/authorize"
+    query = parse_url_qs(redirect.query)
+    assert query["client_id"] == ["slack-client"]
+    assert query["scope"] == ["openid profile email"]
+    assert query["redirect_uri"] == ["http://testserver/auth/slack/callback"]
+    state_value = query["state"][0]
+    oauth_state = db_session.scalar(
+        select(DashboardOAuthState).where(DashboardOAuthState.state == state_value)
+    )
+    assert oauth_state is not None
+    assert oauth_state.provider == "slack"
+    assert oauth_state.redirect_path == "/composio"
+    assert oauth_state.used_at is None
+
+
+def test_dashboard_slack_login_callback_creates_dashboard_user_and_session(
+    db_session: Session,
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert TEST_POSTGRES_URL is not None
+    installation = Installation(slack_team_id="T123", team_name="Test Team")
+    oauth_state = DashboardOAuthState(
+        provider="slack",
+        state="state-123",
+        redirect_path="/usage",
+        expires_at=datetime.now(UTC) + timedelta(minutes=10),
+    )
+    db_session.add_all([installation, oauth_state])
+    db_session.commit()
+    session_factory = make_session_factory(engine=engine)
+    settings = DashboardSettings(
+        postgres_url=TEST_POSTGRES_URL,
+        username="admin",
+        password="secret",
+        session_secret="test-dashboard-session-secret",
+        auth_mode=DashboardAuthMode.hybrid,
+        slack_client_id="slack-client",
+        slack_client_secret="slack-secret",
+        slack_redirect_uri="http://testserver/auth/slack/callback",
+    )
+
+    class FakeSlackOpenIDClient:
+        def __init__(self, **kwargs: object) -> None:
+            assert kwargs["client_id"] == "slack-client"
+            assert kwargs["client_secret"] == "slack-secret"
+            assert kwargs["redirect_uri"] == "http://testserver/auth/slack/callback"
+
+        def exchange_code(self, *, code: str) -> str:
+            assert code == "code-123"
+            return "openid-token"
+
+        def user_info(self, *, access_token: str) -> SlackOpenIDProfile:
+            assert access_token == "openid-token"
+            return SlackOpenIDProfile(
+                team_id="T123",
+                user_id="U123",
+                display_name="Aneesh Melkot",
+                email="aneesh@example.com",
+                avatar_url="https://example.com/avatar.png",
+                raw_json={
+                    "name": "Aneesh Melkot",
+                    "email": "aneesh@example.com",
+                    "https://slack.com/team_id": "T123",
+                    "https://slack.com/user_id": "U123",
+                },
+            )
+
+    monkeypatch.setattr(
+        "kortny.dashboard.app.SlackOpenIDClient",
+        FakeSlackOpenIDClient,
+    )
+    with TestClient(
+        create_app(settings=settings, session_factory=session_factory)
+    ) as test_client:
+        response = test_client.get(
+            "/auth/slack/callback?code=code-123&state=state-123",
+            follow_redirects=False,
+        )
+        page_response = test_client.get("/", follow_redirects=False)
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "/usage"
+    assert page_response.status_code == 200
+    assert "Aneesh Melkot" in page_response.text
+    db_session.expire_all()
+    dashboard_user = db_session.scalar(
+        select(DashboardUser).where(DashboardUser.slack_user_id == "U123")
+    )
+    assert dashboard_user is not None
+    assert dashboard_user.installation_id == installation.id
+    assert dashboard_user.display_name == "Aneesh Melkot"
+    assert dashboard_user.email == "aneesh@example.com"
+    assert dashboard_user.role == "owner"
+    assert dashboard_user.status == "active"
+    assert dashboard_user.last_login_at is not None
+    identity = db_session.scalar(
+        select(SlackIdentity).where(
+            SlackIdentity.kind == "user",
+            SlackIdentity.slack_id == "U123",
+        )
+    )
+    assert identity is not None
+    assert identity.display_name == "Aneesh Melkot"
+    db_session.refresh(oauth_state)
+    assert oauth_state.used_at is not None
+
+
+def test_dashboard_slack_login_callback_rejects_expired_state(
+    db_session: Session,
+    engine: Engine,
+) -> None:
+    assert TEST_POSTGRES_URL is not None
+    db_session.add(
+        DashboardOAuthState(
+            provider="slack",
+            state="expired-state",
+            redirect_path="/usage",
+            expires_at=datetime.now(UTC) - timedelta(minutes=1),
+        )
+    )
+    db_session.commit()
+    session_factory = make_session_factory(engine=engine)
+    settings = DashboardSettings(
+        postgres_url=TEST_POSTGRES_URL,
+        username="admin",
+        password="secret",
+        session_secret="test-dashboard-session-secret",
+        auth_mode=DashboardAuthMode.hybrid,
+        slack_client_id="slack-client",
+        slack_client_secret="slack-secret",
+        slack_redirect_uri="http://testserver/auth/slack/callback",
+    )
+    with TestClient(
+        create_app(settings=settings, session_factory=session_factory)
+    ) as test_client:
+        response = test_client.get(
+            "/auth/slack/callback?code=code-123&state=expired-state",
+            follow_redirects=False,
+        )
+
+    assert response.status_code == 303
+    assert response.headers["location"].startswith("/login?")
+    assert "Slack+login+state+expired." in response.headers["location"]
 
 
 def test_dashboard_renders_theme_toggle(
@@ -870,6 +1051,26 @@ def login(test_client: TestClient) -> Response:
     )
 
 
+def assert_safe_dashboard_test_database(database_url: str) -> None:
+    parsed = urlsplit(database_url)
+    hostname = parsed.hostname or ""
+    port = parsed.port or 5432
+    database_name = parsed.path.lstrip("/")
+    is_default_local_dev_db = (
+        hostname in {"localhost", "127.0.0.1", "::1"}
+        and port == 5432
+        and database_name == "kortny"
+    )
+    if is_default_local_dev_db and not ALLOW_DESTRUCTIVE_TEST_DB:
+        pytest.fail(
+            "Refusing to run destructive dashboard integration tests against "
+            "the default local dev database. Use a dedicated test database, "
+            "for example postgresql://kortny:kortny@localhost:5432/kortny_test, "
+            "or set KORTNY_ALLOW_DESTRUCTIVE_TEST_DB=1 if this is intentional.",
+            pytrace=False,
+        )
+
+
 def set_runtime_settings_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-dashboard-secret")
     monkeypatch.setenv("SLACK_APP_TOKEN", "xapp-dashboard-secret")
@@ -1082,6 +1283,8 @@ def cleanup_database(session: Session) -> None:
         WorkspaceState,
         Episode,
         ComposioConnection,
+        DashboardOAuthState,
+        DashboardUser,
         SlackIdentity,
         TaskEvent,
         Task,

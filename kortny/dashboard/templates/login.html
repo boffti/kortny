@@ -19,21 +19,37 @@
           <h1 id="login-title">Sign in to the operator dashboard</h1>
           <p>Inspect task costs, model usage, artifacts, and execution logs.</p>
         </header>
-        <form class="login-form" method="post" action="/login">
-          <input type="hidden" name="next" value="{{ next_path }}">
-          <label>
-            Username
-            <input class="input" name="username" autocomplete="username" required autofocus>
-          </label>
-          <label>
-            Password
-            <input class="input" name="password" type="password" autocomplete="current-password" required>
-          </label>
-          {% if error %}
-            <p class="form-error" role="alert">{{ error }}</p>
+        {% if slack_login_enabled %}
+          <div class="login-actions">
+            <a class="btn login-submit" href="{{ slack_login_path }}">Sign in with Slack</a>
+          </div>
+        {% endif %}
+        {% if bootstrap_login_enabled %}
+          {% if slack_login_enabled %}
+            <div class="login-divider"><span>or</span></div>
           {% endif %}
-          <button class="btn login-submit" type="submit">Sign in</button>
-        </form>
+          <form class="login-form" method="post" action="/login">
+            <input type="hidden" name="next" value="{{ next_path }}">
+            <label>
+              Username
+              <input class="input" name="username" autocomplete="username" required autofocus>
+            </label>
+            <label>
+              Password
+              <input class="input" name="password" type="password" autocomplete="current-password" required>
+            </label>
+            {% if error %}
+              <p class="form-error" role="alert">{{ error }}</p>
+            {% endif %}
+            <button class="btn login-submit" type="submit">Sign in</button>
+          </form>
+        {% else %}
+          {% if error %}
+            <div class="login-actions">
+              <p class="form-error" role="alert">{{ error }}</p>
+            </div>
+          {% endif %}
+        {% endif %}
       </section>
     </main>
   </body>

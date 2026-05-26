@@ -15,6 +15,7 @@ from kortny.agent import AgentCoordinator
 from kortny.agent.coordinator import DEFAULT_SYSTEM_PROMPT
 from kortny.agent.thread_context import ThreadTranscriptProvider
 from kortny.composio import ComposioClient
+from kortny.composio.provider import ComposioExternalToolProvider
 from kortny.config import Settings, load_settings
 from kortny.db.models import Artifact, Task, TaskEvent, TaskEventType
 from kortny.db.models import LLMProvider as DbLLMProvider
@@ -40,6 +41,7 @@ from kortny.slack.reactions import (
 from kortny.slack.thread_context import SlackThreadTranscriptProvider
 from kortny.tasks import TaskCancelledError, TaskService
 from kortny.tool_selection import (
+    ExternalToolProvider,
     HeuristicToolSelector,
     LLMToolSelector,
     ToolCatalogService,
@@ -47,7 +49,6 @@ from kortny.tool_selection import (
     ToolSelector,
 )
 from kortny.tools import (
-    ComposioExecuteTool,
     ForgetFactTool,
     InspectMemoryTool,
     PdfGeneratorTool,
@@ -104,6 +105,7 @@ class AgentTaskExecutor:
         system_prompt: str | None = DEFAULT_SYSTEM_PROMPT,
         reaction_provider: ReactionProvider | None = None,
         tool_selector: ToolSelector | None = None,
+        composio_client: Any | None = None,
     ) -> None:
         self.settings = settings
         self.llm_provider = llm_provider
@@ -116,6 +118,7 @@ class AgentTaskExecutor:
         self.system_prompt = system_prompt
         self.reaction_provider = reaction_provider or LibraryReactionProvider()
         self.tool_selector = tool_selector
+        self.composio_client = composio_client
 
     def execute(
         self,
@@ -306,14 +309,15 @@ class AgentTaskExecutor:
             inspect_memory,
             forget_fact,
         ]
-        external_tools: list[Tool] = []
-        composio_execute = self._build_composio_execute_tool(
+        external_providers = self._build_external_tool_providers(
             settings=settings,
             session=session,
             task=task,
         )
-        if composio_execute is not None:
-            external_tools.append(composio_execute)
+        external_tools = [
+            tool for provider in external_providers for tool in provider.runtime_tools()
+        ]
+        external_cards = ToolCatalogService().external_cards(external_providers)
         tools = self._select_runtime_tools(
             settings=settings,
             session=session,
@@ -321,6 +325,7 @@ class AgentTaskExecutor:
             task_service=task_service,
             native_tools=native_tools,
             external_tools=external_tools,
+            external_cards=external_cards,
         )
         return ToolRegistry(tools)
 
@@ -333,13 +338,13 @@ class AgentTaskExecutor:
         task_service: TaskService,
         native_tools: list[Tool],
         external_tools: list[Tool],
+        external_cards: tuple[Any, ...],
     ) -> list[Tool]:
         if not external_tools:
             return native_tools
 
         catalog = ToolCatalogService()
         native_cards = catalog.native_cards(native_tools)
-        external_cards = catalog.external_cards(external_tools)
         if not external_cards:
             return native_tools
 
@@ -455,27 +460,28 @@ class AgentTaskExecutor:
             fallback_used=selection.fallback_used,
         )
 
-    def _build_composio_execute_tool(
+    def _build_external_tool_providers(
         self,
         *,
         settings: Settings,
         session: Session,
         task: Task,
-    ) -> Tool | None:
-        if settings.composio_api_key is None:
-            return None
-
-        tool = ComposioExecuteTool(
-            session=session,
-            task=task,
-            client=ComposioClient(
-                api_key=settings.composio_api_key,
-                timeout_seconds=settings.composio_request_timeout_seconds,
-            ),
-        )
-        if not tool.has_available_connections:
-            return None
-        return tool
+    ) -> list[ExternalToolProvider]:
+        providers: list[ExternalToolProvider] = []
+        if settings.composio_api_key is not None and settings.composio_catalog_enabled:
+            providers.append(
+                ComposioExternalToolProvider(
+                    session=session,
+                    task=task,
+                    client=self.composio_client
+                    or ComposioClient(
+                        api_key=settings.composio_api_key,
+                        timeout_seconds=settings.composio_request_timeout_seconds,
+                    ),
+                    per_toolkit_limit=settings.composio_catalog_limit,
+                )
+            )
+        return providers
 
     def _build_slack_history_client(self, settings: Settings) -> Any:
         if self.slack_client is not None and hasattr(

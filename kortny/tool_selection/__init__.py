@@ -6,6 +6,7 @@ from kortny.tool_selection.models import (
     ToolSelection,
     ToolSelectionResult,
 )
+from kortny.tool_selection.providers import ExternalToolProvider
 from kortny.tool_selection.selector import (
     HeuristicToolSelector,
     LLMToolSelector,
@@ -14,6 +15,7 @@ from kortny.tool_selection.selector import (
 
 __all__ = [
     "HeuristicToolSelector",
+    "ExternalToolProvider",
     "LLMToolSelector",
     "ToolCard",
     "ToolCatalogService",

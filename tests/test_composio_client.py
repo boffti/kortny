@@ -141,6 +141,50 @@ def test_composio_client_derives_auth_scheme_from_auth_config_details() -> None:
     assert toolkit.managed_auth_schemes == ()
 
 
+def test_composio_client_lists_tools_from_dynamic_catalog() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v3.1/tools"
+        assert request.url.params["toolkit_slug"] == "firecrawl"
+        assert request.url.params["search"] == "recent AI tooling"
+        assert request.url.params["limit"] == "8"
+        return httpx.Response(
+            200,
+            json={
+                "items": [
+                    {
+                        "slug": "FIRECRAWL_SEARCH",
+                        "name": "Search",
+                        "description": "Search the public web.",
+                        "toolkit": {"slug": "firecrawl"},
+                        "input_parameters": {
+                            "type": "object",
+                            "properties": {"q": {"type": "string"}},
+                        },
+                        "tags": ["readOnlyHint"],
+                        "version": "latest",
+                    }
+                ]
+            },
+        )
+
+    client = ComposioClient(
+        api_key="test-key",
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    tools = client.list_tools(
+        toolkit_slug="firecrawl",
+        query="recent AI tooling",
+        limit=8,
+    )
+
+    assert len(tools) == 1
+    assert tools[0].slug == "FIRECRAWL_SEARCH"
+    assert tools[0].toolkit_slug == "firecrawl"
+    assert tools[0].input_parameters["properties"]["q"]["type"] == "string"
+    assert tools[0].tags == ("readOnlyHint",)
+
+
 def test_composio_client_lists_auth_configs_for_toolkit() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/api/v3.1/auth_configs"

@@ -65,6 +65,17 @@ class ComposioCatalog:
 
 
 @dataclass(frozen=True)
+class ComposioTool:
+    slug: str
+    name: str
+    description: str
+    toolkit_slug: str
+    input_parameters: dict[str, Any]
+    tags: tuple[str, ...]
+    version: str | None
+
+
+@dataclass(frozen=True)
 class ComposioToolExecution:
     data: dict[str, Any] | list[Any] | str | int | float | bool | None
     successful: bool
@@ -125,6 +136,44 @@ class ComposioClient:
         if isinstance(payload.get("toolkit"), dict):
             payload = payload["toolkit"]
         return _toolkit_from_payload(payload)
+
+    def list_tools(
+        self,
+        *,
+        toolkit_slug: str | None = None,
+        tool_slugs: tuple[str, ...] = (),
+        query: str | None = None,
+        limit: int = 20,
+    ) -> tuple[ComposioTool, ...]:
+        params: dict[str, str | int] = {"limit": limit}
+        if toolkit_slug:
+            params["toolkit_slug"] = toolkit_slug
+        if tool_slugs:
+            params["tool_slugs"] = ",".join(tool_slugs)
+        if query:
+            params["search"] = query
+
+        response = self._get("/api/v3.1/tools", params=params)
+        payload = response.json()
+        items: Any
+        if isinstance(payload, list):
+            items = payload
+        elif isinstance(payload, dict):
+            items = payload.get("items") or payload.get("tools") or payload.get("data") or ()
+            if isinstance(items, dict):
+                items = (
+                    items.get("items")
+                    or items.get("tools")
+                    or items.get("schemas")
+                    or ()
+                )
+        else:
+            items = ()
+        return tuple(
+            _tool_from_payload(item)
+            for item in items
+            if isinstance(item, dict)
+        )
 
     def list_auth_configs(
         self,
@@ -355,6 +404,35 @@ def _toolkit_from_payload(payload: dict[str, Any]) -> ComposioToolkit:
     )
 
 
+def _tool_from_payload(payload: dict[str, Any]) -> ComposioTool:
+    toolkit = payload.get("toolkit")
+    if isinstance(toolkit, dict):
+        toolkit_slug = _optional_str(toolkit.get("slug") or toolkit.get("name"))
+    else:
+        toolkit_slug = _optional_str(payload.get("toolkit_slug") or toolkit)
+    parameters = (
+        payload.get("input_parameters")
+        or payload.get("inputParameters")
+        or payload.get("input_schema")
+        or payload.get("schema")
+        or {}
+    )
+    if not isinstance(parameters, dict):
+        parameters = {}
+    slug = _optional_str(payload.get("slug") or payload.get("name"))
+    if slug is None:
+        raise ComposioCatalogError("Composio tool payload is missing a slug")
+    return ComposioTool(
+        slug=slug.upper(),
+        name=str(payload.get("name") or slug),
+        description=str(payload.get("description") or ""),
+        toolkit_slug=(toolkit_slug or "").lower(),
+        input_parameters=parameters,
+        tags=_tag_names(payload.get("tags")),
+        version=_optional_str(payload.get("version")),
+    )
+
+
 def _auth_config_from_payload(payload: dict[str, Any]) -> ComposioAuthConfig:
     config_id = _optional_str(
         payload.get("id") or payload.get("nanoid") or payload.get("auth_config_id")
@@ -399,6 +477,20 @@ def _string_tuple(value: Any) -> tuple[str, ...]:
     if not isinstance(value, list):
         return ()
     return tuple(str(item) for item in value if item)
+
+
+def _tag_names(value: Any) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        return ()
+    names: list[str] = []
+    for item in value:
+        if isinstance(item, dict):
+            name = _optional_str(item.get("name") or item.get("slug") or item.get("id"))
+        else:
+            name = _optional_str(item)
+        if name:
+            names.append(name)
+    return tuple(dict.fromkeys(names))
 
 
 def _auth_schemes_from_payload(payload: dict[str, Any]) -> tuple[str, ...]:

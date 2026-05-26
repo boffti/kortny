@@ -7,6 +7,7 @@ from kortny.composio.client import (
     ComposioClient,
     ComposioConnectionError,
     ComposioConnectionRequest,
+    ComposioTool,
     ComposioToolExecution,
     ComposioToolkit,
 )
@@ -23,6 +24,7 @@ __all__ = [
     "ComposioConnectionError",
     "ComposioConnectionRequest",
     "ComposioConnectionResolver",
+    "ComposioTool",
     "ComposioToolkit",
     "ComposioToolExecution",
     "RuntimeComposioConnection",

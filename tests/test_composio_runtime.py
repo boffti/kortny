@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from kortny.composio import (
     ComposioConnectionResolver,
+    ComposioTool,
     ComposioToolExecution,
 )
 from kortny.config.settings import LLMProvider as SettingsLLMProvider
@@ -149,7 +150,13 @@ def test_composio_execute_tool_uses_scoped_connection(
     db_session.commit()
     client = FakeComposioClient()
 
-    tool = ComposioExecuteTool(session=db_session, task=task, client=client)
+    tool = ComposioExecuteTool(
+        session=db_session,
+        task=task,
+        client=client,
+        allowed_tools=firecrawl_tools(),
+        toolkit_slug="firecrawl",
+    )
 
     assert tool.has_available_connections is True
     result = tool.invoke(
@@ -195,6 +202,8 @@ def test_composio_execute_tool_rejects_unapproved_tool(
         session=db_session,
         task=task,
         client=FakeComposioClient(),
+        allowed_tools=firecrawl_tools(),
+        toolkit_slug="firecrawl",
     )
 
     with pytest.raises(ValueError, match="not approved"):
@@ -225,11 +234,12 @@ def test_worker_registry_adds_composio_tool_for_scoped_connection(
     registry = AgentTaskExecutor(
         settings=settings,
         web_search_tool=StaticWebSearchTool(),
+        composio_client=FakeComposioClient(),
         tool_selector=StaticToolSelector(
             ToolSelectionResult(
                 selected_tools=(
                     ToolSelection(
-                        registry_name="composio_execute",
+                        registry_name="composio_firecrawl_execute",
                         confidence=0.9,
                         reason="Firecrawl is scoped and relevant.",
                     ),
@@ -246,15 +256,82 @@ def test_worker_registry_adds_composio_tool_for_scoped_connection(
         working_dir=tmp_path,
     )
 
-    assert "composio_execute" in registry.names()
+    assert "composio_firecrawl_execute" in registry.names()
     assert "web_search" not in registry.names()
     event = next(
         event
         for event in task_events(db_session, task)
         if event.payload.get("message") == "tool_selection_completed"
     )
-    assert event.payload["selected_tools"][0]["registry_name"] == "composio_execute"
+    assert (
+        event.payload["selected_tools"][0]["registry_name"]
+        == "composio_firecrawl_execute"
+    )
     assert event.payload["suppressed_native_tools"] == ["web_search"]
+
+
+def test_worker_registry_uses_dynamic_composio_toolkit_catalog(
+    db_session: Session,
+    tmp_path: Path,
+) -> None:
+    task = create_task(db_session, slack_channel_id="CResearch", slack_user_id="UAnalyst")
+    task.input = "Find the relevant Notion docs for the launch plan"
+    add_connection(
+        db_session,
+        task,
+        connected_account_id="ca_notion",
+        scope_type="user",
+        scope_id="UAnalyst",
+        toolkit_slug="notion",
+    )
+    db_session.commit()
+    settings = build_settings(composio_api_key="composio-key")
+    composio_client = FakeComposioClient(
+        tools_by_toolkit={
+            "notion": (
+                ComposioTool(
+                    slug="NOTION_SEARCH",
+                    name="Search Notion",
+                    description="Search Notion pages and databases.",
+                    toolkit_slug="notion",
+                    input_parameters={
+                        "type": "object",
+                        "properties": {"query": {"type": "string"}},
+                    },
+                    tags=("readOnlyHint",),
+                    version=None,
+                ),
+            )
+        }
+    )
+
+    registry = AgentTaskExecutor(
+        settings=settings,
+        web_search_tool=StaticWebSearchTool(),
+        composio_client=composio_client,
+        tool_selector=StaticToolSelector(
+            ToolSelectionResult(
+                selected_tools=(
+                    ToolSelection(
+                        registry_name="composio_notion_execute",
+                        confidence=0.9,
+                        reason="Notion has scoped matching docs.",
+                    ),
+                ),
+                route_reason="test_selection",
+            )
+        ),
+    )._build_registry(
+        settings=settings,
+        session=db_session,
+        task=task,
+        task_service=TaskService(db_session),
+        working_dir=tmp_path,
+    )
+
+    assert "composio_notion_execute" in registry.names()
+    assert composio_client.list_tool_calls[0]["toolkit_slug"] == "notion"
+    assert composio_client.list_tool_calls[0]["query"] == task.input
 
 
 def cleanup_database(session: Session) -> None:
@@ -340,8 +417,36 @@ def build_settings(*, composio_api_key: str | None = None) -> Settings:
 
 
 class FakeComposioClient:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        tools_by_toolkit: dict[str, tuple[ComposioTool, ...]] | None = None,
+    ) -> None:
         self.calls: list[dict[str, Any]] = []
+        self.list_tool_calls: list[dict[str, Any]] = []
+        self.tools_by_toolkit = tools_by_toolkit or {"firecrawl": firecrawl_tools()}
+
+    def list_tools(
+        self,
+        *,
+        toolkit_slug: str | None = None,
+        tool_slugs: tuple[str, ...] = (),
+        query: str | None = None,
+        limit: int = 20,
+    ) -> tuple[ComposioTool, ...]:
+        self.list_tool_calls.append(
+            {
+                "toolkit_slug": toolkit_slug,
+                "tool_slugs": tool_slugs,
+                "query": query,
+                "limit": limit,
+            }
+        )
+        tools = self.tools_by_toolkit.get(toolkit_slug or "", ())
+        if tool_slugs:
+            allowed = set(tool_slugs)
+            tools = tuple(tool for tool in tools if tool.slug in allowed)
+        return tools[:limit]
 
     def execute_tool(
         self,
@@ -368,6 +473,35 @@ class FakeComposioClient:
             log_id="log_firecrawl",
             session_info=None,
         )
+
+
+def firecrawl_tools() -> tuple[ComposioTool, ...]:
+    return (
+        ComposioTool(
+            slug="FIRECRAWL_SCRAPE",
+            name="Scrape URL",
+            description="Scrape markdown from a URL.",
+            toolkit_slug="firecrawl",
+            input_parameters={
+                "type": "object",
+                "properties": {"url": {"type": "string"}},
+            },
+            tags=("readOnlyHint",),
+            version=None,
+        ),
+        ComposioTool(
+            slug="FIRECRAWL_SEARCH",
+            name="Search Web",
+            description="Search the web for sources.",
+            toolkit_slug="firecrawl",
+            input_parameters={
+                "type": "object",
+                "properties": {"q": {"type": "string"}},
+            },
+            tags=("readOnlyHint",),
+            version=None,
+        ),
+    )
 
 
 class StaticWebSearchTool:

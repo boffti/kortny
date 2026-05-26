@@ -28,6 +28,7 @@ from kortny.agent.context import (
 )
 from kortny.agent.error_policy import (
     ClassifiedToolError,
+    RecoveryAction,
     classify_exception,
     classify_recoverable_tool_error,
     classify_tool_error_payload,
@@ -37,10 +38,16 @@ from kortny.agent.execution import (
     ExecutionGuardrailLimits,
     ExecutionMode,
     ExecutionPlan,
+    RecoveryPlan,
     ToolAttemptRecord,
     make_default_execution_plan,
 )
-from kortny.agent.planner import ExecutionPlanner, render_execution_plan_context
+from kortny.agent.planner import (
+    ExecutionPlanner,
+    make_fallback_recovery_plan,
+    render_execution_plan_context,
+    render_recovery_plan_context,
+)
 from kortny.agent.thread_context import ThreadTranscriptProvider
 from kortny.db.models import Task, TaskEvent, TaskEventType
 from kortny.llm import ChatMessage, Completion, ToolCall
@@ -260,6 +267,7 @@ class AgentCoordinator:
                 task_obj=task_obj,
                 messages=messages,
                 completion=completion,
+                schemas=schemas,
                 turn=turn,
                 plan=plan,
             )
@@ -335,6 +343,7 @@ class AgentCoordinator:
         task_obj: Task,
         messages: list[ChatMessage],
         completion: Completion,
+        schemas: Sequence[JsonSchema],
         turn: int,
         plan: ExecutionPlan,
     ) -> int:
@@ -594,8 +603,123 @@ class AgentCoordinator:
                     },
                 )
                 raise error
+            if error_classification is not None:
+                recovery_message = self._replan_after_recoverable_failure(
+                    task_obj=task_obj,
+                    messages=messages,
+                    schemas=schemas,
+                    plan=plan,
+                    tool_call=tool_call,
+                    arguments=arguments,
+                    result=result,
+                    classification=error_classification,
+                    turn=turn,
+                )
+                if recovery_message is not None:
+                    messages.append(recovery_message)
 
         return artifact_count
+
+    def _replan_after_recoverable_failure(
+        self,
+        *,
+        task_obj: Task,
+        messages: list[ChatMessage],
+        schemas: Sequence[JsonSchema],
+        plan: ExecutionPlan,
+        tool_call: ToolCall,
+        arguments: JsonObject,
+        result: ToolResult,
+        classification: ClassifiedToolError,
+        turn: int,
+    ) -> ChatMessage | None:
+        if plan.mode is not ExecutionMode.planned:
+            return None
+
+        recovery_plan: RecoveryPlan
+        if classification.recovery_action is RecoveryAction.stop_safely:
+            recovery_plan = make_fallback_recovery_plan(
+                failed_tool_name=tool_call.name,
+                classification=classification,
+                available_tool_names=list(self.registry.names()),
+            )
+        else:
+            try:
+                recovery_plan = self.execution_planner.create_recovery_plan(
+                    task=task_obj,
+                    llm=self.llm,
+                    tool_schemas=schemas,
+                    plan=plan,
+                    failed_tool_name=tool_call.name,
+                    attempted_arguments=arguments,
+                    classification=classification,
+                    tool_output=result.output,
+                )
+            except Exception as exc:
+                recovery_plan = make_fallback_recovery_plan(
+                    failed_tool_name=tool_call.name,
+                    classification=classification,
+                    available_tool_names=list(self.registry.names()),
+                )
+                self._append_execution_log(
+                    task_obj,
+                    "execution_recovery_planner_failed",
+                    plan,
+                    {
+                        "turn": turn,
+                        "tool_call_id": tool_call.id,
+                        "tool": tool_call.name,
+                        "error_code": classification.code,
+                        "error_category": classification.category.value,
+                        "recovery_action": classification.recovery_action.value,
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
+                        "fallback_source": recovery_plan.planner_source,
+                        "message_count": len(messages),
+                    },
+                )
+                logger.info(
+                    "execution recovery planner failed task_id=%s tool=%s "
+                    "error_code=%s error_type=%s error=%s",
+                    task_obj.id,
+                    tool_call.name,
+                    classification.code,
+                    type(exc).__name__,
+                    exc,
+                )
+
+        recovery_plan = plan.record_recovery_plan(recovery_plan)
+        self._append_execution_log(
+            task_obj,
+            "execution_recovery_plan_created",
+            plan,
+            {
+                "turn": turn,
+                "tool_call_id": tool_call.id,
+                "tool": tool_call.name,
+                "recovery_plan": recovery_plan.to_payload(),
+                "budget_remaining": plan.budget.remaining(plan.limits),
+                "message_count": len(messages),
+            },
+        )
+        log_observation(
+            logger,
+            "execution_recovery_plan_created",
+            task=task_obj,
+            turn=turn,
+            tool_call_id=tool_call.id,
+            tool=tool_call.name,
+            recovery_id=recovery_plan.recovery_id,
+            planner_source=recovery_plan.planner_source,
+            next_action=recovery_plan.next_action,
+            suggested_tool_names=recovery_plan.suggested_tool_names,
+            error_code=classification.code,
+            error_category=classification.category.value,
+        )
+        return ChatMessage(
+            role="system",
+            content=render_recovery_plan_context(recovery_plan),
+        )
 
     def _tool_arguments(self, task: Task, tool_call: ToolCall) -> JsonObject:
         arguments = dict(tool_call.arguments)

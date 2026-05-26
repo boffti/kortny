@@ -105,6 +105,44 @@ class ToolAttemptRecord:
         return asdict(self)
 
 
+@dataclass(frozen=True, slots=True)
+class RecoveryPlan:
+    """Private controller guidance after a recoverable tool failure."""
+
+    failed_tool_name: str
+    error_code: str
+    error_category: str
+    recovery_action: str
+    recovery_goal: str
+    next_action: str
+    suggested_tool_names: list[str] = field(default_factory=list)
+    argument_notes: list[str] = field(default_factory=list)
+    fallback_notes: list[str] = field(default_factory=list)
+    risk_notes: list[str] = field(default_factory=list)
+    user_message_guidance: str | None = None
+    planner_source: str = "deterministic_fallback"
+    recovery_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+
+    def to_payload(self) -> JsonObject:
+        """Return a JSON-safe event payload."""
+
+        return {
+            "recovery_id": self.recovery_id,
+            "failed_tool_name": self.failed_tool_name,
+            "error_code": self.error_code,
+            "error_category": self.error_category,
+            "recovery_action": self.recovery_action,
+            "recovery_goal": self.recovery_goal,
+            "next_action": self.next_action,
+            "suggested_tool_names": self.suggested_tool_names,
+            "argument_notes": self.argument_notes,
+            "fallback_notes": self.fallback_notes,
+            "risk_notes": self.risk_notes,
+            "user_message_guidance": self.user_message_guidance,
+            "planner_source": self.planner_source,
+        }
+
+
 @dataclass(slots=True)
 class ExecutionBudgetState:
     """Mutable budget counters for a single task run."""
@@ -201,6 +239,7 @@ class ExecutionPlan:
     missing_inputs: list[str] = field(default_factory=list)
     fallback_notes: list[str] = field(default_factory=list)
     risk_notes: list[str] = field(default_factory=list)
+    recovery_plans: list[RecoveryPlan] = field(default_factory=list)
     status: ExecutionPlanStatus = ExecutionPlanStatus.pending
     current_step_id: str | None = None
     budget: ExecutionBudgetState = field(default_factory=ExecutionBudgetState)
@@ -244,6 +283,13 @@ class ExecutionPlan:
         self.status = ExecutionPlanStatus.failed
         return step
 
+    def record_recovery_plan(self, recovery_plan: RecoveryPlan) -> RecoveryPlan:
+        """Append private recovery guidance and advance the plan version."""
+
+        self.plan_version += 1
+        self.recovery_plans.append(recovery_plan)
+        return recovery_plan
+
     def to_payload(self) -> JsonObject:
         """Return a compact JSON-safe representation."""
 
@@ -260,6 +306,10 @@ class ExecutionPlan:
             "missing_inputs": self.missing_inputs,
             "fallback_notes": self.fallback_notes,
             "risk_notes": self.risk_notes,
+            "recovery_plan_count": len(self.recovery_plans),
+            "latest_recovery_plan": (
+                self.recovery_plans[-1].to_payload() if self.recovery_plans else None
+            ),
             "limits": asdict(self.limits),
             "budget": {
                 "tool_call_count": self.budget.tool_call_count,

@@ -1723,6 +1723,134 @@ def test_coordinator_falls_back_to_inline_plan_when_planner_fails(
     assert plan_event.payload["plan"]["planner_reason"] == "intent_likely_multi_tool"
 
 
+def test_coordinator_replans_after_recoverable_failure_in_planned_mode(
+    db_session: Session,
+) -> None:
+    task = create_task(
+        db_session,
+        input_text="Check the task database and use search if the database is missing.",
+    )
+    record_intent_decision(
+        db_session,
+        task,
+        likely_tools=["query_database", "web_search"],
+        model_tier="strong",
+    )
+    search_tool = RecordingSearchTool()
+    llm = FakeLLM(
+        [
+            Completion(
+                content=json.dumps(
+                    {
+                        "objective": "Find task database items with a fallback.",
+                        "steps": [
+                            {
+                                "description": "Try the database query first.",
+                                "selected_tool_names": ["query_database"],
+                            },
+                            {
+                                "description": "Use search if the database id is missing.",
+                                "selected_tool_names": ["web_search"],
+                            },
+                        ],
+                        "missing_inputs": [],
+                        "fallback_notes": [
+                            "Use search before asking the user for the database id."
+                        ],
+                        "risk_notes": [],
+                    }
+                ),
+                tool_calls=(),
+                usage=TokenUsage(input_tokens=80, output_tokens=40),
+            ),
+            Completion(
+                content=None,
+                tool_calls=(
+                    ToolCall(
+                        id="call-1",
+                        name="query_database",
+                        arguments={"page_size": 10},
+                    ),
+                ),
+                usage=TokenUsage(input_tokens=100, output_tokens=4),
+            ),
+            Completion(
+                content=json.dumps(
+                    {
+                        "recovery_goal": (
+                            "Recover by discovering context before asking the user."
+                        ),
+                        "next_action": "use_discovery_tool",
+                        "suggested_tool_names": ["web_search"],
+                        "argument_notes": [
+                            "Do not retry query_database without database_id."
+                        ],
+                        "fallback_notes": [
+                            "Ask for a database link only if search cannot help."
+                        ],
+                        "risk_notes": [],
+                    }
+                ),
+                tool_calls=(),
+                usage=TokenUsage(input_tokens=90, output_tokens=30),
+            ),
+            Completion(
+                content=None,
+                tool_calls=(
+                    ToolCall(
+                        id="call-2",
+                        name="web_search",
+                        arguments={"query": "task database actionable items"},
+                    ),
+                ),
+                usage=TokenUsage(input_tokens=130, output_tokens=5),
+            ),
+            Completion(
+                content="I recovered by switching to search.",
+                tool_calls=(),
+                usage=TokenUsage(input_tokens=140, output_tokens=8),
+            ),
+        ]
+    )
+
+    result = AgentCoordinator(
+        session=db_session,
+        llm=llm,
+        registry=ToolRegistry([MissingRequiredContextTool(), search_tool]),
+    ).run(task)
+
+    assert result.result_summary == "I recovered by switching to search."
+    assert result.turns == 3
+    assert search_tool.calls == [{"query": "task database actionable items"}]
+
+    second_actor_messages = llm.calls[3][1]
+    recovery_message = next(
+        message
+        for message in second_actor_messages
+        if message.content and "<private_recovery_plan>" in message.content
+    )
+    assert "failed_tool: query_database" in recovery_message.content
+    assert "next_action: use_discovery_tool" in recovery_message.content
+    assert "suggested_tools: web_search" in recovery_message.content
+
+    events = task_events(db_session, task)
+    recovery_event = next(
+        event
+        for event in events
+        if event.payload.get("message") == "execution_recovery_plan_created"
+    )
+    assert recovery_event.payload["plan_version"] == 2
+    assert recovery_event.payload["recovery_plan"]["planner_source"] == (
+        "llm_recovery_planner"
+    )
+    assert recovery_event.payload["recovery_plan"]["next_action"] == (
+        "use_discovery_tool"
+    )
+    assert recovery_event.payload["recovery_plan"]["suggested_tool_names"] == [
+        "web_search"
+    ]
+
+
 def test_coordinator_classifies_recoverable_tool_result_errors(
     db_session: Session,
 ) -> None:

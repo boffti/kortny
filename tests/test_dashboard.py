@@ -193,6 +193,60 @@ def test_dashboard_system_page_shows_health_and_redacted_config(
     assert "db-system-secret" not in response.text
 
 
+def test_dashboard_integrations_page_shows_providers_tools_and_redacts_secrets(
+    client: tuple[TestClient, Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    test_client, _session = client
+    set_runtime_settings_env(monkeypatch)
+    monkeypatch.setenv("COMPOSIO_API_KEY", "composio-dashboard-secret")
+    login(test_client)
+
+    response = test_client.get("/integrations")
+
+    assert response.status_code == 200
+    assert "Integrations" in response.text
+    assert "Providers" in response.text
+    assert "Native Tool Registry" in response.text
+    assert "Slack workspace" in response.text
+    assert "LLM provider" in response.text
+    assert "Brave Search" in response.text
+    assert "PDF generation" in response.text
+    assert "Workspace memory" in response.text
+    assert "Composio" in response.text
+    assert "Key present, adapter pending" in response.text
+    assert "web_search" in response.text
+    assert "pdf_generator" in response.text
+    assert "slack_channel_history" in response.text
+    assert "remember_fact" in response.text
+    assert "BRAVE_SEARCH_API_KEY" in response.text
+    assert "xoxb-dashboard-secret" not in response.text
+    assert "llm-dashboard-secret" not in response.text
+    assert "brave-dashboard-secret" not in response.text
+    assert "composio-dashboard-secret" not in response.text
+    assert 'href="/integrations" aria-current="page"' in response.text
+
+
+def test_dashboard_integrations_page_marks_missing_optional_search(
+    client: tuple[TestClient, Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    test_client, _session = client
+    set_runtime_settings_env(monkeypatch)
+    monkeypatch.setenv("BRAVE_SEARCH_API_KEY", "")
+    login(test_client)
+
+    response = test_client.get("/integrations")
+
+    assert response.status_code == 200
+    assert (
+        "The web_search tool needs BRAVE_SEARCH_API_KEY before it can run."
+        in response.text
+    )
+    assert "Requires BRAVE_SEARCH_API_KEY." in response.text
+    assert "Needs setup" in response.text
+
+
 def test_dashboard_homepage_renders_operator_overview(
     client: tuple[TestClient, Session],
     monkeypatch: pytest.MonkeyPatch,

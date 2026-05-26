@@ -23,6 +23,7 @@ from kortny.dashboard.data import (
     DEFAULT_PAGE_SIZE,
     MAX_PAGE_SIZE,
     get_dashboard_overview,
+    get_integration_dashboard,
     get_memory_dashboard,
     get_system_health,
     get_task_detail,
@@ -274,6 +275,26 @@ def register_routes(app: FastAPI) -> None:
                 "memory_return_path": _request_path(request),
                 "notice": notice,
                 "notice_tone": _notice_tone(notice_tone),
+            },
+        )
+
+    @app.get("/integrations", response_class=HTMLResponse)
+    def integrations(
+        request: Request,
+        username: Annotated[str, Depends(require_user)],
+    ) -> Response:
+        runtime_settings, runtime_error = _load_runtime_settings()
+        integration_dashboard = get_integration_dashboard(
+            runtime_settings=runtime_settings,
+            runtime_error=runtime_error,
+        )
+        return templates.TemplateResponse(
+            request=request,
+            name="integrations.html",
+            context={
+                "active_page": "integrations",
+                "dashboard_user": username,
+                "integrations": integration_dashboard,
             },
         )
 

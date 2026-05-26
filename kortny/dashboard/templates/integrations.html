@@ -1,0 +1,158 @@
+{% extends "base.html" %}
+
+{% block title %}Integrations - Kortny Dashboard{% endblock %}
+
+{% block content %}
+  <section class="page-heading">
+    <div>
+      <h1>Integrations</h1>
+      <p>What this Kortny instance can connect to and which tools the agent can call.</p>
+    </div>
+    <a class="btn-ghost" href="/system">View system config</a>
+  </section>
+
+  <section class="summary-grid integration-summary" aria-label="Integrations overview">
+    {% for metric in integrations.metrics %}
+      <div class="card metric-card metric-{{ metric.tone }}">
+        <span>{{ metric.label }}</span>
+        <strong>{{ metric.value }}</strong>
+        {% if metric.detail %}
+          <small>{{ metric.detail }}</small>
+        {% endif %}
+      </div>
+    {% endfor %}
+  </section>
+
+  {% if integrations.runtime_error %}
+    <div class="notice notice-danger">
+      Runtime settings could not be fully loaded. Secret values remain hidden; use System for the redacted setup error.
+    </div>
+  {% endif %}
+
+  <p class="surface-note">
+    Secrets are never displayed. Missing optional providers are setup gaps, not outages.
+  </p>
+
+  <section class="integration-stack" aria-label="Configured integrations">
+    <article class="card integration-list-card">
+      <header>
+        <h2>Providers</h2>
+        <p>Runtime services and adapters available to this deployment.</p>
+      </header>
+      <div class="provider-list">
+        {% for integration in integrations.integrations %}
+          <article class="provider-row">
+            <div class="provider-summary">
+              <div class="provider-name">
+                <strong>{{ integration.name }}</strong>
+                <span>{{ integration.category }}</span>
+              </div>
+              <p>{{ integration.description }}</p>
+              <span class="badge badge-{{ integration.tone }}">{{ integration.status }}</span>
+            </div>
+            <details class="row-details provider-details">
+              <summary>Details</summary>
+              <div class="details-panel provider-details-panel">
+                <div>
+                  <span class="detail-label">Runtime notes</span>
+                  <ul class="compact-list">
+                    {% for detail in integration.details %}
+                      <li>{{ detail }}</li>
+                    {% endfor %}
+                  </ul>
+                </div>
+                {% if integration.env_vars %}
+                  <div>
+                    <span class="detail-label">Environment</span>
+                    <div class="env-list" aria-label="{{ integration.name }} environment variables">
+                      {% for env_var in integration.env_vars %}
+                        <code>{{ env_var }}</code>
+                      {% endfor %}
+                    </div>
+                  </div>
+                {% endif %}
+                {% if integration.action %}
+                  <p class="integration-action">{{ integration.action }}</p>
+                {% endif %}
+              </div>
+            </details>
+          </article>
+        {% endfor %}
+      </div>
+    </article>
+  </section>
+
+  <section class="tool-registry" aria-label="Native tool registry">
+    <div class="section-header-row">
+      <div>
+        <h2>Native Tool Registry</h2>
+        <p>Provider-neutral JSON contracts registered by the worker agent executor.</p>
+      </div>
+      <span class="badge badge-neutral">Read-only</span>
+    </div>
+
+    <article class="card tool-list-card">
+      <div class="tool-list">
+        {% for group in integrations.tool_groups %}
+          <section class="tool-group-panel" aria-label="{{ group.name }} tools">
+            <header class="tool-group-header">
+              <div>
+                <h3>{{ group.name }}</h3>
+                <p>{{ group.description }}</p>
+              </div>
+              <span class="badge badge-neutral">{{ group.tools|length }} tools</span>
+            </header>
+            <div class="tool-card-grid">
+            {% for tool in group.tools %}
+              <article class="tool-card">
+                <div class="tool-card-head">
+                  <code>{{ tool.name }}</code>
+                  <span class="badge badge-{{ tool.tone }}">{{ tool.status }}</span>
+                </div>
+                <p>{{ tool.description }}</p>
+                <div class="tool-card-inputs">
+                  <span>Required inputs</span>
+                  <div>
+                    {% if tool.required_args %}
+                      {% for arg in tool.required_args %}
+                        <code>{{ arg }}</code>
+                      {% endfor %}
+                    {% else %}
+                      <small>None</small>
+                    {% endif %}
+                  </div>
+                </div>
+                <details class="row-details tool-details">
+                  <summary>Inputs and notes</summary>
+                  <div class="details-panel tool-details-panel">
+                    <div>
+                      <span class="detail-label">Optional inputs</span>
+                      <div class="tool-optional">
+                        {% if tool.optional_args %}
+                          {% for arg in tool.optional_args %}
+                            <code>{{ arg }}</code>
+                          {% endfor %}
+                        {% else %}
+                          <small>None</small>
+                        {% endif %}
+                      </div>
+                    </div>
+                    <div>
+                      <span class="detail-label">Notes</span>
+                      <ul class="compact-list tool-notes">
+                        {% for note in tool.notes %}
+                          <li>{{ note }}</li>
+                        {% endfor %}
+                      </ul>
+                    </div>
+                  </div>
+                </details>
+              </article>
+            {% endfor %}
+            </div>
+          </section>
+        {% endfor %}
+      </div>
+    </article>
+  </section>
+{% endblock %}

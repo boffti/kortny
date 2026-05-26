@@ -30,6 +30,16 @@ from kortny.db.models import (
     TaskStatus,
     WorkspaceState,
 )
+from kortny.tools.pdf_generator import PdfGeneratorTool
+from kortny.tools.slack_channel_history import SlackChannelHistoryTool
+from kortny.tools.slack_file_read import SlackFileReadTool
+from kortny.tools.web_search import WebSearchTool
+from kortny.tools.workspace_memory import (
+    ForgetFactTool,
+    InspectMemoryTool,
+    RecallFactTool,
+    RememberFactTool,
+)
 
 DEFAULT_PAGE_SIZE = 25
 MAX_PAGE_SIZE = 100
@@ -425,6 +435,45 @@ class MemoryDashboard:
     reset_url: str
     facts: tuple[MemoryFactRow, ...]
     episodes: tuple[MemoryEpisodeRow, ...]
+
+
+@dataclass(frozen=True)
+class IntegrationCard:
+    name: str
+    category: str
+    status: str
+    tone: str
+    description: str
+    details: tuple[str, ...]
+    env_vars: tuple[str, ...]
+    action: str | None = None
+
+
+@dataclass(frozen=True)
+class ToolCapability:
+    name: str
+    group: str
+    status: str
+    tone: str
+    description: str
+    required_args: tuple[str, ...]
+    optional_args: tuple[str, ...]
+    notes: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ToolCapabilityGroup:
+    name: str
+    description: str
+    tools: tuple[ToolCapability, ...]
+
+
+@dataclass(frozen=True)
+class IntegrationDashboard:
+    metrics: tuple[SystemMetric, ...]
+    integrations: tuple[IntegrationCard, ...]
+    tool_groups: tuple[ToolCapabilityGroup, ...]
+    runtime_error: str | None
 
 
 def list_tasks(
@@ -1084,6 +1133,54 @@ def get_system_health(
     )
 
 
+def get_integration_dashboard(
+    *,
+    runtime_settings: Settings | None = None,
+    runtime_error: str | None = None,
+) -> IntegrationDashboard:
+    """Return configured integration and tool-registry state."""
+
+    integrations = _integration_cards(runtime_settings, runtime_error)
+    tool_groups = _tool_capability_groups(runtime_settings)
+    configured_count = sum(1 for card in integrations if card.tone == "success")
+    setup_gap_count = sum(
+        1 for card in integrations if card.tone in {"warning", "danger"}
+    )
+    tool_count = sum(len(group.tools) for group in tool_groups)
+
+    metrics = (
+        SystemMetric(
+            label="Configured",
+            value=f"{configured_count:,}",
+            detail="Providers ready for this deployment",
+            tone="success" if configured_count else "warning",
+        ),
+        SystemMetric(
+            label="Setup Gaps",
+            value=f"{setup_gap_count:,}",
+            detail="Missing or planned configuration",
+            tone="warning" if setup_gap_count else "success",
+        ),
+        SystemMetric(
+            label="Native Tools",
+            value=f"{tool_count:,}",
+            detail="Tool contracts exposed to the agent loop",
+        ),
+        SystemMetric(
+            label="External Adapters",
+            value="1 planned",
+            detail="Composio is tracked separately in HIG-35",
+            tone="neutral",
+        ),
+    )
+    return IntegrationDashboard(
+        metrics=metrics,
+        integrations=integrations,
+        tool_groups=tool_groups,
+        runtime_error=runtime_error,
+    )
+
+
 def parse_date_bound(
     value: str | None, *, inclusive_end: bool = False
 ) -> datetime | None:
@@ -1378,6 +1475,351 @@ def _config_sections(
         )
     )
     return tuple(sections)
+
+
+def _integration_cards(
+    settings: Settings | None,
+    runtime_error: str | None,
+) -> tuple[IntegrationCard, ...]:
+    if settings is None:
+        return (
+            IntegrationCard(
+                name="Runtime configuration",
+                category="Core",
+                status="Needs setup",
+                tone="danger",
+                description="Kortny cannot load runtime settings for integrations.",
+                details=(
+                    runtime_error or "Required environment variables are missing.",
+                    "Set Slack, LLM, and Postgres values before checking tools.",
+                ),
+                env_vars=("SLACK_BOT_TOKEN", "LLM_API_KEY", "POSTGRES_URL"),
+                action="Open System for the redacted configuration error.",
+            ),
+            IntegrationCard(
+                name="Native tool registry",
+                category="Tools",
+                status="Blocked",
+                tone="warning",
+                description="Native tools depend on a valid runtime configuration.",
+                details=(
+                    "Tool metadata is visible, but runtime invocation is blocked.",
+                ),
+                env_vars=(),
+            ),
+        )
+
+    model_tiers = tuple(
+        model
+        for model in (
+            settings.llm_cheap_model,
+            settings.llm_standard_model,
+            settings.llm_analysis_model,
+            settings.llm_document_model,
+            settings.llm_high_reasoning_model,
+        )
+        if model
+    )
+    integrations = [
+        IntegrationCard(
+            name="Slack workspace",
+            category="Transport",
+            status="Configured",
+            tone="success",
+            description="Socket Mode transport for DMs, mentions, reactions, files, and channel context.",
+            details=(
+                f"App name: {settings.slack_app_name}",
+                f"File read limit: {settings.slack_file_read_max_bytes:,} bytes",
+                "Bot, app, and signing credentials are present.",
+            ),
+            env_vars=(
+                "SLACK_BOT_TOKEN",
+                "SLACK_APP_TOKEN",
+                "SLACK_SIGNING_SECRET",
+                "SLACK_APP_NAME",
+            ),
+        ),
+        IntegrationCard(
+            name="LLM provider",
+            category="Inference",
+            status="Configured",
+            tone="success",
+            description="Primary inference backend used by the coordinator, intent classifier, and model router.",
+            details=(
+                f"Provider: {settings.llm_provider.value}",
+                f"Default model: {settings.llm_model}",
+                (
+                    f"{len(model_tiers):,} specialized routing tiers configured."
+                    if model_tiers
+                    else "Specialized tiers fall back to LLM_MODEL."
+                ),
+            ),
+            env_vars=(
+                "LLM_PROVIDER",
+                "LLM_API_KEY",
+                "LLM_MODEL",
+                "LLM_CHEAP_MODEL",
+                "LLM_STANDARD_MODEL",
+                "LLM_ANALYSIS_MODEL",
+                "LLM_DOCUMENT_MODEL",
+                "LLM_HIGH_REASONING_MODEL",
+            ),
+            action=(
+                None
+                if model_tiers
+                else "Set tier-specific model env vars to make routing explicit."
+            ),
+        ),
+        IntegrationCard(
+            name="Brave Search",
+            category="Research",
+            status="Configured" if settings.brave_search_api_key else "Missing",
+            tone="success" if settings.brave_search_api_key else "warning",
+            description="Public web search provider used by the native web_search tool.",
+            details=(
+                (
+                    "API key is present. The tool still respects Brave API rate limits."
+                    if settings.brave_search_api_key
+                    else "The web_search tool needs BRAVE_SEARCH_API_KEY before it can run."
+                ),
+            ),
+            env_vars=("BRAVE_SEARCH_API_KEY",),
+            action=(
+                None
+                if settings.brave_search_api_key
+                else "Add BRAVE_SEARCH_API_KEY to enable web research."
+            ),
+        ),
+        IntegrationCard(
+            name="PDF generation",
+            category="Documents",
+            status="Built in",
+            tone="success",
+            description="ReportLab-backed document generation running inside the worker container.",
+            details=(
+                "No external account required.",
+                "Uses task workspace storage and records generated artifacts.",
+            ),
+            env_vars=(),
+        ),
+        IntegrationCard(
+            name="Workspace memory",
+            category="Memory",
+            status="Available",
+            tone="success",
+            description="Confirm-gated workspace_state memory tools backed by Postgres.",
+            details=(
+                "Facts, proposals, supersession, and forget events are stored with audit metadata.",
+                "Episodic recall is recorded separately from durable facts.",
+            ),
+            env_vars=("POSTGRES_URL",),
+        ),
+        IntegrationCard(
+            name="Observability",
+            category="Operations",
+            status=_integration_observability_status(settings),
+            tone=_integration_observability_tone(settings),
+            description="Structured logs, task events, LLM usage, and optional OTLP export.",
+            details=(
+                f"Capture mode: {settings.observability_capture_content}",
+                (
+                    f"OTLP endpoint: {settings.otel_exporter_otlp_endpoint}"
+                    if settings.otel_exporter_otlp_endpoint
+                    else "No OTLP endpoint configured; dashboard still reads local task and usage rows."
+                ),
+                f"Trace sampling: {settings.otel_trace_sampling_ratio:.2f}",
+            ),
+            env_vars=(
+                "OBSERVABILITY_ENABLED",
+                "OBSERVABILITY_CAPTURE_CONTENT",
+                "OTEL_EXPORTER_OTLP_ENDPOINT",
+                "OTEL_TRACE_SAMPLING_RATIO",
+            ),
+            action=(
+                None
+                if settings.otel_exporter_otlp_endpoint
+                else "Run the observability profile or connect an OTLP endpoint for external traces."
+            ),
+        ),
+        IntegrationCard(
+            name="Langfuse",
+            category="Prompts",
+            status="Enabled" if settings.langfuse_enabled else "Optional",
+            tone="success" if settings.langfuse_enabled else "neutral",
+            description="Optional hosted prompt and trace backend for teams that want cloud prompt management.",
+            details=(
+                (
+                    f"Host: {settings.langfuse_host or 'not set'}"
+                    if settings.langfuse_enabled
+                    else "Not required for local self-hosting."
+                ),
+                (
+                    "Prompt fetching is enabled."
+                    if settings.langfuse_prompts_enabled
+                    else "Prompt fetching is disabled."
+                ),
+            ),
+            env_vars=(
+                "LANGFUSE_ENABLED",
+                "LANGFUSE_HOST",
+                "LANGFUSE_PUBLIC_KEY",
+                "LANGFUSE_SECRET_KEY",
+                "LANGFUSE_PROMPTS_ENABLED",
+            ),
+        ),
+        IntegrationCard(
+            name="Composio",
+            category="External tools",
+            status="Key present, adapter pending"
+            if settings.composio_api_key
+            else "Planned",
+            tone="warning" if settings.composio_api_key else "neutral",
+            description="Future MCP/tool adapter for third-party app integrations.",
+            details=(
+                (
+                    "COMPOSIO_API_KEY is present, but the runtime adapter is intentionally not active yet."
+                    if settings.composio_api_key
+                    else "No key configured. HIG-35 tracks the actual integration adapter."
+                ),
+            ),
+            env_vars=("COMPOSIO_API_KEY",),
+            action="Use HIG-35 for OAuth/account connection and runtime adapter work.",
+        ),
+    ]
+    return tuple(integrations)
+
+
+def _tool_capability_groups(
+    settings: Settings | None,
+) -> tuple[ToolCapabilityGroup, ...]:
+    runtime_available = settings is not None
+    slack_available = settings is not None
+    web_available = bool(settings and settings.brave_search_api_key)
+    return (
+        ToolCapabilityGroup(
+            name="Research",
+            description="Tools that gather external or Slack-grounded context.",
+            tools=(
+                _tool_capability(
+                    WebSearchTool,
+                    group="Research",
+                    available=web_available,
+                    unavailable_note="Requires BRAVE_SEARCH_API_KEY.",
+                ),
+                _tool_capability(
+                    SlackChannelHistoryTool,
+                    group="Research",
+                    available=slack_available,
+                    unavailable_note="Requires valid Slack runtime settings.",
+                ),
+                _tool_capability(
+                    SlackFileReadTool,
+                    group="Research",
+                    available=slack_available,
+                    unavailable_note="Requires valid Slack runtime settings.",
+                ),
+            ),
+        ),
+        ToolCapabilityGroup(
+            name="Documents",
+            description="Tools that create task artifacts.",
+            tools=(
+                _tool_capability(
+                    PdfGeneratorTool,
+                    group="Documents",
+                    available=runtime_available,
+                    unavailable_note="Requires valid runtime settings and worker task storage.",
+                ),
+            ),
+        ),
+        ToolCapabilityGroup(
+            name="Memory",
+            description="Confirm-gated fact memory and operator-visible recall tools.",
+            tools=(
+                _tool_capability(
+                    RememberFactTool,
+                    group="Memory",
+                    available=runtime_available,
+                    unavailable_note="Requires Postgres and Slack confirmation flow.",
+                ),
+                _tool_capability(
+                    RecallFactTool,
+                    group="Memory",
+                    available=runtime_available,
+                    unavailable_note="Requires Postgres-backed workspace_state.",
+                ),
+                _tool_capability(
+                    InspectMemoryTool,
+                    group="Memory",
+                    available=runtime_available,
+                    unavailable_note="Requires Postgres-backed workspace_state.",
+                ),
+                _tool_capability(
+                    ForgetFactTool,
+                    group="Memory",
+                    available=runtime_available,
+                    unavailable_note="Requires Postgres-backed workspace_state.",
+                ),
+            ),
+        ),
+    )
+
+
+def _tool_capability(
+    tool: type[Any],
+    *,
+    group: str,
+    available: bool,
+    unavailable_note: str,
+) -> ToolCapability:
+    required_args, optional_args = _tool_argument_names(tool.parameters)
+    return ToolCapability(
+        name=tool.name,
+        group=group,
+        status="Available" if available else "Needs setup",
+        tone="success" if available else "warning",
+        description=tool.description,
+        required_args=required_args,
+        optional_args=optional_args,
+        notes=(
+            "Provider-neutral JSON tool contract.",
+            unavailable_note
+            if not available
+            else "Registered by the worker agent executor.",
+        ),
+    )
+
+
+def _tool_argument_names(
+    schema: dict[str, Any],
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    properties = schema.get("properties")
+    if not isinstance(properties, dict):
+        return (), ()
+    required_values = schema.get("required", ())
+    required = tuple(
+        name for name in required_values if isinstance(name, str) and name in properties
+    )
+    optional = tuple(
+        name for name in properties if isinstance(name, str) and name not in required
+    )
+    return required, optional
+
+
+def _integration_observability_status(settings: Settings) -> str:
+    if not settings.observability_enabled:
+        return "Disabled"
+    if settings.otel_exporter_otlp_endpoint:
+        return "OTLP export"
+    return "Local metadata"
+
+
+def _integration_observability_tone(settings: Settings) -> str:
+    if not settings.observability_enabled:
+        return "warning"
+    if settings.otel_exporter_otlp_endpoint:
+        return "success"
+    return "neutral"
 
 
 def _model_row(label: str, value: str | None) -> SystemConfigRow:

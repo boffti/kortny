@@ -15,9 +15,15 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 from starlette.middleware.sessions import SessionMiddleware
 
+from kortny.composio import (
+    ComposioCatalogError,
+    ComposioClient,
+    ComposioConnectionError,
+)
 from kortny.config import Settings, SettingsError, load_settings
 from kortny.dashboard.data import (
     DEFAULT_PAGE_SIZE,
@@ -41,6 +47,7 @@ from kortny.dashboard.memory_actions import (
     supersede_fact,
 )
 from kortny.dashboard.settings import DashboardSettings, load_dashboard_settings
+from kortny.db.models import ComposioConnection, Installation, SlackIdentity
 from kortny.db.session import make_session_factory
 
 TEMPLATE_DIR = Path(__file__).parent / "templates"
@@ -330,12 +337,225 @@ def register_routes(app: FastAPI) -> None:
             },
         )
 
+    @app.get("/composio/callback")
+    def composio_callback(
+        request: Request,
+        connection_id: UUID,
+        username: Annotated[str, Depends(require_user)],
+        session: Annotated[Session, Depends(get_session)],
+        status_text: Annotated[str | None, Query(alias="status")] = None,
+        connected_account_id: Annotated[str | None, Query()] = None,
+    ) -> RedirectResponse:
+        connection = session.get(ComposioConnection, connection_id)
+        if connection is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+
+        callback_status = (status_text or "").strip().lower()
+        callback_payload = dict(request.query_params)
+        metadata = dict(connection.metadata_json or {})
+        metadata["callback"] = callback_payload
+        if connected_account_id:
+            connection.connected_account_id = connected_account_id
+        if connected_account_id or callback_status in {"success", "active", "connected"}:
+            connection.status = "active"
+            notice = "Composio account connected."
+            tone = "success"
+        else:
+            connection.status = "failed"
+            notice = "Composio connection did not complete."
+            tone = "danger"
+        connection.metadata_json = metadata
+        session.commit()
+
+        return _redirect_with_notice(
+            f"/composio/{quote(connection.toolkit_slug, safe='')}",
+            notice,
+            tone=tone,
+        )
+
+    @app.post("/composio/{toolkit_slug}/auth-configs")
+    async def composio_create_auth_config(
+        request: Request,
+        toolkit_slug: str,
+        username: Annotated[str, Depends(require_user)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> RedirectResponse:
+        del username, session
+        next_path = f"/composio/{quote(toolkit_slug.strip().lower(), safe='')}"
+        runtime_settings, runtime_error = _load_runtime_settings()
+        if runtime_error or runtime_settings is None:
+            return _redirect_with_notice(
+                next_path,
+                "Runtime settings are invalid. Fix System configuration first.",
+                tone="danger",
+            )
+        if not runtime_settings.composio_api_key:
+            return _redirect_with_notice(
+                next_path,
+                "COMPOSIO_API_KEY is required before creating auth configs.",
+                tone="danger",
+            )
+
+        client = ComposioClient(
+            api_key=runtime_settings.composio_api_key,
+            timeout_seconds=runtime_settings.composio_request_timeout_seconds,
+        )
+        try:
+            auth_config = client.create_managed_auth_config(
+                toolkit_slug=toolkit_slug.strip().lower()
+            )
+        except ComposioConnectionError as exc:
+            return _redirect_with_notice(
+                next_path,
+                f"Could not create auth config: {str(exc)}",
+                tone="danger",
+            )
+        return _redirect_with_notice(
+            next_path,
+            f"Created auth config {auth_config.id}.",
+        )
+
+    @app.post("/composio/{toolkit_slug}/connect")
+    async def composio_start_connect(
+        request: Request,
+        toolkit_slug: str,
+        username: Annotated[str, Depends(require_user)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> RedirectResponse:
+        del username
+        normalized_slug = toolkit_slug.strip().lower()
+        next_path = f"/composio/{quote(normalized_slug, safe='')}"
+        form = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
+        auth_config_id = _form_value(form, "auth_config_id")
+        owner_slack_user_id = _form_value(form, "owner_slack_user_id")
+        if not owner_slack_user_id:
+            owner_slack_user_id = _default_slack_owner_id(session)
+        display_name = _form_value(form, "display_name")
+        scope_type = _form_value(form, "visibility_scope_type") or "user"
+        channel_scope_id = _form_value(form, "channel_scope_id")
+
+        if not owner_slack_user_id:
+            return _redirect_with_notice(
+                next_path,
+                "Choose the Slack user who owns this connection in Advanced options.",
+                tone="danger",
+            )
+        if scope_type not in {"user", "channel", "workspace"}:
+            return _redirect_with_notice(
+                next_path,
+                "Visibility scope must be personal, channel, or workspace.",
+                tone="danger",
+            )
+        if scope_type == "channel" and not channel_scope_id:
+            return _redirect_with_notice(
+                next_path,
+                "Choose a Slack channel for channel-scoped connections.",
+                tone="danger",
+            )
+
+        installation = _installation_for_owner(session, owner_slack_user_id)
+        if installation is None:
+            return _redirect_with_notice(
+                next_path,
+                "No Slack installation has been recorded yet.",
+                tone="danger",
+            )
+
+        runtime_settings, runtime_error = _load_runtime_settings()
+        if runtime_error or runtime_settings is None:
+            return _redirect_with_notice(
+                next_path,
+                "Runtime settings are invalid. Fix System configuration first.",
+                tone="danger",
+            )
+        if not runtime_settings.composio_api_key:
+            return _redirect_with_notice(
+                next_path,
+                "COMPOSIO_API_KEY is required before creating Connect Links.",
+                tone="danger",
+            )
+
+        scope_id = _composio_scope_id(
+            scope_type=scope_type,
+            owner_slack_user_id=owner_slack_user_id,
+            channel_scope_id=channel_scope_id,
+        )
+        composio_user_id = f"slack:{installation.id}:{owner_slack_user_id}"
+        connection = ComposioConnection(
+            installation_id=installation.id,
+            toolkit_slug=normalized_slug,
+            auth_config_id=auth_config_id,
+            composio_user_id=composio_user_id,
+            owner_slack_user_id=owner_slack_user_id,
+            visibility_scope_type=scope_type,
+            visibility_scope_id=scope_id,
+            status="pending",
+            display_name=display_name or f"{normalized_slug} connection",
+            metadata_json={
+                "created_from": "dashboard",
+                "dashboard_user": request.session.get(SESSION_USER_KEY),
+            },
+        )
+        session.add(connection)
+        session.flush()
+
+        callback_url = (
+            f"{request.url_for('composio_callback')}?connection_id={connection.id}"
+        )
+        client = ComposioClient(
+            api_key=runtime_settings.composio_api_key,
+            timeout_seconds=runtime_settings.composio_request_timeout_seconds,
+        )
+        try:
+            auth_config_id, auth_config_source = _resolve_composio_auth_config_id(
+                client,
+                toolkit_slug=normalized_slug,
+                override_auth_config_id=auth_config_id,
+            )
+        except (ComposioCatalogError, ComposioConnectionError) as exc:
+            session.rollback()
+            return _redirect_with_notice(
+                next_path,
+                f"Could not prepare Composio auth: {str(exc)}",
+                tone="danger",
+            )
+        connection.auth_config_id = auth_config_id
+
+        try:
+            connect_request = client.create_connect_link(
+                user_id=composio_user_id,
+                auth_config_id=auth_config_id,
+                callback_url=callback_url,
+            )
+        except ComposioConnectionError as exc:
+            session.rollback()
+            return _redirect_with_notice(
+                next_path,
+                f"Could not create Connect Link: {str(exc)}",
+                tone="danger",
+            )
+
+        connection.connection_request_id = connect_request.id
+        connection.metadata_json = {
+            **dict(connection.metadata_json or {}),
+            "auth_config_source": auth_config_source,
+            "connect_link_status": connect_request.status,
+            "redirect_url": connect_request.redirect_url,
+        }
+        session.commit()
+        return RedirectResponse(
+            url=connect_request.redirect_url,
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+
     @app.get("/composio/{toolkit_slug}", response_class=HTMLResponse)
     def composio_detail(
         request: Request,
         toolkit_slug: str,
         username: Annotated[str, Depends(require_user)],
         session: Annotated[Session, Depends(get_session)],
+        notice: Annotated[str | None, Query()] = None,
+        notice_tone: Annotated[str, Query()] = "success",
     ) -> Response:
         runtime_settings, runtime_error = _load_runtime_settings()
         detail = get_composio_toolkit_detail(
@@ -353,6 +573,8 @@ def register_routes(app: FastAPI) -> None:
                 "dashboard_user": username,
                 "detail": detail,
                 "runtime_error": runtime_error,
+                "notice": notice,
+                "notice_tone": _notice_tone(notice_tone),
             },
         )
 
@@ -482,6 +704,70 @@ def get_session(request: Request) -> Iterator[Session]:
     factory = cast(sessionmaker[Session], request.app.state.session_factory)
     with factory() as session:
         yield session
+
+
+def _form_value(form: dict[str, list[str]], name: str) -> str:
+    value = form.get(name, [""])[0]
+    return value.strip()
+
+
+def _resolve_composio_auth_config_id(
+    client: ComposioClient,
+    *,
+    toolkit_slug: str,
+    override_auth_config_id: str,
+) -> tuple[str, str]:
+    if override_auth_config_id:
+        return override_auth_config_id, "manual_override"
+
+    auth_configs = client.list_auth_configs(toolkit_slug=toolkit_slug)
+    for auth_config in auth_configs:
+        if auth_config.enabled:
+            return auth_config.id, "existing"
+
+    auth_config = client.create_managed_auth_config(toolkit_slug=toolkit_slug)
+    return auth_config.id, "created_managed"
+
+
+def _default_slack_owner_id(session: Session) -> str:
+    identity = session.scalar(
+        select(SlackIdentity.slack_id)
+        .where(SlackIdentity.kind == "user", SlackIdentity.is_deleted.is_(False))
+        .order_by(SlackIdentity.last_seen_at.desc(), SlackIdentity.updated_at.desc())
+        .limit(1)
+    )
+    return identity or ""
+
+
+def _installation_for_owner(
+    session: Session,
+    owner_slack_user_id: str,
+) -> Installation | None:
+    identity = session.scalar(
+        select(SlackIdentity)
+        .where(
+            SlackIdentity.kind == "user",
+            SlackIdentity.slack_id == owner_slack_user_id,
+        )
+        .order_by(SlackIdentity.last_seen_at.desc(), SlackIdentity.updated_at.desc())
+        .limit(1)
+    )
+    if identity is not None:
+        return session.get(Installation, identity.installation_id)
+    return session.scalar(select(Installation).order_by(Installation.created_at.desc()))
+
+
+def _composio_scope_id(
+    *,
+    scope_type: str,
+    owner_slack_user_id: str,
+    channel_scope_id: str,
+) -> str | None:
+    if scope_type == "workspace":
+        return None
+    if scope_type == "channel":
+        return channel_scope_id
+    return owner_slack_user_id
 
 
 def _load_runtime_settings() -> tuple[Settings | None, str | None]:

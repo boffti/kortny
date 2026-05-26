@@ -1,3 +1,5 @@
+import json
+
 import httpx
 
 from kortny.composio import ComposioClient
@@ -90,3 +92,105 @@ def test_composio_client_gets_toolkit_detail() -> None:
     assert toolkit.enabled is True
     assert toolkit.auth_guide_url == "https://composio.dev/auth/github"
     assert toolkit.base_url == "https://api.github.com"
+
+
+def test_composio_client_lists_auth_configs_for_toolkit() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v3.1/auth_configs"
+        assert request.url.params["toolkit"] == "github"
+        assert request.url.params["limit"] == "20"
+        return httpx.Response(
+            200,
+            json={
+                "items": [
+                    {
+                        "id": "ac_123",
+                        "name": "GitHub OAuth",
+                        "toolkit": {"slug": "github"},
+                        "auth_scheme": "OAUTH2",
+                        "is_composio_managed": True,
+                        "enabled": True,
+                    }
+                ]
+            },
+        )
+
+    client = ComposioClient(
+        api_key="test-key",
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    auth_configs = client.list_auth_configs(toolkit_slug="github")
+
+    assert len(auth_configs) == 1
+    assert auth_configs[0].id == "ac_123"
+    assert auth_configs[0].name == "GitHub OAuth"
+    assert auth_configs[0].toolkit_slug == "github"
+    assert auth_configs[0].auth_scheme == "OAUTH2"
+    assert auth_configs[0].is_composio_managed is True
+    assert auth_configs[0].enabled is True
+
+
+def test_composio_client_creates_managed_auth_config() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v3/auth_configs"
+        assert request.method == "POST"
+        payload = json.loads(request.read().decode())
+        assert payload["toolkit"] == {"slug": "github"}
+        assert payload["auth_config"]["type"] == "use_composio_managed_auth"
+        return httpx.Response(
+            200,
+            json={
+                "auth_config": {
+                    "id": "ac_managed",
+                    "toolkit": {"slug": "github"},
+                    "auth_scheme": "OAUTH2",
+                    "is_composio_managed": True,
+                    "enabled": True,
+                }
+            },
+        )
+
+    client = ComposioClient(
+        api_key="test-key",
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    auth_config = client.create_managed_auth_config(toolkit_slug="github")
+
+    assert auth_config.id == "ac_managed"
+    assert auth_config.toolkit_slug == "github"
+    assert auth_config.is_composio_managed is True
+
+
+def test_composio_client_creates_connect_link() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v3/connected_accounts/link"
+        assert request.method == "POST"
+        payload = json.loads(request.read().decode())
+        assert payload["user_id"] == "slack:installation:user"
+        assert payload["auth_config_id"] == "ac_123"
+        assert payload["callback_url"] == "https://kortny.example/composio/callback"
+        return httpx.Response(
+            200,
+            json={
+                "id": "conn_req_123",
+                "redirect_url": "https://connect.composio.dev/auth",
+                "status": "pending",
+            },
+        )
+
+    client = ComposioClient(
+        api_key="test-key",
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    connect_request = client.create_connect_link(
+        user_id="slack:installation:user",
+        auth_config_id="ac_123",
+        callback_url="https://kortny.example/composio/callback",
+    )
+
+    assert connect_request.id == "conn_req_123"
+    assert connect_request.redirect_url == "https://connect.composio.dev/auth"
+    assert connect_request.status == "pending"

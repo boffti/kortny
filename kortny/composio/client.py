@@ -16,6 +16,27 @@ class ComposioCatalogError(RuntimeError):
     """Raised when the Composio catalog cannot be fetched."""
 
 
+class ComposioConnectionError(RuntimeError):
+    """Raised when a Composio connection action fails."""
+
+
+@dataclass(frozen=True)
+class ComposioAuthConfig:
+    id: str
+    name: str
+    toolkit_slug: str
+    auth_scheme: str | None
+    is_composio_managed: bool
+    enabled: bool
+
+
+@dataclass(frozen=True)
+class ComposioConnectionRequest:
+    id: str
+    redirect_url: str
+    status: str
+
+
 @dataclass(frozen=True)
 class ComposioToolkit:
     slug: str
@@ -95,6 +116,70 @@ class ComposioClient:
             payload = payload["toolkit"]
         return _toolkit_from_payload(payload)
 
+    def list_auth_configs(
+        self,
+        *,
+        toolkit_slug: str,
+        limit: int = 20,
+    ) -> tuple[ComposioAuthConfig, ...]:
+        response = self._get(
+            "/api/v3.1/auth_configs",
+            params={"toolkit": toolkit_slug, "limit": limit},
+        )
+        payload = response.json()
+        items = payload.get("items") or payload.get("data") or ()
+        return tuple(_auth_config_from_payload(item) for item in items)
+
+    def create_managed_auth_config(self, *, toolkit_slug: str) -> ComposioAuthConfig:
+        response = self._post(
+            "/api/v3/auth_configs",
+            json_payload={
+                "toolkit": {"slug": toolkit_slug},
+                "auth_config": {
+                    "type": "use_composio_managed_auth",
+                    "credentials": {},
+                    "restrict_to_following_tools": [],
+                },
+            },
+        )
+        payload = response.json()
+        auth_config = payload.get("auth_config") or payload.get("data") or payload
+        if not isinstance(auth_config, dict):
+            raise ComposioConnectionError("Composio auth config response was invalid")
+        normalized_payload = dict(auth_config)
+        normalized_payload.setdefault("toolkit", toolkit_slug)
+        normalized_payload.setdefault("name", f"{toolkit_slug} managed auth")
+        normalized_payload.setdefault("is_composio_managed", True)
+        return _auth_config_from_payload(normalized_payload)
+
+    def create_connect_link(
+        self,
+        *,
+        user_id: str,
+        auth_config_id: str,
+        callback_url: str,
+    ) -> ComposioConnectionRequest:
+        response = self._post(
+            "/api/v3/connected_accounts/link",
+            json_payload={
+                "user_id": user_id,
+                "auth_config_id": auth_config_id,
+                "callback_url": callback_url,
+            },
+        )
+        payload = response.json()
+        redirect_url = _optional_str(
+            payload.get("redirect_url") or payload.get("redirectUrl")
+        )
+        request_id = _optional_str(payload.get("id") or payload.get("connection_id"))
+        if not redirect_url or not request_id:
+            raise ComposioConnectionError("Composio connect-link response was invalid")
+        return ComposioConnectionRequest(
+            id=request_id,
+            redirect_url=redirect_url,
+            status=str(payload.get("status") or "pending").lower(),
+        )
+
     def _get(self, path: str, *, params: dict[str, str | int]) -> httpx.Response:
         client = self.http_client or httpx.Client(timeout=self.timeout_seconds)
         close_client = self.http_client is None
@@ -108,6 +193,23 @@ class ComposioClient:
             return response
         except httpx.HTTPError as exc:
             raise ComposioCatalogError(str(exc)) from exc
+        finally:
+            if close_client:
+                client.close()
+
+    def _post(self, path: str, *, json_payload: dict[str, Any]) -> httpx.Response:
+        client = self.http_client or httpx.Client(timeout=self.timeout_seconds)
+        close_client = self.http_client is None
+        try:
+            response = client.post(
+                f"{self.base_url}{path}",
+                headers={"x-api-key": self.api_key},
+                json=json_payload,
+            )
+            response.raise_for_status()
+            return response
+        except httpx.HTTPError as exc:
+            raise ComposioConnectionError(str(exc)) from exc
         finally:
             if close_client:
                 client.close()
@@ -132,6 +234,32 @@ def _toolkit_from_payload(payload: dict[str, Any]) -> ComposioToolkit:
         enabled=bool(payload.get("enabled", True)),
         no_auth=bool(payload.get("no_auth")),
         is_local_toolkit=bool(payload.get("is_local_toolkit")),
+    )
+
+
+def _auth_config_from_payload(payload: dict[str, Any]) -> ComposioAuthConfig:
+    config_id = _optional_str(
+        payload.get("id") or payload.get("nanoid") or payload.get("auth_config_id")
+    )
+    if not config_id:
+        raise ComposioConnectionError("Composio auth config is missing an id")
+    toolkit = payload.get("toolkit")
+    if isinstance(toolkit, dict):
+        toolkit_slug = _optional_str(toolkit.get("slug"))
+    else:
+        toolkit_slug = _optional_str(toolkit)
+    return ComposioAuthConfig(
+        id=config_id,
+        name=str(payload.get("name") or config_id),
+        toolkit_slug=toolkit_slug or "",
+        auth_scheme=_optional_str(payload.get("auth_scheme") or payload.get("authScheme")),
+        is_composio_managed=bool(
+            payload.get("is_composio_managed")
+            if "is_composio_managed" in payload
+            else payload.get("isComposioManaged")
+        )
+        or payload.get("type") == "use_composio_managed_auth",
+        enabled=bool(payload.get("enabled", True)),
     )
 
 

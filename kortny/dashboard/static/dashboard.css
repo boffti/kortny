@@ -1870,6 +1870,16 @@ pre {
   margin-bottom: 20px;
 }
 
+.composio-connect-section,
+.composio-full-section {
+  display: grid;
+  margin-bottom: 20px;
+}
+
+.composio-connect-section {
+  justify-items: stretch;
+}
+
 .composio-detail-main,
 .composio-setup-card,
 .scope-options-card,
@@ -1884,6 +1894,12 @@ pre {
   gap: 14px;
 }
 
+.composio-connect-card {
+  display: grid;
+  gap: 16px;
+  width: 100%;
+}
+
 .composio-kicker {
   color: var(--muted-foreground);
   display: block;
@@ -1894,11 +1910,120 @@ pre {
 }
 
 .composio-detail-head h2,
+.connect-card-header h2,
 .scope-options-card h2,
 .composio-action-card h2,
 .composio-connections-card h2,
 .composio-setup-card h2 {
   margin: 0;
+}
+
+.connect-card-header {
+  align-items: start;
+  display: flex;
+  gap: 16px;
+  justify-content: space-between;
+}
+
+.connect-card-header p {
+  margin-bottom: 0;
+  max-width: 620px;
+}
+
+.connect-card-body {
+  display: grid;
+  gap: 14px;
+}
+
+.connect-quick-form {
+  display: grid;
+  gap: 12px;
+}
+
+.connect-hero {
+  align-items: center;
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--accent-bg) 72%, var(--card)),
+    color-mix(in srgb, var(--muted) 70%, var(--card))
+  );
+  border: 1px solid var(--accent-border);
+  border-radius: var(--radius);
+  display: grid;
+  gap: 18px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  padding: 16px;
+}
+
+.connect-hero strong {
+  color: var(--foreground);
+  display: block;
+  font-size: 16px;
+  line-height: 1.25;
+}
+
+.connect-defaults {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.connect-defaults span {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--foreground);
+  font-size: 12px;
+  font-weight: 750;
+  padding: 4px 8px;
+}
+
+.connect-warning {
+  color: var(--warning);
+  font-weight: 700;
+  margin-top: 10px;
+}
+
+.connect-primary {
+  min-width: 220px;
+  min-height: 42px;
+}
+
+.connect-advanced {
+  background: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  min-width: 0;
+  padding: 0;
+}
+
+.connect-advanced > summary {
+  color: var(--foreground);
+  cursor: pointer;
+  font-weight: 800;
+  list-style: none;
+  padding: 12px 14px;
+}
+
+.connect-advanced > summary::-webkit-details-marker {
+  display: none;
+}
+
+.connect-advanced > summary::after {
+  color: var(--muted-foreground);
+  content: "Show";
+  float: right;
+  font-size: 12px;
+  text-transform: uppercase;
+}
+
+.connect-advanced[open] > summary {
+  border-bottom: 1px solid var(--border);
+}
+
+.connect-advanced[open] > summary::after {
+  content: "Hide";
 }
 
 .setup-list {
@@ -1982,6 +2107,123 @@ pre {
 
 .scope-option small {
   color: var(--warning);
+}
+
+.auth-config-list,
+.connect-form {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.connect-advanced .auth-config-list {
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  margin: 0;
+  padding: 0 14px 14px;
+}
+
+.connect-form {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin-top: 0;
+  padding: 14px;
+}
+
+.auth-config-row {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  padding: 10px 11px;
+}
+
+.auth-config-row strong {
+  color: var(--foreground);
+  display: block;
+  line-height: 1.25;
+}
+
+.auth-config-row code {
+  color: var(--muted-foreground);
+  display: block;
+  font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  margin-top: 3px;
+  overflow-wrap: anywhere;
+}
+
+.auth-config-row small {
+  color: var(--muted-foreground);
+  grid-column: 1 / -1;
+}
+
+.form-field {
+  color: var(--muted-foreground);
+  display: grid;
+  font-size: 12px;
+  font-weight: 800;
+  gap: 6px;
+  text-transform: uppercase;
+}
+
+.form-field .input,
+.connect-form .input {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--foreground);
+  font: inherit;
+  min-height: 36px;
+  padding: 7px 10px;
+  text-transform: none;
+}
+
+.scope-fieldset {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  display: grid;
+  gap: 8px;
+  grid-column: 1 / -1;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: 0;
+  padding: 12px;
+}
+
+.scope-fieldset legend {
+  color: var(--muted-foreground);
+  font-size: 12px;
+  font-weight: 800;
+  padding: 0 4px;
+  text-transform: uppercase;
+}
+
+.scope-fieldset label {
+  align-items: center;
+  background: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--foreground);
+  display: flex;
+  font-size: 13px;
+  font-weight: 750;
+  gap: 7px;
+  min-height: 34px;
+  padding: 6px 8px;
+}
+
+.connect-actions {
+  align-items: center;
+  border-top: 1px solid var(--border);
+  display: flex;
+  grid-column: 1 / -1;
+  justify-content: flex-end;
+  margin: 2px -14px -14px;
+  padding: 12px 14px 14px;
+}
+
+.connect-submit {
+  min-width: 190px;
+  width: auto;
 }
 
 .composio-connections-card {
@@ -2508,11 +2750,31 @@ pre {
   .catalog-grid,
   .composio-card-grid,
   .composio-detail-grid,
+  .connect-hero,
+  .connect-form,
   .scope-option-grid,
+  .scope-fieldset,
   .connection-row,
   .tool-card-grid,
   .tool-details-panel {
     grid-template-columns: 1fr;
+  }
+
+  .connect-card-header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .connect-actions {
+    justify-content: stretch;
+  }
+
+  .connect-submit {
+    width: 100%;
+  }
+
+  .connect-primary {
+    width: 100%;
   }
 
   .catalog-search {

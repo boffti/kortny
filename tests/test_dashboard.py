@@ -12,6 +12,7 @@ from httpx import Response
 from sqlalchemy import Engine, delete, select
 from sqlalchemy.orm import Session
 
+from kortny.composio import ComposioAuthConfig, ComposioConnectionRequest
 from kortny.dashboard.app import create_app
 from kortny.dashboard.settings import DashboardSettings
 from kortny.db.models import (
@@ -268,8 +269,134 @@ def test_dashboard_composio_detail_renders_scope_preview(
     assert "Personal" in response.text
     assert "Channel" in response.text
     assert "Workspace" in response.text
-    assert "Connect flow pending" in response.text
+    assert "Connect Account" in response.text
+    assert "Hosted Composio authorization" in response.text
+    assert "Connect github" in response.text
     assert "composio-dashboard-secret" not in response.text
+
+
+def test_dashboard_composio_connect_creates_pending_connection(
+    client: tuple[TestClient, Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    test_client, session = client
+    task = create_dashboard_task(session)
+    set_runtime_settings_env(monkeypatch)
+    monkeypatch.setenv("COMPOSIO_API_KEY", "composio-dashboard-secret")
+
+    class FakeComposioClient:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def list_auth_configs(
+            self,
+            *,
+            toolkit_slug: str,
+            limit: int = 20,
+        ) -> tuple[ComposioAuthConfig, ...]:
+            assert toolkit_slug == "github"
+            assert limit == 20
+            return (
+                ComposioAuthConfig(
+                    id="ac_123",
+                    name="GitHub OAuth",
+                    toolkit_slug="github",
+                    auth_scheme="OAUTH2",
+                    is_composio_managed=True,
+                    enabled=True,
+                ),
+            )
+
+        def create_connect_link(
+            self,
+            *,
+            user_id: str,
+            auth_config_id: str,
+            callback_url: str,
+        ) -> ComposioConnectionRequest:
+            assert user_id == f"slack:{task.installation_id}:UCost"
+            assert auth_config_id == "ac_123"
+            assert callback_url.startswith("http://testserver/composio/callback")
+            return ComposioConnectionRequest(
+                id="conn_req_123",
+                redirect_url="https://connect.composio.dev/auth",
+                status="pending",
+            )
+
+    monkeypatch.setattr("kortny.dashboard.app.ComposioClient", FakeComposioClient)
+    login(test_client)
+
+    response = test_client.post(
+        "/composio/github/connect",
+        data={
+            "visibility_scope_type": "user",
+            "display_name": "GitHub personal",
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "https://connect.composio.dev/auth"
+    connection = session.scalar(
+        select(ComposioConnection).where(
+            ComposioConnection.toolkit_slug == "github",
+            ComposioConnection.auth_config_id == "ac_123",
+        )
+    )
+    assert connection is not None
+    assert connection.installation_id == task.installation_id
+    assert connection.owner_slack_user_id == "UCost"
+    assert connection.visibility_scope_type == "user"
+    assert connection.visibility_scope_id == "UCost"
+    assert connection.status == "pending"
+    assert connection.connection_request_id == "conn_req_123"
+    assert connection.composio_user_id == f"slack:{task.installation_id}:UCost"
+    assert connection.metadata_json["auth_config_source"] == "existing"
+    assert connection.metadata_json["connect_link_status"] == "pending"
+
+
+def test_dashboard_composio_callback_marks_connection_active(
+    client: tuple[TestClient, Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    test_client, session = client
+    task = create_dashboard_task(session)
+    set_runtime_settings_env(monkeypatch)
+    monkeypatch.setenv("COMPOSIO_API_KEY", "composio-dashboard-secret")
+    connection = ComposioConnection(
+        installation_id=task.installation_id,
+        toolkit_slug="github",
+        auth_config_id="ac_123",
+        connection_request_id="conn_req_123",
+        composio_user_id=f"slack:{task.installation_id}:UCost",
+        owner_slack_user_id="UCost",
+        visibility_scope_type="user",
+        visibility_scope_id="UCost",
+        status="pending",
+        display_name="GitHub personal",
+        metadata_json={},
+    )
+    session.add(connection)
+    session.commit()
+    connection_id = connection.id
+    login(test_client)
+
+    response = test_client.get(
+        "/composio/callback"
+        f"?connection_id={connection_id}"
+        "&status=success"
+        "&connected_account_id=ca_123",
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert response.headers["location"].startswith("/composio/github?")
+    session.expire_all()
+    updated = session.get(ComposioConnection, connection_id)
+    assert updated is not None
+    assert updated.status == "active"
+    assert updated.connected_account_id == "ca_123"
+    assert updated.metadata_json["callback"]["status"] == "success"
 
 
 def test_dashboard_integrations_page_marks_missing_optional_search(
@@ -748,6 +875,7 @@ def set_runtime_settings_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SLACK_APP_TOKEN", "xapp-dashboard-secret")
     monkeypatch.setenv("SLACK_SIGNING_SECRET", "dashboard-signing-secret")
     monkeypatch.setenv("SLACK_APP_NAME", "kortny")
+    monkeypatch.setenv("COMPOSIO_CATALOG_ENABLED", "false")
     monkeypatch.setenv("LLM_PROVIDER", "openrouter")
     monkeypatch.setenv("LLM_API_KEY", "llm-dashboard-secret")
     monkeypatch.setenv("LLM_MODEL", "openai/gpt-5.4-mini")

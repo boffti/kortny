@@ -19,8 +19,10 @@ from sqlalchemy.orm import Session
 from sqlalchemy.sql.elements import ColumnElement
 
 from kortny.composio import (
+    ComposioAuthConfig,
     ComposioCatalogError,
     ComposioClient,
+    ComposioConnectionError,
     ComposioToolkit,
 )
 from kortny.config import Settings
@@ -485,6 +487,28 @@ class ComposioConnectionRow:
 
 
 @dataclass(frozen=True)
+class ComposioAuthConfigRow:
+    id: str
+    name: str
+    toolkit_slug: str
+    auth_scheme: str | None
+    is_composio_managed: bool
+    enabled: bool
+
+    @property
+    def managed_label(self) -> str:
+        return "Composio managed" if self.is_composio_managed else "Custom"
+
+    @property
+    def status_label(self) -> str:
+        return "Enabled" if self.enabled else "Disabled"
+
+    @property
+    def tone(self) -> str:
+        return "success" if self.enabled else "neutral"
+
+
+@dataclass(frozen=True)
 class ComposioCatalogView:
     enabled: bool
     configured: bool
@@ -517,8 +541,11 @@ class ComposioToolkitDetail:
     tone: str
     toolkit: ComposioToolkitRow | None
     raw_toolkit: ComposioToolkit | None
+    auth_configs: tuple[ComposioAuthConfigRow, ...]
     connections: tuple[ComposioConnectionRow, ...]
     scope_options: tuple[ComposioScopeOption, ...]
+    user_options: tuple[IdentityLabel, ...]
+    channel_options: tuple[IdentityLabel, ...]
     error: str | None
 
 
@@ -1303,6 +1330,8 @@ def get_composio_toolkit_detail(
         for connection in _composio_connection_rows(session)
         if connection.toolkit_slug == normalized_slug
     )
+    user_options = _slack_identity_options(session, kind="user")
+    channel_options = _slack_identity_options(session, kind="channel")
     if runtime_settings is None or not runtime_settings.composio_api_key:
         return ComposioToolkitDetail(
             slug=normalized_slug,
@@ -1311,8 +1340,11 @@ def get_composio_toolkit_detail(
             tone="neutral",
             toolkit=None,
             raw_toolkit=None,
+            auth_configs=(),
             connections=connections,
             scope_options=_composio_scope_options(),
+            user_options=user_options,
+            channel_options=channel_options,
             error=None,
         )
     if not runtime_settings.composio_catalog_enabled:
@@ -1323,8 +1355,11 @@ def get_composio_toolkit_detail(
             tone="warning",
             toolkit=None,
             raw_toolkit=None,
+            auth_configs=(),
             connections=connections,
             scope_options=_composio_scope_options(),
+            user_options=user_options,
+            channel_options=channel_options,
             error="COMPOSIO_CATALOG_ENABLED is false.",
         )
 
@@ -1342,10 +1377,23 @@ def get_composio_toolkit_detail(
             tone="danger",
             toolkit=None,
             raw_toolkit=None,
+            auth_configs=(),
             connections=connections,
             scope_options=_composio_scope_options(),
+            user_options=user_options,
+            channel_options=channel_options,
             error=_short_error(str(exc)),
         )
+    auth_configs: tuple[ComposioAuthConfigRow, ...] = ()
+    auth_config_error = None
+    try:
+        auth_configs = tuple(
+            _composio_auth_config_row(auth_config)
+            for auth_config in client.list_auth_configs(toolkit_slug=normalized_slug)
+        )
+    except (ComposioCatalogError, ComposioConnectionError) as exc:
+        auth_config_error = f"Auth configs unavailable: {_short_error(str(exc))}"
+
     status_map = _composio_status_by_toolkit(connections)
     return ComposioToolkitDetail(
         slug=normalized_slug,
@@ -1354,9 +1402,12 @@ def get_composio_toolkit_detail(
         tone="success" if status_map.get(toolkit.slug) == "active" else "neutral",
         toolkit=_composio_toolkit_row(toolkit, status_map),
         raw_toolkit=toolkit,
+        auth_configs=auth_configs,
         connections=connections,
         scope_options=_composio_scope_options(),
-        error=None,
+        user_options=user_options,
+        channel_options=channel_options,
+        error=auth_config_error,
     )
 
 
@@ -2003,6 +2054,49 @@ def _composio_connection_row(
         auth_config_id=row.auth_config_id,
         updated_at=row.updated_at,
     )
+
+
+def _composio_auth_config_row(auth_config: ComposioAuthConfig) -> ComposioAuthConfigRow:
+    return ComposioAuthConfigRow(
+        id=auth_config.id,
+        name=auth_config.name,
+        toolkit_slug=auth_config.toolkit_slug,
+        auth_scheme=auth_config.auth_scheme,
+        is_composio_managed=auth_config.is_composio_managed,
+        enabled=auth_config.enabled,
+    )
+
+
+def _slack_identity_options(
+    session: Session,
+    *,
+    kind: str,
+) -> tuple[IdentityLabel, ...]:
+    rows = tuple(
+        session.scalars(
+            select(SlackIdentity)
+            .where(SlackIdentity.kind == kind)
+            .order_by(
+                SlackIdentity.display_name.asc(),
+                SlackIdentity.slack_id.asc(),
+                SlackIdentity.updated_at.desc(),
+            )
+        )
+    )
+    options: list[IdentityLabel] = []
+    seen: set[str] = set()
+    for row in rows:
+        if row.slack_id in seen:
+            continue
+        seen.add(row.slack_id)
+        options.append(
+            IdentityLabel(
+                name=row.display_name or row.raw_name or row.slack_id,
+                slack_id=row.slack_id,
+                found=True,
+            )
+        )
+    return tuple(options)
 
 
 def _composio_scope_label(

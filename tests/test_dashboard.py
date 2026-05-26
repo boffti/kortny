@@ -42,9 +42,9 @@ from kortny.db.models import (
     WorkspaceState,
 )
 from kortny.db.session import make_engine, make_session_factory, normalize_database_url
+from tests.db_safety import assert_safe_test_database
 
 TEST_POSTGRES_URL = os.environ.get("KORTNY_TEST_POSTGRES_URL")
-ALLOW_DESTRUCTIVE_TEST_DB = os.environ.get("KORTNY_ALLOW_DESTRUCTIVE_TEST_DB") == "1"
 
 pytestmark = pytest.mark.skipif(
     TEST_POSTGRES_URL is None,
@@ -55,7 +55,7 @@ pytestmark = pytest.mark.skipif(
 @pytest.fixture(scope="session")
 def engine() -> Iterator[Engine]:
     assert TEST_POSTGRES_URL is not None
-    assert_safe_dashboard_test_database(TEST_POSTGRES_URL)
+    assert_safe_test_database(TEST_POSTGRES_URL)
 
     config = Config("alembic.ini")
     config.set_main_option("sqlalchemy.url", normalize_database_url(TEST_POSTGRES_URL))
@@ -1792,26 +1792,6 @@ def slack_dashboard_settings() -> DashboardSettings:
         slack_client_secret="slack-secret",
         slack_redirect_uri="http://testserver/auth/slack/callback",
     )
-
-
-def assert_safe_dashboard_test_database(database_url: str) -> None:
-    parsed = urlsplit(database_url)
-    hostname = parsed.hostname or ""
-    port = parsed.port or 5432
-    database_name = parsed.path.lstrip("/")
-    is_default_local_dev_db = (
-        hostname in {"localhost", "127.0.0.1", "::1"}
-        and port == 5432
-        and database_name == "kortny"
-    )
-    if is_default_local_dev_db and not ALLOW_DESTRUCTIVE_TEST_DB:
-        pytest.fail(
-            "Refusing to run destructive dashboard integration tests against "
-            "the default local dev database. Use a dedicated test database, "
-            "for example postgresql://kortny:kortny@localhost:5432/kortny_test, "
-            "or set KORTNY_ALLOW_DESTRUCTIVE_TEST_DB=1 if this is intentional.",
-            pytrace=False,
-        )
 
 
 def set_runtime_settings_env(monkeypatch: pytest.MonkeyPatch) -> None:

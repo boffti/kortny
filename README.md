@@ -159,9 +159,13 @@ docker compose exec postgres createdb -U kortny kortny_test
 KORTNY_TEST_POSTGRES_URL=postgresql://kortny:kortny@localhost:5432/kortny_test uv run pytest tests/test_task_service.py tests/test_queue.py
 ```
 
-Use a dedicated test database for integration tests. Some dashboard tests
-perform destructive cleanup and will refuse to run against the default
-`localhost:5432/kortny` development database unless explicitly overridden.
+Use a dedicated test database for integration tests. DB-backed tests perform
+destructive cleanup and the test harness refuses to run when
+`KORTNY_TEST_POSTGRES_URL` points at the default `localhost:5432/kortny`
+development database. Use a database name that starts with `test_` or ends with
+`_test`, such as `kortny_test`. The harness also refuses to run if
+`KORTNY_TEST_POSTGRES_URL` points at the same database target as `POSTGRES_URL`,
+or if `KORTNY_ENV`, `APP_ENV`, or `ENVIRONMENT` is set to `prod`/`production`.
 
 To process at most one pending task from your host shell:
 

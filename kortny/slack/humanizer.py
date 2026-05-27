@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Protocol
 
@@ -22,6 +22,11 @@ from kortny.llm import (
     ModelRouter,
     ModelRouteTier,
     create_llm_provider,
+)
+from kortny.skills import (
+    RESPONSE_HUMANIZER_INVOCATION,
+    SkillActivation,
+    SkillRegistryService,
 )
 from kortny.slack.formatting import normalize_slack_mrkdwn
 from kortny.tasks import TaskService
@@ -172,6 +177,30 @@ class ResponseFailure:
 
 
 @dataclass(frozen=True, slots=True)
+class ResponseSkill:
+    """Procedural skill selected for response synthesis."""
+
+    slug: str
+    name: str
+    version: str
+    owner_type: str
+    trust_level: str
+    selected_reason: str
+    instructions_md: str
+
+    def to_payload(self) -> JsonObject:
+        return {
+            "slug": self.slug,
+            "name": self.name,
+            "version": self.version,
+            "owner_type": self.owner_type,
+            "trust_level": self.trust_level,
+            "selected_reason": self.selected_reason,
+            "instructions_md": self.instructions_md,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class ResponseRecord:
     """Typed terminal response contract for the Slack humanizer."""
 
@@ -187,6 +216,7 @@ class ResponseRecord:
     failures: list[ResponseFailure]
     uncertainties: list[str]
     suggested_next_actions: list[str]
+    procedural_skills: list[ResponseSkill]
 
     def to_payload(self) -> JsonObject:
         return {
@@ -205,6 +235,9 @@ class ResponseRecord:
             "failures": [failure.to_payload() for failure in self.failures],
             "uncertainties": self.uncertainties,
             "suggested_next_actions": self.suggested_next_actions,
+            "procedural_skills": [
+                skill.to_payload() for skill in self.procedural_skills
+            ],
         }
 
     def summary_payload(self) -> JsonObject:
@@ -219,6 +252,10 @@ class ResponseRecord:
             "failure_count": len(self.failures),
             "uncertainty_count": len(self.uncertainties),
             "suggested_next_action_count": len(self.suggested_next_actions),
+            "procedural_skill_count": len(self.procedural_skills),
+            "procedural_skill_slugs": [
+                skill.slug for skill in self.procedural_skills
+            ],
         }
 
 
@@ -248,6 +285,8 @@ class ResponseSynthesizer(Protocol):
 class StaticResponseSynthesizer:
     """Deterministic fallback that only normalizes Slack mrkdwn."""
 
+    uses_procedural_skills = False
+
     def synthesize(
         self,
         *,
@@ -268,6 +307,8 @@ class StaticResponseSynthesizer:
 
 class LLMResponseSynthesizer:
     """LLM-backed final response synthesizer."""
+
+    uses_procedural_skills = True
 
     def __init__(
         self,
@@ -359,6 +400,19 @@ def synthesize_response(
         task=task,
         raw_text=raw_text,
     )
+    if getattr(synthesizer, "uses_procedural_skills", False):
+        activations = SkillRegistryService(
+            session,
+            task_service=task_service,
+        ).select_for_response(
+            task,
+            response_mode=response_record.response_mode.value,
+            invocation_kind=RESPONSE_HUMANIZER_INVOCATION,
+        )
+        response_record = replace(
+            response_record,
+            procedural_skills=_response_skills_from_activations(activations),
+        )
     task_service.append_event(
         task,
         TaskEventType.log,
@@ -488,6 +542,7 @@ def build_response_record(
             failures,
             artifacts,
         ),
+        procedural_skills=[],
     )
 
 
@@ -496,6 +551,23 @@ def _should_skip(response_record: ResponseRecord, *, min_chars: int) -> bool:
     if len(raw_text) < min_chars:
         return True
     return response_record.response_mode is ResponseMode.artifact_delivery
+
+
+def _response_skills_from_activations(
+    activations: Sequence[SkillActivation],
+) -> list[ResponseSkill]:
+    return [
+        ResponseSkill(
+            slug=activation.slug,
+            name=activation.name,
+            version=activation.version,
+            owner_type=activation.owner_type,
+            trust_level=activation.trust_level,
+            selected_reason=activation.selected_reason,
+            instructions_md=activation.instructions_md,
+        )
+        for activation in activations
+    ]
 
 
 def _route_tier(response_record: ResponseRecord) -> ModelRouteTier:

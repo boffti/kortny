@@ -23,6 +23,7 @@ from kortny.db.models import (
     LLMProvider,
     LLMUsage,
     ModelPricing,
+    ProceduralSkillInvocation,
     Task,
     TaskEvent,
     TaskEventType,
@@ -597,6 +598,21 @@ def test_agent_executor_humanizes_final_text_before_posting(
     response_record = json.loads(humanizer_payload)["response_record"]
     assert response_record["response_mode"] == "quick_answer"
     assert response_record["user_request"] == task.input
+    assert response_record["procedural_skills"][0]["slug"] == "slack-humanizer"
+    skill_event = next(
+        event
+        for event in events
+        if event.payload.get("message") == "procedural_skill_invoked"
+    )
+    assert skill_event.payload["slug"] == "slack-humanizer"
+    skill_invocations = list(
+        db_session.scalars(
+            select(ProceduralSkillInvocation).where(
+                ProceduralSkillInvocation.task_id == task.id
+            )
+        )
+    )
+    assert len(skill_invocations) == 1
 
 
 def test_agent_executor_builds_research_response_record_for_tool_results(
@@ -705,6 +721,7 @@ def test_agent_executor_builds_research_response_record_for_tool_results(
     assert humanizer_payload is not None
     response_record = json.loads(humanizer_payload)["response_record"]
     assert response_record["response_mode"] == "research_summary"
+    assert response_record["procedural_skills"][0]["slug"] == "slack-humanizer"
     assert response_record["actions_taken"][0]["tool"] == "web_search"
     assert response_record["evidence"][0]["urls"] == [
         "https://docs.python.org/3/library/tempfile.html"

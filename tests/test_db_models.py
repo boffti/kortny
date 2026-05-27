@@ -12,6 +12,9 @@ def test_mvp_schema_declares_all_core_tables() -> None:
         "dashboard_users",
         "dashboard_oauth_states",
         "composio_connections",
+        "procedural_skills",
+        "procedural_skill_versions",
+        "procedural_skill_invocations",
         "episodes",
         "llm_usage",
         "artifacts",
@@ -116,3 +119,41 @@ def test_composio_connection_table_has_visibility_constraints_and_indexes() -> N
         "idx_composio_connections_owner",
         "idx_composio_connections_toolkit",
     } <= index_names
+
+
+def test_procedural_skill_tables_have_scope_version_and_invocation_indexes() -> None:
+    skills = Base.metadata.tables["procedural_skills"]
+    versions = Base.metadata.tables["procedural_skill_versions"]
+    invocations = Base.metadata.tables["procedural_skill_invocations"]
+
+    skill_constraints = {constraint.name for constraint in skills.constraints}
+    skill_indexes = {index.name for index in skills.indexes}
+    version_constraints = {constraint.name for constraint in versions.constraints}
+    version_indexes = {index.name for index in versions.indexes}
+    invocation_indexes = {index.name for index in invocations.indexes}
+
+    assert {
+        "ck_procedural_skills_owner_type",
+        "ck_procedural_skills_status",
+        "ck_procedural_skills_trust_level",
+        "ck_procedural_skills_visibility",
+        "ck_procedural_skills_owner_id",
+    } <= skill_constraints
+    assert {
+        "idx_procedural_skills_unique_slug",
+        "idx_procedural_skills_catalog",
+    } <= skill_indexes
+    assert {
+        "ck_procedural_skill_versions_status",
+        "idx_procedural_skill_versions_unique",
+    } <= version_constraints
+    assert {
+        "idx_procedural_skill_versions_active",
+        "idx_procedural_skill_versions_tags",
+        "idx_procedural_skill_versions_modes",
+    } <= version_indexes
+    assert {
+        "idx_procedural_skill_invocations_task",
+        "idx_procedural_skill_invocations_skill",
+        "idx_procedural_skill_invocations_installation",
+    } <= invocation_indexes

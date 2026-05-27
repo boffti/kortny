@@ -499,6 +499,182 @@ class ComposioConnection(Base):
     )
 
 
+class ProceduralSkill(Base):
+    __tablename__ = "procedural_skills"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    slug: Mapped[str] = mapped_column(String, nullable=False)
+    owner_type: Mapped[str] = mapped_column(String, nullable=False)
+    owner_id: Mapped[str | None] = mapped_column(String)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    trust_level: Mapped[str] = mapped_column(String, nullable=False)
+    visibility: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "owner_type in ('system', 'workspace', 'user')",
+            name="ck_procedural_skills_owner_type",
+        ),
+        CheckConstraint(
+            "status in ('draft', 'active', 'deprecated', 'disabled', 'archived')",
+            name="ck_procedural_skills_status",
+        ),
+        CheckConstraint(
+            "trust_level in ('trusted', 'reviewed', 'unreviewed', 'quarantined')",
+            name="ck_procedural_skills_trust_level",
+        ),
+        CheckConstraint(
+            "visibility in ('catalog', 'explicit_only', 'disabled')",
+            name="ck_procedural_skills_visibility",
+        ),
+        CheckConstraint(
+            "(owner_type = 'system' and owner_id is null) or "
+            "(owner_type in ('workspace', 'user') and owner_id is not null)",
+            name="ck_procedural_skills_owner_id",
+        ),
+        Index(
+            "idx_procedural_skills_unique_slug",
+            "owner_type",
+            text("coalesce(owner_id, '')"),
+            "slug",
+            unique=True,
+        ),
+        Index(
+            "idx_procedural_skills_catalog",
+            "owner_type",
+            "status",
+            "visibility",
+            "slug",
+        ),
+    )
+
+
+class ProceduralSkillVersion(Base):
+    __tablename__ = "procedural_skill_versions"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    skill_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("procedural_skills.id", ondelete="CASCADE"), nullable=False
+    )
+    version: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    instructions_md: Mapped[str] = mapped_column(Text, nullable=False)
+    intent_tags: Mapped[list] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb")
+    )
+    response_modes: Mapped[list] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb")
+    )
+    trigger_phrases: Mapped[list] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb")
+    )
+    allowed_tools: Mapped[list] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb")
+    )
+    metadata_json: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    content_sha256: Mapped[str] = mapped_column(String, nullable=False)
+    created_by: Mapped[str] = mapped_column(String, nullable=False)
+    approved_by: Mapped[str | None] = mapped_column(String)
+    published_at: Mapped[datetime | None] = mapped_column(TZ)
+    created_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "status in ('draft', 'active', 'deprecated', 'archived')",
+            name="ck_procedural_skill_versions_status",
+        ),
+        UniqueConstraint(
+            "skill_id",
+            "version",
+            name="idx_procedural_skill_versions_unique",
+        ),
+        Index(
+            "idx_procedural_skill_versions_active",
+            "skill_id",
+            "status",
+            "version",
+        ),
+        Index(
+            "idx_procedural_skill_versions_tags",
+            "intent_tags",
+            postgresql_using="gin",
+        ),
+        Index(
+            "idx_procedural_skill_versions_modes",
+            "response_modes",
+            postgresql_using="gin",
+        ),
+    )
+
+
+class ProceduralSkillInvocation(Base):
+    __tablename__ = "procedural_skill_invocations"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    installation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("installations.id", ondelete="CASCADE"), nullable=False
+    )
+    task_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False
+    )
+    skill_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("procedural_skills.id", ondelete="CASCADE"), nullable=False
+    )
+    skill_version_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("procedural_skill_versions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    invocation_kind: Mapped[str] = mapped_column(String, nullable=False)
+    response_mode: Mapped[str | None] = mapped_column(String)
+    selected_reason: Mapped[str | None] = mapped_column(Text)
+    payload: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        Index(
+            "idx_procedural_skill_invocations_task",
+            "task_id",
+            "created_at",
+        ),
+        Index(
+            "idx_procedural_skill_invocations_skill",
+            "skill_id",
+            "skill_version_id",
+            "created_at",
+        ),
+        Index(
+            "idx_procedural_skill_invocations_installation",
+            "installation_id",
+            "created_at",
+        ),
+    )
+
+
 class Episode(Base):
     __tablename__ = "episodes"
 

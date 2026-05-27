@@ -9,9 +9,12 @@ def test_mvp_schema_declares_all_core_tables() -> None:
         "task_events",
         "workspace_state",
         "slack_identities",
+        "slack_channel_memberships",
         "dashboard_users",
         "dashboard_oauth_states",
         "composio_connections",
+        "observe_policies",
+        "observation_events",
         "procedural_skills",
         "procedural_skill_versions",
         "procedural_skill_invocations",
@@ -103,6 +106,24 @@ def test_slack_identity_table_has_lookup_constraints_and_indexes() -> None:
     assert {"idx_slack_identity_lookup", "idx_slack_identity_seen"} <= index_names
 
 
+def test_slack_channel_membership_table_has_presence_constraints_and_indexes() -> None:
+    memberships = Base.metadata.tables["slack_channel_memberships"]
+    constraint_names = {constraint.name for constraint in memberships.constraints}
+    index_names = {index.name for index in memberships.indexes}
+
+    assert {
+        "ck_slack_channel_memberships_status",
+        "ck_slack_channel_memberships_discovered_via",
+        "ck_slack_channel_memberships_onboarding_status",
+        "idx_slack_channel_memberships_unique",
+    } <= constraint_names
+    assert {
+        "idx_slack_channel_memberships_lookup",
+        "idx_slack_channel_memberships_status",
+        "idx_slack_channel_memberships_onboarding",
+    } <= index_names
+
+
 def test_composio_connection_table_has_visibility_constraints_and_indexes() -> None:
     connections = Base.metadata.tables["composio_connections"]
     constraint_names = {constraint.name for constraint in connections.constraints}
@@ -157,3 +178,31 @@ def test_procedural_skill_tables_have_scope_version_and_invocation_indexes() -> 
         "idx_procedural_skill_invocations_skill",
         "idx_procedural_skill_invocations_installation",
     } <= invocation_indexes
+
+
+def test_observe_tables_have_policy_and_event_constraints() -> None:
+    policies = Base.metadata.tables["observe_policies"]
+    events = Base.metadata.tables["observation_events"]
+
+    policy_constraints = {constraint.name for constraint in policies.constraints}
+    policy_indexes = {index.name for index in policies.indexes}
+    event_constraints = {constraint.name for constraint in events.constraints}
+    event_indexes = {index.name for index in events.indexes}
+
+    assert {
+        "ck_observe_policies_scope_type",
+        "ck_observe_policies_observation_status",
+        "ck_observe_policies_proactivity_status",
+        "ck_observe_policies_scope_id",
+    } <= policy_constraints
+    assert {
+        "idx_observe_policies_scope_unique",
+        "idx_observe_policies_lookup",
+    } <= policy_indexes
+    assert {"ck_observation_events_event_type"} <= event_constraints
+    assert {
+        "idx_observation_events_event_unique",
+        "idx_observation_events_channel",
+        "idx_observation_events_user",
+        "idx_observation_events_purged",
+    } <= event_indexes

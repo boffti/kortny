@@ -46,6 +46,7 @@
                 "message.channels",
                 "message.groups",
                 "message.mpim",
+                "member_joined_channel",
                 "reaction_added"
             ]
         },

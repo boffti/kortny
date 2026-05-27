@@ -349,6 +349,85 @@ class SlackIdentity(Base):
     )
 
 
+class SlackChannelMembership(Base):
+    __tablename__ = "slack_channel_memberships"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    installation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("installations.id", ondelete="CASCADE"), nullable=False
+    )
+    channel_id: Mapped[str] = mapped_column(String, nullable=False)
+    channel_name: Mapped[str | None] = mapped_column(String)
+    channel_type: Mapped[str | None] = mapped_column(String)
+    membership_status: Mapped[str] = mapped_column(
+        String, nullable=False, server_default=text("'active'")
+    )
+    discovered_via: Mapped[str] = mapped_column(String, nullable=False)
+    added_by_user_id: Mapped[str | None] = mapped_column(String)
+    first_seen_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now()
+    )
+    last_seen_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now()
+    )
+    onboarding_status: Mapped[str] = mapped_column(
+        String, nullable=False, server_default=text("'pending'")
+    )
+    onboarding_posted_at: Mapped[datetime | None] = mapped_column(TZ)
+    onboarding_message_ts: Mapped[str | None] = mapped_column(String)
+    last_event_id: Mapped[str | None] = mapped_column(String)
+    metadata_json: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "membership_status in ('active', 'left', 'unknown')",
+            name="ck_slack_channel_memberships_status",
+        ),
+        CheckConstraint(
+            "discovered_via in "
+            "('member_joined_channel', 'app_mention', 'message_observation', "
+            "'channel_history', 'manual_backfill')",
+            name="ck_slack_channel_memberships_discovered_via",
+        ),
+        CheckConstraint(
+            "onboarding_status in ('pending', 'posted', 'skipped')",
+            name="ck_slack_channel_memberships_onboarding_status",
+        ),
+        UniqueConstraint(
+            "installation_id",
+            "channel_id",
+            name="idx_slack_channel_memberships_unique",
+        ),
+        Index(
+            "idx_slack_channel_memberships_lookup",
+            "installation_id",
+            "channel_id",
+        ),
+        Index(
+            "idx_slack_channel_memberships_status",
+            "installation_id",
+            "membership_status",
+            "last_seen_at",
+        ),
+        Index(
+            "idx_slack_channel_memberships_onboarding",
+            "installation_id",
+            "onboarding_status",
+            "last_seen_at",
+        ),
+    )
+
+
 class DashboardUser(Base):
     __tablename__ = "dashboard_users"
 
@@ -496,6 +575,132 @@ class ComposioConnection(Base):
             "toolkit_slug",
             "status",
         ),
+    )
+
+
+class ObservePolicy(Base):
+    __tablename__ = "observe_policies"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    installation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("installations.id", ondelete="CASCADE"), nullable=False
+    )
+    scope_type: Mapped[str] = mapped_column(String, nullable=False)
+    scope_id: Mapped[str | None] = mapped_column(String)
+    observation_status: Mapped[str] = mapped_column(String, nullable=False)
+    proactivity_status: Mapped[str] = mapped_column(String, nullable=False)
+    retention_days: Mapped[int | None] = mapped_column(Integer)
+    quiet_hours_json: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    cooldown_seconds: Mapped[int | None] = mapped_column(Integer)
+    enabled_by_user_id: Mapped[str | None] = mapped_column(String)
+    enabled_at: Mapped[datetime | None] = mapped_column(TZ)
+    paused_by_user_id: Mapped[str | None] = mapped_column(String)
+    paused_at: Mapped[datetime | None] = mapped_column(TZ)
+    pause_reason: Mapped[str | None] = mapped_column(Text)
+    metadata_json: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "scope_type in ('workspace', 'channel', 'user')",
+            name="ck_observe_policies_scope_type",
+        ),
+        CheckConstraint(
+            "observation_status in ('off', 'passive', 'active')",
+            name="ck_observe_policies_observation_status",
+        ),
+        CheckConstraint(
+            "proactivity_status in ('off', 'digest_only', 'full')",
+            name="ck_observe_policies_proactivity_status",
+        ),
+        CheckConstraint(
+            "(scope_type = 'workspace' and scope_id is null) or "
+            "(scope_type in ('channel', 'user') and scope_id is not null)",
+            name="ck_observe_policies_scope_id",
+        ),
+        Index(
+            "idx_observe_policies_scope_unique",
+            "installation_id",
+            "scope_type",
+            text("coalesce(scope_id, '')"),
+            unique=True,
+        ),
+        Index(
+            "idx_observe_policies_lookup",
+            "installation_id",
+            "scope_type",
+            "scope_id",
+            "observation_status",
+        ),
+    )
+
+
+class ObservationEvent(Base):
+    __tablename__ = "observation_events"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    installation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("installations.id", ondelete="CASCADE"), nullable=False
+    )
+    slack_team_id: Mapped[str] = mapped_column(String, nullable=False)
+    channel_id: Mapped[str] = mapped_column(String, nullable=False)
+    user_id: Mapped[str | None] = mapped_column(String)
+    event_type: Mapped[str] = mapped_column(String, nullable=False)
+    slack_event_id: Mapped[str | None] = mapped_column(String)
+    message_ts: Mapped[str | None] = mapped_column(String)
+    thread_ts: Mapped[str | None] = mapped_column(String)
+    file_id: Mapped[str | None] = mapped_column(String)
+    raw_payload_checksum: Mapped[str] = mapped_column(String, nullable=False)
+    text_preview: Mapped[str | None] = mapped_column(Text)
+    visibility_metadata: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    observed_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now()
+    )
+    purged_at: Mapped[datetime | None] = mapped_column(TZ)
+    created_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "event_type in ('message', 'file_share', 'channel_join', 'channel_onboarding_intro')",
+            name="ck_observation_events_event_type",
+        ),
+        Index(
+            "idx_observation_events_event_unique",
+            "installation_id",
+            "slack_event_id",
+            unique=True,
+            postgresql_where=text("slack_event_id IS NOT NULL"),
+        ),
+        Index(
+            "idx_observation_events_channel",
+            "installation_id",
+            "channel_id",
+            "observed_at",
+        ),
+        Index(
+            "idx_observation_events_user",
+            "installation_id",
+            "user_id",
+            "observed_at",
+        ),
+        Index("idx_observation_events_purged", "purged_at"),
     )
 
 

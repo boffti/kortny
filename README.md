@@ -83,13 +83,17 @@ built for exactly that.
 ### 1. Create your Slack app
 
 1. Go to https://api.slack.com/apps → Create New App → From Manifest
-2. Paste the contents of `slack/manifest.json` from this repo
+2. Paste the contents of `manifest.json` from this repo
 3. Name your bot whatever you want — this is your bot, your brand
 4. Upload a custom avatar if you'd like
 5. Install the app to your workspace
 6. Copy your **Bot Token** (`xoxb-...`), **App-Level Token**
    (`xapp-...` with `connections:write` for Socket Mode), and
    **Signing Secret**
+
+If you update an existing Slack app from this repo's manifest, apply the
+manifest changes in Slack and reinstall the app to the workspace so new event
+subscriptions and scopes take effect.
 
 ### 2. Clone and configure
 

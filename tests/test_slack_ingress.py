@@ -15,6 +15,9 @@ from kortny.db.models import (
     Installation,
     LLMUsage,
     ModelPricing,
+    ObservationEvent,
+    ObservePolicy,
+    SlackChannelMembership,
     SlackIdentity,
     Task,
     TaskEvent,
@@ -30,7 +33,7 @@ from kortny.intent import (
     ModelTier,
 )
 from kortny.slack import SlackIngress, acknowledge_then_handle
-from kortny.slack.ingress import INTENT_CLASSIFIED_MESSAGE
+from kortny.slack.ingress import INTENT_CLASSIFIED_MESSAGE, is_bare_app_mention
 from kortny.slack.reactions import ACK_REACTION_ADDED_MESSAGE, ReactionChoice
 from kortny.tasks import TaskService
 
@@ -45,6 +48,7 @@ class FakeSlackClient:
         user_info: dict[str, Any] | None = None,
         channel_info: dict[str, Any] | None = None,
         identity_error: Exception | None = None,
+        auth_test: dict[str, Any] | None = None,
     ) -> None:
         self.calls: list[dict[str, Any]] = []
         self.reactions: list[dict[str, Any]] = []
@@ -53,6 +57,7 @@ class FakeSlackClient:
         self.user_info = user_info
         self.channel_info = channel_info
         self.identity_error = identity_error
+        self.auth_test_response = auth_test or {"ok": True, "user_id": "UBOT"}
 
     def chat_postMessage(
         self,
@@ -106,6 +111,10 @@ class FakeSlackClient:
         if self.channel_info is None:
             raise RuntimeError("conversations_info not configured")
         return self.channel_info
+
+    def auth_test(self) -> dict[str, Any]:
+        self.identity_calls.append({"method": "auth_test", "id": "self"})
+        return self.auth_test_response
 
 
 class FakeAcknowledgementGenerator:
@@ -195,6 +204,24 @@ def test_acknowledge_then_handle_acks_before_work() -> None:
 
     assert acknowledge_then_handle(ack, handle) == "done"
     assert calls == ["ack", "handle"]
+
+
+def test_bare_app_mention_detection_only_matches_empty_invite_mentions() -> None:
+    assert is_bare_app_mention(app_mention_event(text="<@UBOT>")) is True
+    assert is_bare_app_mention(app_mention_event(text="   <@UBOT>   ")) is True
+    assert (
+        is_bare_app_mention(app_mention_event(text="<@UBOT> summarize this channel"))
+        is False
+    )
+    assert (
+        is_bare_app_mention(
+            app_mention_event(
+                text="<@UBOT>",
+                files=[{"id": "F123", "name": "report.pdf"}],
+            )
+        )
+        is False
+    )
 
 
 @pytest.fixture(scope="session")
@@ -697,6 +724,366 @@ def test_non_dm_message_event_is_ignored_by_dm_ingress(db_session: Session) -> N
     assert client.calls == []
 
 
+def test_channel_message_observation_records_policy_gated_event(
+    db_session: Session,
+) -> None:
+    result = SlackIngress(
+        session=db_session,
+        client=FakeSlackClient(),
+    ).observe_channel_message(
+        body=message_body(event_id="EvObserveMessage"),
+        event=channel_event(
+            text="Aneesh is discussing a weekly reporting workflow with <@U999>."
+        ),
+    )
+    db_session.commit()
+
+    policy = db_session.scalar(select(ObservePolicy))
+    observation = db_session.scalar(select(ObservationEvent))
+    membership = db_session.scalar(select(SlackChannelMembership))
+    task_count = db_session.scalar(select(func.count()).select_from(Task))
+
+    assert result.observed is True
+    assert result.reason == "observed"
+    assert policy is not None
+    assert policy.scope_type == "channel"
+    assert policy.scope_id == "C123"
+    assert policy.observation_status == "active"
+    assert policy.proactivity_status == "digest_only"
+    assert observation is not None
+    assert observation.event_type == "message"
+    assert observation.slack_event_id == "EvObserveMessage"
+    assert observation.channel_id == "C123"
+    assert observation.user_id == "U123"
+    assert observation.text_preview == (
+        "Aneesh is discussing a weekly reporting workflow with <@user>."
+    )
+    assert observation.raw_payload_checksum
+    assert membership is not None
+    assert membership.channel_id == "C123"
+    assert membership.membership_status == "active"
+    assert membership.discovered_via == "message_observation"
+    assert membership.onboarding_status == "pending"
+    assert membership.last_event_id == "EvObserveMessage"
+    assert task_count == 0
+
+
+def test_channel_observation_skips_dm_events(db_session: Session) -> None:
+    result = SlackIngress(
+        session=db_session,
+        client=FakeSlackClient(),
+    ).observe_channel_message(
+        body=message_body(event_id="EvObserveDm"),
+        event=dm_event(text="private DM with Kortny"),
+    )
+    db_session.commit()
+
+    observation_count = db_session.scalar(
+        select(func.count()).select_from(ObservationEvent)
+    )
+    policy_count = db_session.scalar(select(func.count()).select_from(ObservePolicy))
+
+    assert result.observed is False
+    assert result.reason == "dm_excluded"
+    assert observation_count == 0
+    assert policy_count == 0
+
+
+def test_channel_observation_skips_bot_authored_messages(db_session: Session) -> None:
+    result = SlackIngress(
+        session=db_session,
+        client=FakeSlackClient(),
+    ).observe_channel_message(
+        body=message_body(event_id="EvObserveBot"),
+        event=channel_event(text="bot output", bot_id="B123"),
+    )
+    db_session.commit()
+
+    observation_count = db_session.scalar(
+        select(func.count()).select_from(ObservationEvent)
+    )
+
+    assert result.observed is False
+    assert result.reason == "bot_message"
+    assert observation_count == 0
+
+
+def test_channel_observation_respects_paused_policy(db_session: Session) -> None:
+    installation = create_installation(db_session, slack_team_id="T123")
+    db_session.add(
+        ObservePolicy(
+            installation_id=installation.id,
+            scope_type="channel",
+            scope_id="C123",
+            observation_status="off",
+            proactivity_status="off",
+            retention_days=30,
+            metadata_json={"test": True},
+        )
+    )
+    db_session.commit()
+
+    result = SlackIngress(
+        session=db_session,
+        client=FakeSlackClient(),
+    ).observe_channel_message(
+        body=message_body(event_id="EvObservePaused"),
+        event=channel_event(text="should not be observed"),
+    )
+    db_session.commit()
+
+    observation_count = db_session.scalar(
+        select(func.count()).select_from(ObservationEvent)
+    )
+
+    assert result.observed is False
+    assert result.reason == "policy_disabled"
+    assert observation_count == 0
+
+
+def test_member_joined_channel_records_onboarding_and_posts_intro(
+    db_session: Session,
+) -> None:
+    client = FakeSlackClient(auth_test={"ok": True, "user_id": "UBOT"})
+    ingress = SlackIngress(session=db_session, client=client)
+
+    result = ingress.handle_member_joined_channel(
+        body=member_joined_body(event_id="EvObserveJoin"),
+        event=member_joined_event(user="UBOT", channel="C123", inviter="U123"),
+    )
+    duplicate = ingress.handle_member_joined_channel(
+        body=member_joined_body(event_id="EvObserveJoin"),
+        event=member_joined_event(user="UBOT", channel="C123", inviter="U123"),
+    )
+    db_session.commit()
+
+    installation = db_session.scalar(select(Installation))
+    policy = db_session.scalar(select(ObservePolicy))
+    membership = db_session.scalar(select(SlackChannelMembership))
+    observations = list(
+        db_session.scalars(
+            select(ObservationEvent).order_by(ObservationEvent.event_type)
+        )
+    )
+
+    assert result.observed is True
+    assert result.intro_text is not None
+    assert duplicate.observed is False
+    assert duplicate.reason == "duplicate"
+    assert installation is not None
+    assert installation.bot_user_id == "UBOT"
+    assert policy is not None
+    assert policy.scope_type == "channel"
+    assert policy.scope_id == "C123"
+    assert policy.metadata_json.get("onboarding_intro_posted_at")
+    assert membership is not None
+    assert membership.channel_id == "C123"
+    assert membership.membership_status == "active"
+    assert membership.discovered_via == "member_joined_channel"
+    assert membership.added_by_user_id == "U123"
+    assert membership.onboarding_status == "posted"
+    assert membership.onboarding_message_ts == "1716400000.000001"
+    assert membership.last_event_id == "EvObserveJoin"
+    assert [event.event_type for event in observations] == [
+        "channel_join",
+        "channel_onboarding_intro",
+    ]
+    assert client.calls == [
+        {
+            "channel": "C123",
+            "text": result.intro_text,
+            "thread_ts": None,
+        }
+    ]
+
+
+def test_member_joined_channel_resolves_bot_from_authorization_when_auth_test_lacks_user_id(
+    db_session: Session,
+) -> None:
+    client = FakeSlackClient(auth_test={"ok": True})
+
+    result = SlackIngress(
+        session=db_session,
+        client=client,
+    ).handle_member_joined_channel(
+        body=member_joined_body(
+            event_id="EvObserveJoinAuthFallback",
+            authorizations=[{"user_id": "UBOT_FROM_EVENT", "is_bot": True}],
+        ),
+        event=member_joined_event(user="UBOT_FROM_EVENT", channel="C123"),
+    )
+    db_session.commit()
+
+    installation = db_session.scalar(select(Installation))
+    policy = db_session.scalar(select(ObservePolicy))
+
+    assert result.observed is True
+    assert result.intro_text is not None
+    assert installation is not None
+    assert installation.bot_user_id == "UBOT_FROM_EVENT"
+    assert policy is not None
+    assert policy.scope_id == "C123"
+    assert client.calls == [
+        {
+            "channel": "C123",
+            "text": result.intro_text,
+            "thread_ts": None,
+        }
+    ]
+
+
+def test_member_joined_channel_resolves_bot_from_users_info_when_auth_test_lacks_user_id(
+    db_session: Session,
+) -> None:
+    client = FakeSlackClient(
+        auth_test={"ok": True},
+        user_info={
+            "ok": True,
+            "user": {
+                "id": "UBOT_FROM_USERS_INFO",
+                "name": "kortny",
+                "is_bot": True,
+            },
+        },
+    )
+
+    result = SlackIngress(
+        session=db_session,
+        client=client,
+    ).handle_member_joined_channel(
+        body=member_joined_body(event_id="EvObserveJoinUsersInfoFallback"),
+        event=member_joined_event(user="UBOT_FROM_USERS_INFO", channel="C123"),
+    )
+    db_session.commit()
+
+    installation = db_session.scalar(select(Installation))
+    membership = db_session.scalar(select(SlackChannelMembership))
+
+    assert result.observed is True
+    assert result.intro_text is not None
+    assert installation is not None
+    assert installation.bot_user_id == "UBOT_FROM_USERS_INFO"
+    assert membership is not None
+    assert membership.discovered_via == "member_joined_channel"
+    assert membership.onboarding_status == "posted"
+    assert client.identity_calls == [
+        {"method": "auth_test", "id": "self"},
+        {"method": "users_info", "id": "UBOT_FROM_USERS_INFO"},
+    ]
+
+
+def test_member_joined_channel_skips_unverified_joined_user_when_auth_test_lacks_user_id(
+    db_session: Session,
+) -> None:
+    client = FakeSlackClient(auth_test={"ok": True})
+
+    result = SlackIngress(
+        session=db_session,
+        client=client,
+    ).handle_member_joined_channel(
+        body=member_joined_body(event_id="EvObserveJoinUnverified"),
+        event=member_joined_event(user="UBOT_FROM_EVENT", channel="C123"),
+    )
+    db_session.commit()
+
+    installation = db_session.scalar(select(Installation))
+    policy_count = db_session.scalar(select(func.count()).select_from(ObservePolicy))
+    membership_count = db_session.scalar(
+        select(func.count()).select_from(SlackChannelMembership)
+    )
+
+    assert result.observed is False
+    assert result.reason == "bot_user_unresolved"
+    assert installation is not None
+    assert installation.bot_user_id is None
+    assert policy_count == 0
+    assert membership_count == 0
+    assert client.calls == []
+
+
+def test_app_mention_can_trigger_channel_onboarding_when_join_event_missing(
+    db_session: Session,
+) -> None:
+    client = FakeSlackClient(auth_test={"ok": True, "user_id": "UBOT"})
+    ingress = SlackIngress(session=db_session, client=client)
+    body = app_mention_body(event_id="EvImplicitJoin")
+    event = app_mention_event(text="<@UBOT> hi")
+
+    result = ingress.ensure_channel_onboarding_from_mention(body=body, event=event)
+    duplicate = ingress.ensure_channel_onboarding_from_mention(body=body, event=event)
+    db_session.commit()
+
+    installation = db_session.scalar(select(Installation))
+    policy = db_session.scalar(select(ObservePolicy))
+    membership = db_session.scalar(select(SlackChannelMembership))
+    observations = list(
+        db_session.scalars(
+            select(ObservationEvent).order_by(ObservationEvent.event_type)
+        )
+    )
+
+    assert result.observed is True
+    assert result.intro_text is not None
+    assert duplicate.observed is False
+    assert duplicate.reason == "intro_already_posted"
+    assert installation is not None
+    assert installation.bot_user_id == "UBOT"
+    assert policy is not None
+    assert policy.scope_type == "channel"
+    assert policy.scope_id == "C123"
+    assert policy.enabled_by_user_id == "U123"
+    assert policy.metadata_json.get("onboarding_intro_posted_at")
+    assert membership is not None
+    assert membership.channel_id == "C123"
+    assert membership.membership_status == "active"
+    assert membership.discovered_via == "app_mention"
+    assert membership.added_by_user_id == "U123"
+    assert membership.onboarding_status == "posted"
+    assert membership.onboarding_message_ts == "1716400000.000001"
+    assert [event.event_type for event in observations] == [
+        "channel_join",
+        "channel_onboarding_intro",
+    ]
+    assert observations[0].slack_event_id == (
+        "EvImplicitJoin:implicit_channel_activation"
+    )
+    assert observations[0].visibility_metadata["activation_source"] == "app_mention"
+    assert client.calls == [
+        {
+            "channel": "C123",
+            "text": result.intro_text,
+            "thread_ts": None,
+        }
+    ]
+
+
+def test_member_joined_channel_ignores_non_bot_joins(db_session: Session) -> None:
+    client = FakeSlackClient(auth_test={"ok": True, "user_id": "UBOT"})
+
+    result = SlackIngress(
+        session=db_session,
+        client=client,
+    ).handle_member_joined_channel(
+        body=member_joined_body(event_id="EvObserveJoinUser"),
+        event=member_joined_event(user="U999", channel="C123", inviter="U123"),
+    )
+    db_session.commit()
+
+    observation_count = db_session.scalar(
+        select(func.count()).select_from(ObservationEvent)
+    )
+    policy_count = db_session.scalar(select(func.count()).select_from(ObservePolicy))
+    membership_count = db_session.scalar(
+        select(func.count()).select_from(SlackChannelMembership)
+    )
+
+    assert result.observed is False
+    assert result.reason == "not_bot_join"
+    assert observation_count == 0
+    assert policy_count == 0
+    assert membership_count == 0
+
+
 def test_soft_channel_message_creates_task_after_high_confidence_intent(
     db_session: Session,
 ) -> None:
@@ -1162,6 +1549,9 @@ def cleanup_database(session: Session) -> None:
         TaskEvent,
         Task,
         ModelPricing,
+        ObservationEvent,
+        ObservePolicy,
+        SlackChannelMembership,
         SlackIdentity,
         EncryptedSecret,
         Installation,
@@ -1169,8 +1559,12 @@ def cleanup_database(session: Session) -> None:
         session.execute(delete(model))
 
 
-def create_installation(session: Session) -> Installation:
-    installation = Installation(slack_team_id=f"T{uuid.uuid4().hex}")
+def create_installation(
+    session: Session,
+    *,
+    slack_team_id: str | None = None,
+) -> Installation:
+    installation = Installation(slack_team_id=slack_team_id or f"T{uuid.uuid4().hex}")
     session.add(installation)
     session.flush()
     return installation
@@ -1219,6 +1613,20 @@ def message_body(*, event_id: str | None = None) -> dict[str, Any]:
         "event_id": event_id or f"Ev{uuid.uuid4().hex}",
         "team_id": "T123",
     }
+
+
+def member_joined_body(
+    *,
+    event_id: str | None = None,
+    authorizations: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    body: dict[str, Any] = {
+        "event_id": event_id or f"Ev{uuid.uuid4().hex}",
+        "team_id": "T123",
+    }
+    if authorizations is not None:
+        body["authorizations"] = authorizations
+    return body
 
 
 def app_mention_event(
@@ -1293,6 +1701,23 @@ def channel_event(
         event["subtype"] = subtype
     if bot_id is not None:
         event["bot_id"] = bot_id
+    return event
+
+
+def member_joined_event(
+    *,
+    user: str = "UBOT",
+    channel: str = "C123",
+    inviter: str | None = "U123",
+) -> dict[str, Any]:
+    event: dict[str, Any] = {
+        "type": "member_joined_channel",
+        "channel": channel,
+        "user": user,
+        "team": "T123",
+    }
+    if inviter is not None:
+        event["inviter"] = inviter
     return event
 
 

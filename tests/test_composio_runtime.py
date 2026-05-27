@@ -17,7 +17,13 @@ from kortny.composio import (
 )
 from kortny.config.settings import LLMProvider as SettingsLLMProvider
 from kortny.config.settings import Settings
-from kortny.db.models import ComposioConnection, Installation, Task, TaskEvent
+from kortny.db.models import (
+    ComposioConnection,
+    Installation,
+    Task,
+    TaskEvent,
+    TaskEventType,
+)
 from kortny.db.session import make_engine, make_session_factory, normalize_database_url
 from kortny.tasks import TaskService
 from kortny.tool_selection import ToolCard, ToolSelection, ToolSelectionResult
@@ -391,6 +397,67 @@ def test_worker_registry_exposes_required_fields_for_exact_composio_tool(
         tool.invoke({"page_size": 10})
     assert exc_info.value.code == "missing_required_arguments"
     assert composio_client.calls == []
+
+
+def test_worker_registry_skips_composio_catalog_for_ignored_intent(
+    db_session: Session,
+    tmp_path: Path,
+) -> None:
+    task = create_task(db_session, slack_channel_id="CGreeting", slack_user_id="UAneesh")
+    task.input = "hey whats up"
+    add_connection(
+        db_session,
+        task,
+        connected_account_id="ca_firecrawl",
+        scope_type="user",
+        scope_id="UAneesh",
+    )
+    task_service = TaskService(db_session)
+    task_service.append_event(
+        task,
+        TaskEventType.log,
+        {
+            "message": "intent_classification_completed",
+            "source": "app_mention",
+            "decision": {
+                "addressed_to_kortny": True,
+                "classification": "ignore",
+                "confidence": 0.95,
+                "should_create_task": False,
+                "should_ack_with_reaction": True,
+                "needs_channel_context": False,
+                "needs_thread_context": False,
+                "needs_file_context": False,
+                "likely_tools": [],
+                "model_tier": "cheap",
+                "reason": "Greeting only.",
+            },
+        },
+    )
+    db_session.commit()
+    settings = build_settings(composio_api_key="composio-key")
+    composio_client = FakeComposioClient()
+
+    registry = AgentTaskExecutor(
+        settings=settings,
+        web_search_tool=StaticWebSearchTool(),
+        composio_client=composio_client,
+    )._build_registry(
+        settings=settings,
+        session=db_session,
+        task=task,
+        task_service=task_service,
+        working_dir=tmp_path,
+    )
+
+    assert composio_client.list_tool_calls == []
+    assert "web_search" in registry.names()
+    assert all(not name.startswith("composio_") for name in registry.names())
+    assert any(
+        event.payload.get("message") == "external_tool_selection_skipped"
+        and event.payload.get("classification") == "ignore"
+        for event in task_events(db_session, task)
+    )
 
 
 def cleanup_database(session: Session) -> None:

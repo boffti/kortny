@@ -331,6 +331,25 @@ class AgentTaskExecutor:
             inspect_memory,
             forget_fact,
         ]
+        skip_external_reason = _external_tool_skip_reason(session, task)
+        if skip_external_reason is not None:
+            task_service.append_event(
+                task,
+                TaskEventType.log,
+                {
+                    "message": "external_tool_selection_skipped",
+                    **skip_external_reason,
+                },
+            )
+            log_observation(
+                logger,
+                "external_tool_selection_skipped",
+                task=task,
+                reason=skip_external_reason["reason"],
+                classification=skip_external_reason.get("classification"),
+            )
+            return ToolRegistry(native_tools)
+
         external_providers = self._build_external_tool_providers(
             settings=settings,
             session=session,
@@ -774,8 +793,65 @@ def _task_events(session: Session, task: Task) -> tuple[TaskEvent, ...]:
     )
 
 
+def _external_tool_skip_reason(
+    session: Session,
+    task: Task,
+) -> dict[str, Any] | None:
+    decision = _latest_intent_decision(session, task)
+    if decision is None:
+        return None
+
+    classification = _payload_str(decision, "classification")
+    should_create_task = decision.get("should_create_task")
+    if should_create_task is False:
+        return {
+            "reason": "intent_should_not_create_task",
+            "classification": classification,
+        }
+
+    if classification in EXTERNAL_TOOL_SKIP_CLASSIFICATIONS:
+        return {
+            "reason": "intent_classification",
+            "classification": classification,
+        }
+
+    return None
+
+
+def _latest_intent_decision(session: Session, task: Task) -> dict[str, Any] | None:
+    event = session.scalar(
+        select(TaskEvent)
+        .where(
+            TaskEvent.task_id == task.id,
+            TaskEvent.type == TaskEventType.log,
+            TaskEvent.payload["message"].as_string()
+            == "intent_classification_completed",
+        )
+        .order_by(TaskEvent.seq.desc())
+        .limit(1)
+    )
+    if event is None:
+        return None
+    decision = event.payload.get("decision")
+    if not isinstance(decision, dict):
+        return None
+    return decision
+
+
 def _payload_str(payload: dict[str, Any], key: str) -> str | None:
     value = payload.get(key)
     if isinstance(value, str) and value:
         return value
     return None
+
+
+EXTERNAL_TOOL_SKIP_CLASSIFICATIONS = frozenset(
+    {
+        "ambient_observation",
+        "cancel_or_retry",
+        "clarification",
+        "ignore",
+        "memory_candidate",
+        "third_person_reference",
+    }
+)

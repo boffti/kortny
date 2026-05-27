@@ -30,12 +30,21 @@ from kortny.observability import (
     set_span_attributes,
     start_span,
 )
+from kortny.observe import (
+    ChannelJoinObservationResult,
+    ObservationResult,
+    ObserveService,
+)
 from kortny.slack.acknowledgement import (
     AcknowledgementGenerator,
     StaticAcknowledgementGenerator,
     generate_acknowledgement,
 )
 from kortny.slack.identity import SlackIdentityService
+from kortny.slack.membership import (
+    ChannelMembershipResult,
+    SlackChannelMembershipService,
+)
 from kortny.slack.reactions import (
     ACK_REACTION_ADD_FAILED_MESSAGE,
     ACK_REACTION_ADDED_MESSAGE,
@@ -64,6 +73,17 @@ REACTION_REJECT = "no_entry_sign"
 CONFIRMATION_REACTIONS = frozenset({REACTION_CONFIRM, REACTION_REJECT})
 INTENT_CLASSIFIED_MESSAGE = "intent_classification_completed"
 INTENT_CLASSIFICATION_FAILED_MESSAGE = "intent_classification_failed"
+
+
+def is_bare_app_mention(event: Mapping[str, Any]) -> bool:
+    """Return true when an app_mention contains no request beyond the mention."""
+
+    if _event_files(event):
+        return False
+    text = event.get("text")
+    if not isinstance(text, str):
+        return True
+    return not LEADING_MENTION_RE.sub("", text, count=1).strip()
 
 
 class SlackPostMessageClient(Protocol):
@@ -234,6 +254,341 @@ class SlackIngress:
             source="channel_message",
             preclassified_intent_decision=intent_decision,
         )
+
+    def observe_channel_message(
+        self,
+        *,
+        body: Mapping[str, Any],
+        event: Mapping[str, Any],
+    ) -> ObservationResult:
+        """Record a passive channel observation without creating a task."""
+
+        team_id = _team_id(body, event)
+        installation = self._get_or_create_installation(team_id)
+        self._record_channel_seen(
+            installation=installation,
+            body=body,
+            event=event,
+            discovered_via="message_observation",
+            added_by_user_id=None,
+        )
+        result = ObserveService(self.session).record_channel_message(
+            installation=installation,
+            slack_team_id=team_id,
+            body=dict(body),
+            event=dict(event),
+        )
+        if result.observed:
+            logger.info(
+                "slack observation recorded event_id=%s channel=%s observation_id=%s",
+                body.get("event_id"),
+                event.get("channel"),
+                result.event.id if result.event is not None else None,
+            )
+        else:
+            logger.info(
+                "slack observation skipped reason=%s event_id=%s channel=%s",
+                result.reason,
+                body.get("event_id"),
+                event.get("channel"),
+        )
+        return result
+
+    def ensure_channel_onboarding_from_mention(
+        self,
+        *,
+        body: Mapping[str, Any],
+        event: Mapping[str, Any],
+    ) -> ChannelJoinObservationResult:
+        """Idempotently onboard channels when an app mention implicitly adds Kortny."""
+
+        if event.get("channel_type") == "im":
+            return ChannelJoinObservationResult(
+                observed=False,
+                reason="dm_excluded",
+            )
+
+        team_id = _team_id(body, event)
+        installation = self._get_or_create_installation(team_id)
+        self._resolve_bot_user_id(installation)
+        channel_id = _optional_str(event.get("channel"))
+        if channel_id is None:
+            return ChannelJoinObservationResult(
+                observed=False,
+                reason="missing_channel",
+            )
+
+        membership_service = SlackChannelMembershipService(self.session)
+        membership_result = self._record_channel_seen(
+            installation=installation,
+            body=body,
+            event=event,
+            discovered_via="app_mention",
+            added_by_user_id=_optional_str(event.get("user")),
+            membership_service=membership_service,
+        )
+        if membership_result is None:
+            return ChannelJoinObservationResult(
+                observed=False,
+                reason="missing_channel",
+            )
+        if not membership_result.onboarding_due:
+            reason = (
+                "intro_already_posted"
+                if membership_result.reason == "onboarding_posted"
+                else membership_result.reason
+            )
+            logger.info(
+                "slack app_mention channel onboarding skipped reason=%s event_id=%s channel=%s",
+                reason,
+                body.get("event_id"),
+                channel_id,
+            )
+            return ChannelJoinObservationResult(
+                observed=False,
+                reason=reason,
+            )
+
+        observe_service = ObserveService(self.session)
+        result = observe_service.record_channel_activation(
+            installation=installation,
+            slack_team_id=team_id,
+            body=dict(body),
+            event=dict(event),
+        )
+        self._post_observe_intro_if_needed(
+            team_id=team_id,
+            channel_id=channel_id,
+            observe_service=observe_service,
+            result=result,
+            event_id=body.get("event_id"),
+            log_prefix="app_mention channel onboarding",
+            membership_service=membership_service,
+            membership_result=membership_result,
+        )
+        self._mark_membership_onboarding_from_policy_if_needed(
+            membership_service=membership_service,
+            membership_result=membership_result,
+            result=result,
+        )
+        if result.observed:
+            logger.info(
+                "slack app_mention channel onboarding observed event_id=%s channel=%s reason=%s",
+                body.get("event_id"),
+                event.get("channel"),
+                result.reason,
+            )
+        else:
+            logger.info(
+                "slack app_mention channel onboarding skipped reason=%s event_id=%s channel=%s",
+                result.reason,
+                body.get("event_id"),
+                event.get("channel"),
+            )
+        return result
+
+    def handle_member_joined_channel(
+        self,
+        *,
+        body: Mapping[str, Any],
+        event: Mapping[str, Any],
+    ) -> ChannelJoinObservationResult:
+        """Handle Kortny being added to a channel and post a restrained intro."""
+
+        team_id = _team_id(body, event)
+        installation = self._get_or_create_installation(team_id)
+        bot_user_id = self._resolve_joined_bot_user_id(
+            installation=installation,
+            body=body,
+            event=event,
+        )
+        if bot_user_id is None:
+            logger.info(
+                "slack member_joined_channel ignored reason=bot_user_unresolved event_id=%s channel=%s user=%s",
+                body.get("event_id"),
+                event.get("channel"),
+                event.get("user"),
+            )
+            return ChannelJoinObservationResult(
+                observed=False,
+                reason="bot_user_unresolved",
+            )
+
+        if _optional_str(event.get("user")) != bot_user_id:
+            logger.info(
+                "slack member_joined_channel ignored reason=not_bot_join event_id=%s channel=%s user=%s bot_user_id=%s",
+                body.get("event_id"),
+                event.get("channel"),
+                event.get("user"),
+                bot_user_id,
+            )
+            return ChannelJoinObservationResult(
+                observed=False,
+                reason="not_bot_join",
+            )
+
+        channel_id = _optional_str(event.get("channel"))
+        if channel_id is None:
+            return ChannelJoinObservationResult(
+                observed=False,
+                reason="missing_channel",
+            )
+
+        membership_service = SlackChannelMembershipService(self.session)
+        membership_result = self._record_channel_seen(
+            installation=installation,
+            body=body,
+            event=event,
+            discovered_via="member_joined_channel",
+            added_by_user_id=_optional_str(event.get("inviter")),
+            membership_service=membership_service,
+        )
+        if membership_result is None:
+            return ChannelJoinObservationResult(
+                observed=False,
+                reason="missing_channel",
+            )
+
+        observe_service = ObserveService(self.session)
+        result = observe_service.record_channel_join(
+            installation=installation,
+            slack_team_id=team_id,
+            body=dict(body),
+            event=dict(event),
+            bot_user_id=bot_user_id,
+        )
+        self._post_observe_intro_if_needed(
+            team_id=team_id,
+            channel_id=channel_id,
+            observe_service=observe_service,
+            result=result,
+            event_id=body.get("event_id"),
+            log_prefix="channel onboarding",
+            membership_service=membership_service,
+            membership_result=membership_result,
+        )
+        self._mark_membership_onboarding_from_policy_if_needed(
+            membership_service=membership_service,
+            membership_result=membership_result,
+            result=result,
+        )
+        if result.intro_text and result.policy is not None:
+            pass
+        elif result.observed:
+            logger.info(
+                "slack channel join observed without intro event_id=%s channel=%s reason=%s",
+                body.get("event_id"),
+                event.get("channel"),
+                result.reason,
+            )
+        else:
+            logger.info(
+                "slack member_joined_channel skipped reason=%s event_id=%s channel=%s user=%s",
+                result.reason,
+                body.get("event_id"),
+                event.get("channel"),
+                event.get("user"),
+            )
+        return result
+
+    def _post_observe_intro_if_needed(
+        self,
+        *,
+        team_id: str,
+        channel_id: str | None,
+        observe_service: ObserveService,
+        result: ChannelJoinObservationResult,
+        event_id: object,
+        log_prefix: str,
+        membership_service: SlackChannelMembershipService | None = None,
+        membership_result: ChannelMembershipResult | None = None,
+    ) -> None:
+        if membership_result is not None and not membership_result.onboarding_due:
+            return
+        if not result.intro_text or result.policy is None or channel_id is None:
+            return
+
+        response = self.client.chat_postMessage(
+            channel=channel_id,
+            text=result.intro_text,
+        )
+        message_ts = _optional_response_ts(response)
+        observe_service.mark_channel_intro_posted(
+            policy=result.policy,
+            slack_team_id=team_id,
+            channel_id=channel_id,
+            message_ts=message_ts,
+        )
+        if membership_service is not None and membership_result is not None:
+            membership_service.mark_onboarding_posted(
+                membership=membership_result.membership,
+                message_ts=message_ts,
+            )
+        logger.info(
+            "slack %s intro posted event_id=%s channel=%s message_ts=%s",
+            log_prefix,
+            event_id,
+            channel_id,
+            message_ts,
+        )
+
+    def _mark_membership_onboarding_from_policy_if_needed(
+        self,
+        *,
+        membership_service: SlackChannelMembershipService,
+        membership_result: ChannelMembershipResult,
+        result: ChannelJoinObservationResult,
+    ) -> None:
+        if not membership_result.onboarding_due or result.policy is None:
+            return
+        metadata = result.policy.metadata_json or {}
+        if not metadata.get("onboarding_intro_posted_at"):
+            return
+        membership_service.mark_onboarding_posted(
+            membership=membership_result.membership,
+            message_ts=_optional_str(metadata.get("onboarding_intro_message_ts")),
+        )
+
+    def _record_channel_seen(
+        self,
+        *,
+        installation: Installation,
+        body: Mapping[str, Any],
+        event: Mapping[str, Any],
+        discovered_via: str,
+        added_by_user_id: str | None,
+        membership_service: SlackChannelMembershipService | None = None,
+    ) -> ChannelMembershipResult | None:
+        if event.get("channel_type") == "im":
+            return None
+        channel_id = _optional_str(event.get("channel"))
+        if channel_id is None:
+            return None
+
+        service = membership_service or SlackChannelMembershipService(self.session)
+        result = service.record_seen_channel(
+            installation=installation,
+            channel_id=channel_id,
+            discovered_via=discovered_via,
+            channel_type=_optional_str(event.get("channel_type")),
+            added_by_user_id=added_by_user_id,
+            event_id=_optional_str(body.get("event_id")),
+            metadata={
+                "event_type": event.get("type"),
+                "subtype": event.get("subtype"),
+                "source_team_id": body.get("team_id") or event.get("team"),
+            },
+        )
+        logger.info(
+            "slack channel membership recorded installation_id=%s channel=%s discovered_via=%s created=%s onboarding_due=%s reason=%s",
+            installation.id,
+            channel_id,
+            discovered_via,
+            result.created,
+            result.onboarding_due,
+            result.reason,
+        )
+        return result
 
     def handle_reaction_added(
         self,
@@ -809,6 +1164,84 @@ class SlackIngress:
 
         return installation
 
+    def _resolve_bot_user_id(self, installation: Installation) -> str | None:
+        if installation.bot_user_id:
+            return installation.bot_user_id
+
+        auth_test = getattr(self.client, "auth_test", None)
+        if not callable(auth_test):
+            return None
+        response = auth_test()
+        bot_user_id = response.get("user_id") if isinstance(response, Mapping) else None
+        if not isinstance(bot_user_id, str) or not bot_user_id:
+            return None
+        installation.bot_user_id = bot_user_id
+        self.session.flush()
+        return bot_user_id
+
+    def _resolve_joined_bot_user_id(
+        self,
+        *,
+        installation: Installation,
+        body: Mapping[str, Any],
+        event: Mapping[str, Any],
+    ) -> str | None:
+        resolved = self._resolve_bot_user_id(installation)
+        if resolved is not None:
+            return resolved
+
+        event_user_id = _optional_str(event.get("user"))
+        if event_user_id is None:
+            return None
+
+        source = "authorization"
+        authorization_user_id = _matching_authorization_user_id(
+            body=body,
+            user_id=event_user_id,
+        )
+        if authorization_user_id is None and self._slack_user_is_bot(event_user_id):
+            authorization_user_id = event_user_id
+            source = "users_info"
+
+        if authorization_user_id is None:
+            return None
+
+        installation.bot_user_id = authorization_user_id
+        self.session.flush()
+        logger.info(
+            "slack bot user resolved from member_joined_channel event_id=%s bot_user_id=%s source=%s",
+            body.get("event_id"),
+            authorization_user_id,
+            source,
+        )
+        return authorization_user_id
+
+    def _slack_user_is_bot(self, user_id: str) -> bool:
+        users_info = getattr(self.client, "users_info", None)
+        if not callable(users_info):
+            return False
+        try:
+            response = users_info(user=user_id)
+        except Exception as exc:
+            logger.info(
+                "slack bot user verification failed user=%s error_type=%s error=%s",
+                user_id,
+                type(exc).__name__,
+                exc,
+            )
+            return False
+        payload: Mapping[str, Any] | None = None
+        if isinstance(response, Mapping):
+            payload = response
+        else:
+            data = getattr(response, "data", None)
+            if isinstance(data, Mapping):
+                payload = data
+        if payload is None or payload.get("ok") is False:
+            return False
+        user = payload.get("user")
+        return isinstance(user, Mapping) and user.get("is_bot") is True
+
     def _handle_cancel_reaction(
         self,
         task: Task,
@@ -1119,6 +1552,29 @@ def _event_files(event: Mapping[str, Any]) -> tuple[Mapping[str, Any], ...]:
 def _optional_file_string(value: object) -> str | None:
     if isinstance(value, str) and value.strip():
         return value.strip()
+    return None
+
+
+def _optional_str(value: object) -> str | None:
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def _matching_authorization_user_id(
+    *,
+    body: Mapping[str, Any],
+    user_id: str,
+) -> str | None:
+    authorizations = body.get("authorizations")
+    if not isinstance(authorizations, list):
+        return None
+    for authorization in authorizations:
+        if not isinstance(authorization, Mapping):
+            continue
+        authorization_user_id = _optional_str(authorization.get("user_id"))
+        if authorization_user_id == user_id and authorization.get("is_bot") is True:
+            return authorization_user_id
     return None
 
 

@@ -17,7 +17,7 @@ from kortny.llm import LLMService, ModelRouter, ModelRouteTier, create_llm_provi
 from kortny.logging_config import configure_logging
 from kortny.observability import configure_tracing, record_span_exception, start_span
 from kortny.slack.acknowledgement import LLMAcknowledgementGenerator
-from kortny.slack.ingress import SlackIngress
+from kortny.slack.ingress import SlackIngress, is_bare_app_mention
 
 T = TypeVar("T")
 
@@ -58,7 +58,7 @@ def create_bolt_app(
             ):
                 try:
                     with session_scope(session_factory) as session:
-                        SlackIngress(
+                        ingress = SlackIngress(
                             session=session,
                             client=client,
                             acknowledgement_generator=acknowledgement_generator,
@@ -66,7 +66,21 @@ def create_bolt_app(
                                 resolved_settings,
                                 session,
                             ),
-                        ).handle_app_mention(
+                        )
+                        onboarding_result = (
+                            ingress.ensure_channel_onboarding_from_mention(
+                                body=body,
+                                event=event,
+                            )
+                        )
+                        if onboarding_result.observed and is_bare_app_mention(event):
+                            logger.info(
+                                "Skipped bare app_mention task after channel onboarding event_id=%s channel=%s",
+                                body.get("event_id"),
+                                event.get("channel"),
+                            )
+                            return
+                        ingress.handle_app_mention(
                             body=body,
                             event=event,
                         )
@@ -95,28 +109,40 @@ def create_bolt_app(
                     event,
                     app_name=resolved_settings.slack_app_name,
                 )
-                if not is_dm and not is_soft_mention_candidate:
-                    return
 
                 try:
                     with session_scope(session_factory) as session:
-                        ingress = SlackIngress(
-                            session=session,
-                            client=client,
-                            acknowledgement_generator=acknowledgement_generator,
-                            intent_classifier=_intent_classifier(
-                                resolved_settings,
-                                session,
-                            )
-                            if is_dm
-                            else _pre_task_intent_classifier(resolved_settings),
-                        )
                         if is_dm:
+                            ingress = SlackIngress(
+                                session=session,
+                                client=client,
+                                acknowledgement_generator=acknowledgement_generator,
+                                intent_classifier=_intent_classifier(
+                                    resolved_settings,
+                                    session,
+                                ),
+                            )
                             ingress.handle_dm(
                                 body=body,
                                 event=event,
                             )
                         else:
+                            ingress = SlackIngress(
+                                session=session,
+                                client=client,
+                                acknowledgement_generator=acknowledgement_generator,
+                                intent_classifier=_pre_task_intent_classifier(
+                                    resolved_settings
+                                )
+                                if is_soft_mention_candidate
+                                else None,
+                            )
+                            ingress.observe_channel_message(
+                                body=body,
+                                event=event,
+                            )
+                            if not is_soft_mention_candidate:
+                                return
                             ingress.handle_channel_message(
                                 body=body,
                                 event=event,
@@ -125,6 +151,37 @@ def create_bolt_app(
                 except Exception as exc:
                     record_span_exception(exc)
                     logger.exception("Failed to process Slack message event")
+                    raise
+
+        acknowledge_then_handle(ack, handle)
+
+    @app.event("member_joined_channel")
+    def handle_member_joined_channel(
+        ack: Callable[[], None],
+        body: dict[str, Any],
+        event: dict[str, Any],
+        client: Any,
+        logger: Any,
+    ) -> None:
+        def handle() -> None:
+            with start_span(
+                "slack.ingress.member_joined_channel",
+                attributes=_slack_event_attributes(body, event),
+            ):
+                try:
+                    with session_scope(session_factory) as session:
+                        SlackIngress(
+                            session=session,
+                            client=client,
+                        ).handle_member_joined_channel(
+                            body=body,
+                            event=event,
+                        )
+                except Exception as exc:
+                    record_span_exception(exc)
+                    logger.exception(
+                        "Failed to process Slack member_joined_channel event"
+                    )
                     raise
 
         acknowledge_then_handle(ack, handle)

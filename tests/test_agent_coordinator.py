@@ -16,6 +16,9 @@ from kortny.agent import (
     AgentExecutionGuardrailError,
     AgentTurnLimitError,
     ContextAssembler,
+    ContextBudget,
+    ContextEngineInfo,
+    ContextPackage,
     ExecutionErrorCategory,
     ExecutionGuardrailLimits,
     RecoveryAction,
@@ -87,6 +90,61 @@ class FakeThreadTranscriptProvider:
     ) -> tuple[ThreadTranscriptMessage, ...]:
         self.calls.append((channel_id, thread_ts, limit))
         return self.messages[:limit]
+
+
+class FakeContextEngine:
+    def __init__(self, messages: Sequence[ChatMessage]) -> None:
+        self._messages = tuple(messages)
+        self.info = ContextEngineInfo(
+            id="test.fake_context_engine",
+            name="Fake Context Engine",
+        )
+        self.ingested_task_ids: list[uuid.UUID] = []
+        self.assembled_task_ids: list[uuid.UUID] = []
+        self.after_turn_calls: list[tuple[uuid.UUID, str]] = []
+
+    def ingest(self, task: Task) -> None:
+        self.ingested_task_ids.append(task.id)
+
+    def assemble(self, task: Task) -> ContextPackage:
+        self.assembled_task_ids.append(task.id)
+        return ContextPackage(
+            messages=self._messages,
+            selected_facts=(),
+            selected_prior_tasks=(),
+            selected_episodes=(),
+            selected_artifacts=(),
+            acknowledgement=None,
+            budget=ContextBudget(
+                system_prompt_chars=0,
+                known_facts_max_chars=0,
+                known_facts_chars=0,
+                thread_context_max_chars=1,
+                prior_context_chars=0,
+                thread_context_recent_tasks=1,
+                thread_transcript_limit=0,
+                episode_context_max_chars=0,
+                episode_context_chars=0,
+                episode_context_limit=0,
+            ),
+            omissions=(),
+            context_engine_id=self.info.id,
+            context_engine_name=self.info.name,
+        )
+
+    def compact(self, task: Task, *, force: bool = False) -> ContextPackage | None:
+        del task, force
+        return None
+
+    def after_turn(
+        self,
+        task: Task,
+        package: ContextPackage,
+        *,
+        outcome: str,
+    ) -> None:
+        del package
+        self.after_turn_calls.append((task.id, outcome))
 
 
 class EchoJsonTool:
@@ -314,7 +372,44 @@ def test_coordinator_finishes_with_final_answer(db_session: Session) -> None:
     )
     assert context_event.payload["selected_fact_ids"] == []
     assert context_event.payload["selected_episode_ids"] == []
+    assert (
+        context_event.payload["context_engine_id"] == "kortny.default_context_engine"
+    )
+    assert context_event.payload["context_engine_name"] == "Default Context Engine"
     assert context_event.payload["context_budget"]["thread_context_max_chars"] == 12000
+
+
+def test_coordinator_uses_context_engine_lifecycle(db_session: Session) -> None:
+    task = create_task(db_session, input_text="this should be replaced")
+    context_engine = FakeContextEngine(
+        (ChatMessage(role="user", content="from context engine"),)
+    )
+    llm = FakeLLM(
+        [
+            Completion(
+                content="Handled via context engine.",
+                tool_calls=(),
+                usage=TokenUsage(input_tokens=10, output_tokens=5),
+                response_id="gen-context-engine",
+                model="openai/gpt-4o-mini",
+            )
+        ]
+    )
+
+    result = AgentCoordinator(
+        session=db_session,
+        llm=llm,
+        registry=ToolRegistry(),
+        context_engine=context_engine,
+    ).run(task)
+
+    assert result.result_summary == "Handled via context engine."
+    assert context_engine.ingested_task_ids == [task.id]
+    assert context_engine.assembled_task_ids == [task.id]
+    assert context_engine.after_turn_calls == [(task.id, "succeeded")]
+    assert llm.calls[0][1] == (
+        ChatMessage(role="user", content="from context engine"),
+    )
 
 
 def test_coordinator_injects_workspace_facts(db_session: Session) -> None:
@@ -1645,6 +1740,7 @@ def test_coordinator_uses_private_planner_for_complex_tool_tasks(
         for message in actor_messages
         if message.content and "<private_execution_plan>" in message.content
     )
+    assert plan_message.content is not None
     assert "Find open Notion action items" in plan_message.content
     assert "composio_notion_execute" in plan_message.content
     assert actor_messages[-1] == ChatMessage(role="user", content=task.input)
@@ -1829,6 +1925,7 @@ def test_coordinator_replans_after_recoverable_failure_in_planned_mode(
         for message in second_actor_messages
         if message.content and "<private_recovery_plan>" in message.content
     )
+    assert recovery_message.content is not None
     assert "failed_tool: query_database" in recovery_message.content
     assert "next_action: use_discovery_tool" in recovery_message.content
     assert "suggested_tools: web_search" in recovery_message.content

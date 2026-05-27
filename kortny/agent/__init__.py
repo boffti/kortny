@@ -10,6 +10,11 @@ from kortny.agent.context import (
     ContextPackage,
     ContextTask,
 )
+from kortny.agent.context_engine import (
+    ContextEngine,
+    ContextEngineInfo,
+    DefaultContextEngine,
+)
 from kortny.agent.coordinator import (
     AgentCoordinator,
     AgentExecutionGuardrailError,
@@ -55,9 +60,12 @@ __all__ = [
     "ContextAssembler",
     "ContextBudget",
     "ContextFact",
+    "ContextEngine",
+    "ContextEngineInfo",
     "ContextOmission",
     "ContextPackage",
     "ContextTask",
+    "DefaultContextEngine",
     "ExecutionGuardrailLimits",
     "ExecutionErrorCategory",
     "ExecutionMode",

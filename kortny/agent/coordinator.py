@@ -25,6 +25,12 @@ from kortny.agent.context import (
     DEFAULT_THREAD_CONTEXT_RECENT_TASKS,
     DEFAULT_THREAD_TRANSCRIPT_LIMIT,
     ContextAssembler,
+    ContextPackage,
+)
+from kortny.agent.context_engine import (
+    DEFAULT_CONTEXT_ENGINE_INFO,
+    ContextEngine,
+    DefaultContextEngine,
 )
 from kortny.agent.error_policy import (
     ClassifiedToolError,
@@ -173,6 +179,7 @@ class AgentCoordinator:
         thread_transcript_limit: int = DEFAULT_THREAD_TRANSCRIPT_LIMIT,
         known_facts_max_chars: int = DEFAULT_KNOWN_FACTS_MAX_CHARS,
         context_assembler: ContextAssembler | None = None,
+        context_engine: ContextEngine | None = None,
         guardrail_limits: ExecutionGuardrailLimits | None = None,
         execution_planner: ExecutionPlanner | None = None,
     ) -> None:
@@ -186,6 +193,8 @@ class AgentCoordinator:
             raise ValueError("thread_transcript_limit cannot be negative")
         if known_facts_max_chars < 0:
             raise ValueError("known_facts_max_chars cannot be negative")
+        if context_assembler is not None and context_engine is not None:
+            raise ValueError("Provide context_assembler or context_engine, not both")
 
         self.session = session
         self.llm = llm
@@ -196,22 +205,48 @@ class AgentCoordinator:
         )
         self.max_turns = self.guardrail_limits.max_turns
         self.execution_planner = execution_planner or ExecutionPlanner()
-        self.context_assembler = context_assembler or ContextAssembler(
-            session=session,
-            task_service=self.task_service,
-            system_prompt=system_prompt,
-            thread_transcript_provider=thread_transcript_provider,
-            thread_context_max_chars=thread_context_max_chars,
-            thread_context_recent_tasks=thread_context_recent_tasks,
-            thread_transcript_limit=thread_transcript_limit,
-            known_facts_max_chars=known_facts_max_chars,
-        )
+        if context_engine is not None:
+            self.context_engine = context_engine
+        else:
+            self.context_assembler = context_assembler or ContextAssembler(
+                session=session,
+                task_service=self.task_service,
+                system_prompt=system_prompt,
+                thread_transcript_provider=thread_transcript_provider,
+                thread_context_max_chars=thread_context_max_chars,
+                thread_context_recent_tasks=thread_context_recent_tasks,
+                thread_transcript_limit=thread_transcript_limit,
+                known_facts_max_chars=known_facts_max_chars,
+                context_engine_id=DEFAULT_CONTEXT_ENGINE_INFO.id,
+                context_engine_name=DEFAULT_CONTEXT_ENGINE_INFO.name,
+            )
+            self.context_engine = DefaultContextEngine(self.context_assembler)
 
     def run(self, task: Task | uuid.UUID) -> AgentRunResult:
         """Run the coordinator until final text or a produced artifact."""
 
         task_obj = self._resolve_task(task)
-        messages = self._initial_messages(task_obj)
+        context_package: ContextPackage | None = None
+        run_outcome = "failed"
+        try:
+            context_package = self._initial_context(task_obj)
+            messages = list(context_package.messages)
+            result = self._run_with_context(task_obj, messages)
+            run_outcome = "succeeded"
+            return result
+        finally:
+            if context_package is not None:
+                self._after_context_turn(
+                    task_obj,
+                    context_package,
+                    outcome=run_outcome,
+                )
+
+    def _run_with_context(
+        self,
+        task_obj: Task,
+        messages: list[ChatMessage],
+    ) -> AgentRunResult:
         schemas = self.registry.schemas()
         artifact_count = 0
         plan = self._create_execution_plan(task_obj, schemas)
@@ -256,12 +291,13 @@ class AgentCoordinator:
             )
 
             if not completion.tool_calls:
-                return self._finish_with_text(
+                result = self._finish_with_text(
                     task_obj,
                     completion.content,
                     turn,
                     plan=plan,
                 )
+                return result
 
             turn_artifacts = self._invoke_tool_calls(
                 task_obj=task_obj,
@@ -1170,8 +1206,26 @@ class AgentCoordinator:
             raise LookupError(f"Task not found: {task}")
         return task_obj
 
-    def _initial_messages(self, task: Task) -> list[ChatMessage]:
-        return list(self.context_assembler.build_for_task(task).messages)
+    def _initial_context(self, task: Task) -> ContextPackage:
+        self.context_engine.ingest(task)
+        return self.context_engine.assemble(task)
+
+    def _after_context_turn(
+        self,
+        task: Task,
+        package: ContextPackage,
+        *,
+        outcome: str,
+    ) -> None:
+        try:
+            self.context_engine.after_turn(task, package, outcome=outcome)
+        except Exception:
+            logger.warning(
+                "context engine after_turn failed task_id=%s engine_id=%s",
+                task.id,
+                self.context_engine.info.id,
+                exc_info=True,
+            )
 
 
 def _tool_result_payload(tool_name: str, result: ToolResult) -> JsonObject:

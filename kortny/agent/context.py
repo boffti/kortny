@@ -29,6 +29,8 @@ DEFAULT_THREAD_TRANSCRIPT_LIMIT = 30
 DEFAULT_KNOWN_FACTS_MAX_CHARS = 4_000
 DEFAULT_EPISODE_CONTEXT_MAX_CHARS = 4_000
 DEFAULT_EPISODE_CONTEXT_LIMIT = 5
+DEFAULT_CONTEXT_ENGINE_ID = "kortny.context_assembler"
+DEFAULT_CONTEXT_ENGINE_NAME = "ContextAssembler"
 IMMEDIATE_PRIOR_INPUT_MAX_CHARS = 500
 IMMEDIATE_PRIOR_RESULT_MAX_CHARS = 1_800
 SLACK_FILES_BLOCK_RE = re.compile(r"<slack_files>\s*(.*?)\s*</slack_files>", re.S)
@@ -129,6 +131,8 @@ class ContextPackage:
     acknowledgement: ContextAcknowledgement | None
     budget: ContextBudget
     omissions: tuple[ContextOmission, ...]
+    context_engine_id: str = DEFAULT_CONTEXT_ENGINE_ID
+    context_engine_name: str = DEFAULT_CONTEXT_ENGINE_NAME
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,6 +173,8 @@ class ContextAssembler:
         known_facts_max_chars: int = DEFAULT_KNOWN_FACTS_MAX_CHARS,
         episode_context_max_chars: int = DEFAULT_EPISODE_CONTEXT_MAX_CHARS,
         episode_context_limit: int = DEFAULT_EPISODE_CONTEXT_LIMIT,
+        context_engine_id: str = DEFAULT_CONTEXT_ENGINE_ID,
+        context_engine_name: str = DEFAULT_CONTEXT_ENGINE_NAME,
     ) -> None:
         if thread_context_max_chars < 1:
             raise ValueError("thread_context_max_chars must be at least 1")
@@ -182,6 +188,10 @@ class ContextAssembler:
             raise ValueError("episode_context_max_chars cannot be negative")
         if episode_context_limit < 0:
             raise ValueError("episode_context_limit cannot be negative")
+        if not context_engine_id:
+            raise ValueError("context_engine_id must be non-empty")
+        if not context_engine_name:
+            raise ValueError("context_engine_name must be non-empty")
 
         self.session = session
         self.task_service = task_service or TaskService(session)
@@ -193,6 +203,8 @@ class ContextAssembler:
         self.known_facts_max_chars = known_facts_max_chars
         self.episode_context_max_chars = episode_context_max_chars
         self.episode_context_limit = episode_context_limit
+        self.context_engine_id = context_engine_id
+        self.context_engine_name = context_engine_name
         self.workspace_state_service = WorkspaceStateService(
             session,
             task_service=self.task_service,
@@ -263,10 +275,14 @@ class ContextAssembler:
                 + prior_context.omissions
                 + episode_context.omissions
             ),
+            context_engine_id=self.context_engine_id,
+            context_engine_name=self.context_engine_name,
         )
         self._record_context_assembled(task, package)
         set_span_attributes(
             {
+                "context.engine_id": package.context_engine_id,
+                "context.engine_name": package.context_engine_name,
                 "context.message_count": len(package.messages),
                 "context.selected_fact_count": len(package.selected_facts),
                 "context.selected_episode_count": len(package.selected_episodes),
@@ -289,6 +305,8 @@ class ContextAssembler:
             task,
             "context_assembled",
             logger=logger,
+            context_engine_id=package.context_engine_id,
+            context_engine_name=package.context_engine_name,
             message_count=len(package.messages),
             selected_fact_ids=[str(fact.fact_id) for fact in package.selected_facts],
             selected_fact_keys=[fact.key for fact in package.selected_facts],

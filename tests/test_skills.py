@@ -74,6 +74,7 @@ def test_skill_registry_seeds_builtin_system_skills(db_session: Session) -> None
     )
 
     assert {skill.slug for skill in skills} >= {
+        "analyst-grade-synthesis",
         "slack-humanizer",
         "research-synthesis",
         "document-iteration",
@@ -84,6 +85,55 @@ def test_skill_registry_seeds_builtin_system_skills(db_session: Session) -> None
     assert all(skill.trust_level == "trusted" for skill in skills)
     assert all(version.status == "active" for version in versions)
     assert all(version.content_sha256 for version in versions)
+
+
+def test_skill_registry_selects_analyst_skill_for_audit_shape(
+    db_session: Session,
+) -> None:
+    task = create_task(db_session)
+    service = SkillRegistryService(db_session)
+
+    activations = service.select_for_response(
+        task,
+        response_mode="quick_answer",
+        response_shape="analyst_audit",
+        invocation_kind="response_humanizer",
+    )
+
+    events = list(
+        db_session.scalars(
+            select(TaskEvent).where(TaskEvent.task_id == task.id).order_by(TaskEvent.seq)
+        )
+    )
+    invocations = list(
+        db_session.scalars(
+            select(ProceduralSkillInvocation)
+            .where(ProceduralSkillInvocation.task_id == task.id)
+            .order_by(ProceduralSkillInvocation.created_at)
+        )
+    )
+
+    assert [activation.slug for activation in activations] == [
+        "slack-humanizer",
+        "analyst-grade-synthesis",
+    ]
+    assert len(invocations) == 2
+    assert all(
+        invocation.payload.get("response_shape") == "analyst_audit"
+        for invocation in invocations
+    )
+    assert any(
+        event.payload.get("message") == SKILL_CATALOG_BUILT_MESSAGE
+        and event.payload.get("response_shape") == "analyst_audit"
+        and "analyst-grade-synthesis" in event.payload.get("candidate_slugs", [])
+        for event in events
+    )
+    assert any(
+        event.payload.get("message") == SKILL_INVOKED_MESSAGE
+        and event.payload.get("slug") == "analyst-grade-synthesis"
+        and event.payload.get("response_shape") == "analyst_audit"
+        for event in events
+    )
 
 
 def test_skill_registry_selects_and_records_humanizer_skill(

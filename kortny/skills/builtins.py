@@ -78,6 +78,44 @@ Turn multiple retrieved sources into a concise answer with a clear bottom line.
 """,
     ),
     BuiltInSkillDefinition(
+        slug="analyst-grade-synthesis",
+        name="Analyst-Grade Synthesis",
+        version="1.0.0",
+        description=(
+            "Use when a response needs consulting-grade analysis: audits, "
+            "reviews, comparisons, critiques, recommendations, or strategy memos."
+        ),
+        intent_tags=("analysis", "audit", "review", "critique", "decision"),
+        response_modes=(
+            "quick_answer",
+            "research_summary",
+            "file_analysis",
+            "multi_step_recap",
+        ),
+        trigger_phrases=(
+            "audit",
+            "review",
+            "critique",
+            "compare",
+            "recommend",
+            "which one",
+        ),
+        metadata={"kind": "instruction_only", "source": "kortny"},
+        instructions_md="""## Goal
+Turn raw findings into an opinionated, evidence-aware coworker analysis.
+
+## Rules
+- Start with the recommendation or bottom line.
+- State scope: what was inspected, compared, or assumed.
+- Rank findings by importance instead of listing everything equally.
+- Explain why each finding matters.
+- Include concrete recommendations, reframes, or next moves where the evidence supports them.
+- Call out the highest-leverage move when there is an obvious first step.
+- Do not invent evidence, scores, sources, pages, or tool results.
+- Keep the answer Slack-native and readable by a busy operator.
+""",
+    ),
+    BuiltInSkillDefinition(
         slug="document-iteration",
         name="Document Iteration",
         version="1.0.0",

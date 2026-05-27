@@ -593,18 +593,34 @@ def test_agent_executor_humanizes_final_text_before_posting(
         if event.payload.get("message") == "response_record_built"
     )
     assert record_event.payload["response_mode"] == "quick_answer"
+    assert record_event.payload["response_shape"] == "comparison_memo"
     humanizer_payload = provider.calls[1][0][1].content
     assert humanizer_payload is not None
     response_record = json.loads(humanizer_payload)["response_record"]
     assert response_record["response_mode"] == "quick_answer"
+    assert response_record["response_shape"]["shape"] == "comparison_memo"
+    assert response_record["response_shape"]["required_elements"] == [
+        "recommendation",
+        "scope",
+        "tradeoffs",
+        "when_to_choose_each",
+        "decision_risk",
+        "next_step",
+    ]
     assert response_record["user_request"] == task.input
-    assert response_record["procedural_skills"][0]["slug"] == "slack-humanizer"
-    skill_event = next(
+    assert [skill["slug"] for skill in response_record["procedural_skills"]] == [
+        "slack-humanizer",
+        "analyst-grade-synthesis",
+    ]
+    skill_events = [
         event
         for event in events
         if event.payload.get("message") == "procedural_skill_invoked"
-    )
-    assert skill_event.payload["slug"] == "slack-humanizer"
+    ]
+    assert {event.payload["slug"] for event in skill_events} == {
+        "slack-humanizer",
+        "analyst-grade-synthesis",
+    }
     skill_invocations = list(
         db_session.scalars(
             select(ProceduralSkillInvocation).where(
@@ -612,7 +628,7 @@ def test_agent_executor_humanizes_final_text_before_posting(
             )
         )
     )
-    assert len(skill_invocations) == 1
+    assert len(skill_invocations) == 2
 
 
 def test_agent_executor_builds_research_response_record_for_tool_results(
@@ -715,16 +731,130 @@ def test_agent_executor_builds_research_response_record_for_tool_results(
         if event.payload.get("message") == "response_record_built"
     )
     assert record_event.payload["response_mode"] == "research_summary"
+    assert record_event.payload["response_shape"] == "research_brief"
     assert record_event.payload["action_count"] == 1
     assert record_event.payload["evidence_count"] == 1
     humanizer_payload = provider.calls[2][0][1].content
     assert humanizer_payload is not None
     response_record = json.loads(humanizer_payload)["response_record"]
     assert response_record["response_mode"] == "research_summary"
-    assert response_record["procedural_skills"][0]["slug"] == "slack-humanizer"
+    assert response_record["response_shape"]["shape"] == "research_brief"
+    assert [skill["slug"] for skill in response_record["procedural_skills"]] == [
+        "slack-humanizer",
+        "research-synthesis",
+    ]
     assert response_record["actions_taken"][0]["tool"] == "web_search"
     assert response_record["evidence"][0]["urls"] == [
         "https://docs.python.org/3/library/tempfile.html"
+    ]
+
+
+def test_agent_executor_builds_analyst_audit_response_record(
+    db_session: Session,
+    worker_session_factory: sessionmaker[Session],
+    tmp_path: Path,
+) -> None:
+    claim_time = datetime(2026, 5, 23, 9, 52, tzinfo=UTC)
+    task = create_task(db_session, event_id="EvAgentWorkerAnalystAudit")
+    task.input = (
+        "Review our website copy using the CPT framework. Point out the biggest "
+        "gaps and what you would change first."
+    )
+    task.available_at = claim_time - timedelta(seconds=1)
+    db_session.add(
+        ModelPricing(
+            provider=LLMProvider.openrouter,
+            model="openai/gpt-4o-mini",
+            input_price_per_mtok=Decimal("1.000000"),
+            output_price_per_mtok=Decimal("2.000000"),
+            effective_from=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+    )
+    db_session.commit()
+
+    raw_answer = (
+        "The site has several issues. It does not establish a clear loss "
+        "reference point, it underplays drawdown protection, and the calls to "
+        "action are framed as upside rather than risk reduction. The first "
+        "thing I would change is the homepage hero so the advisor immediately "
+        "sees the cost of staying with the default bond allocation."
+    )
+    humanized_answer = (
+        "*Bottom line:* I would fix the homepage loss anchor first.\n\n"
+        "*Scope:* based on the copy described in the prompt, not a fresh crawl.\n\n"
+        "*Top gaps:*\n"
+        "- The page does not establish the loss clients already feel.\n"
+        "- Drawdown protection is buried instead of leading the story.\n"
+        "- CTAs ask users to explore upside instead of reduce risk.\n\n"
+        "*Highest-leverage move:* rewrite the hero around bond-risk loss."
+    )
+    slack_client = FakeSlackClient()
+    provider = FakeAgentProvider(
+        [
+            Completion(
+                content=raw_answer,
+                tool_calls=(),
+                usage=TokenUsage(input_tokens=260, output_tokens=85),
+                model="openai/gpt-4o-mini",
+            ),
+            Completion(
+                content=humanized_answer,
+                tool_calls=(),
+                usage=TokenUsage(input_tokens=580, output_tokens=140),
+                model="openai/gpt-4o-mini",
+            ),
+        ]
+    )
+
+    result = TaskWorker(
+        session_factory=worker_session_factory,
+        worker_id="agent-worker-test",
+        executor=AgentTaskExecutor(
+            settings=make_settings(),
+            llm_provider=provider,
+            provider_name=LLMProvider.openrouter,
+            web_search_tool=StaticWebSearchTool(),
+            slack_client=slack_client,
+            workspace_base_dir=tmp_path,
+        ),
+    ).run_once(now=claim_time)
+
+    db_session.refresh(task)
+    events = task_events(db_session, task)
+
+    assert result.status == TaskStatus.succeeded.value, task.error
+    assert slack_client.messages == [
+        {
+            "channel": "C123",
+            "text": humanized_answer,
+            "thread_ts": "EvAgentWorkerAnalystAudit",
+        }
+    ]
+    record_event = next(
+        event
+        for event in events
+        if event.payload.get("message") == "response_record_built"
+    )
+    assert record_event.payload["response_shape"] == "analyst_audit"
+    assert record_event.payload["required_element_count"] == 8
+    humanizer_payload = provider.calls[1][0][1].content
+    assert humanizer_payload is not None
+    response_record = json.loads(humanizer_payload)["response_record"]
+    assert response_record["response_shape"]["shape"] == "analyst_audit"
+    assert response_record["response_shape"]["framework_hint"] is not None
+    assert response_record["response_shape"]["required_elements"] == [
+        "bottom_line",
+        "scope",
+        "evaluation_lens",
+        "ranked_findings",
+        "evidence_or_limits",
+        "concrete_recommendations",
+        "highest_leverage_move",
+        "next_step",
+    ]
+    assert [skill["slug"] for skill in response_record["procedural_skills"]] == [
+        "slack-humanizer",
+        "analyst-grade-synthesis",
     ]
 
 

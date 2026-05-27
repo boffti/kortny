@@ -90,6 +90,7 @@ class SkillRegistryService:
         task: Task,
         *,
         response_mode: str,
+        response_shape: str | None = None,
         invocation_kind: str = RESPONSE_HUMANIZER_INVOCATION,
     ) -> list[SkillActivation]:
         """Return active system skills for a response path and record selection."""
@@ -103,6 +104,7 @@ class SkillRegistryService:
                 "message": SKILL_CATALOG_BUILT_MESSAGE,
                 "invocation_kind": invocation_kind,
                 "response_mode": response_mode,
+                "response_shape": response_shape,
                 "candidate_count": len(candidates),
                 "candidate_slugs": [candidate.slug for candidate in candidates],
             },
@@ -110,6 +112,7 @@ class SkillRegistryService:
         selected = self._select_candidates(
             candidates,
             invocation_kind=invocation_kind,
+            response_shape=response_shape,
         )
         for activation in selected:
             self.record_invocation(
@@ -117,6 +120,7 @@ class SkillRegistryService:
                 activation=activation,
                 invocation_kind=invocation_kind,
                 response_mode=response_mode,
+                response_shape=response_shape,
             )
         return selected
 
@@ -127,9 +131,13 @@ class SkillRegistryService:
         activation: SkillActivation,
         invocation_kind: str,
         response_mode: str,
+        response_shape: str | None = None,
     ) -> ProceduralSkillInvocation:
         """Persist a skill invocation and mirror it into task_events."""
 
+        trace_payload = activation.to_trace_payload()
+        if response_shape is not None:
+            trace_payload["response_shape"] = response_shape
         invocation = ProceduralSkillInvocation(
             installation_id=task.installation_id,
             task_id=task.id,
@@ -138,7 +146,7 @@ class SkillRegistryService:
             invocation_kind=invocation_kind,
             response_mode=response_mode,
             selected_reason=activation.selected_reason,
-            payload=activation.to_trace_payload(),
+            payload=trace_payload,
         )
         self.session.add(invocation)
         self.session.flush()
@@ -150,7 +158,8 @@ class SkillRegistryService:
                 "invocation_id": str(invocation.id),
                 "invocation_kind": invocation_kind,
                 "response_mode": response_mode,
-                **activation.to_trace_payload(),
+                "response_shape": response_shape,
+                **trace_payload,
             },
         )
         return invocation
@@ -266,26 +275,73 @@ class SkillRegistryService:
         candidates: list[SkillActivation],
         *,
         invocation_kind: str,
+        response_shape: str | None,
     ) -> list[SkillActivation]:
+        by_slug = {candidate.slug: candidate for candidate in candidates}
         if invocation_kind == RESPONSE_HUMANIZER_INVOCATION:
-            for candidate in candidates:
-                if candidate.slug == "slack-humanizer":
-                    return [
-                        SkillActivation(
-                            skill_id=candidate.skill_id,
-                            skill_version_id=candidate.skill_version_id,
-                            slug=candidate.slug,
-                            name=candidate.name,
-                            version=candidate.version,
-                            owner_type=candidate.owner_type,
-                            trust_level=candidate.trust_level,
-                            instructions_md=candidate.instructions_md,
-                            selected_reason=(
-                                "built-in rendering skill for response humanizer"
-                            ),
-                        )
-                    ]
+            selected: list[SkillActivation] = []
+            self._append_selected(
+                selected,
+                by_slug,
+                "slack-humanizer",
+                reason="built-in rendering skill for response humanizer",
+            )
+            if response_shape in {"analyst_audit", "comparison_memo"}:
+                self._append_selected(
+                    selected,
+                    by_slug,
+                    "analyst-grade-synthesis",
+                    reason=f"matches analyst response_shape={response_shape}",
+                )
+            elif response_shape == "research_brief":
+                self._append_selected(
+                    selected,
+                    by_slug,
+                    "research-synthesis",
+                    reason="matches research brief response shape",
+                )
+            elif response_shape == "status_recap":
+                self._append_selected(
+                    selected,
+                    by_slug,
+                    "status-recap",
+                    reason="matches status recap response shape",
+                )
+            elif response_shape in {"document_delivery", "file_review"}:
+                self._append_selected(
+                    selected,
+                    by_slug,
+                    "document-iteration",
+                    reason=f"matches document response_shape={response_shape}",
+                )
+            if selected:
+                return selected
         return candidates[:1]
+
+    def _append_selected(
+        self,
+        selected: list[SkillActivation],
+        candidates: dict[str, SkillActivation],
+        slug: str,
+        *,
+        reason: str,
+    ) -> None:
+        candidate = candidates.get(slug)
+        if candidate is None:
+            return
+        selected.append(
+            SkillActivation(
+                skill_id=candidate.skill_id,
+                skill_version_id=candidate.skill_version_id,
+                slug=candidate.slug,
+                name=candidate.name,
+                version=candidate.version,
+                owner_type=candidate.owner_type,
+                trust_level=candidate.trust_level,
+                instructions_md=candidate.instructions_md,
+                selected_reason=reason,
+            )
+        )
 
 
 def _content_sha256(definition: BuiltInSkillDefinition) -> str:

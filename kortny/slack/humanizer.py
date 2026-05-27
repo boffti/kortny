@@ -42,6 +42,14 @@ Rules:
   answer present in the ResponseRecord.
 - Do not add new facts, numbers, source claims, tools, or conclusions.
 - Lead with the answer, not with boilerplate.
+- Follow the selected response_shape. Include required elements when the
+  ResponseRecord contains enough evidence; when it does not, state the limit
+  instead of inventing support.
+- For analyst_audit responses, use a consulting-grade shape: bottom line, scope,
+  evaluation lens when relevant, ranked findings, concrete recommendations,
+  highest-leverage move, and a specific next step.
+- For comparison_memo responses, make the recommendation explicit and then show
+  the tradeoffs.
 - Make tool usage sound natural when it helps, not mechanical.
 - Use Slack mrkdwn: *bold*, simple bullets, and <https://url|label> links.
 - Do not use Markdown headings with #.
@@ -67,6 +75,20 @@ class ResponseMode(StrEnum):
     failure_recovery = "failure_recovery"
     memory_recall = "memory_recall"
     multi_step_recap = "multi_step_recap"
+
+
+class ResponseShape(StrEnum):
+    """Concrete Slack response pattern selected for the final answer."""
+
+    quick_reply = "quick_reply"
+    research_brief = "research_brief"
+    analyst_audit = "analyst_audit"
+    comparison_memo = "comparison_memo"
+    file_review = "file_review"
+    document_delivery = "document_delivery"
+    memory_note = "memory_note"
+    status_recap = "status_recap"
+    failure_note = "failure_note"
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,6 +119,30 @@ class ResponseStyleProfile:
             "polish": self.polish,
             "humor": self.humor,
             "proactive_suggestions": self.proactive_suggestions,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ResponseShapeProfile:
+    """Quality contract for the selected response shape."""
+
+    shape: ResponseShape
+    label: str
+    selected_reason: str
+    required_elements: list[str]
+    quality_checks: list[str]
+    avoid: list[str]
+    framework_hint: str | None = None
+
+    def to_payload(self) -> JsonObject:
+        return {
+            "shape": self.shape.value,
+            "label": self.label,
+            "selected_reason": self.selected_reason,
+            "required_elements": self.required_elements,
+            "quality_checks": self.quality_checks,
+            "avoid": self.avoid,
+            "framework_hint": self.framework_hint,
         }
 
 
@@ -207,6 +253,7 @@ class ResponseRecord:
     user_request: str
     raw_answer: str
     response_mode: ResponseMode
+    response_shape: ResponseShapeProfile
     task_status: str
     slack_surface: SlackSurface
     style_profile: ResponseStyleProfile
@@ -226,6 +273,7 @@ class ResponseRecord:
                 max_chars=MAX_RAW_ANSWER_CHARS,
             ),
             "response_mode": self.response_mode.value,
+            "response_shape": self.response_shape.to_payload(),
             "task_status": self.task_status,
             "slack_surface": self.slack_surface.to_payload(),
             "style_profile": self.style_profile.to_payload(),
@@ -245,6 +293,9 @@ class ResponseRecord:
 
         return {
             "response_mode": self.response_mode.value,
+            "response_shape": self.response_shape.shape.value,
+            "response_shape_reason": self.response_shape.selected_reason,
+            "required_element_count": len(self.response_shape.required_elements),
             "task_status": self.task_status,
             "action_count": len(self.actions_taken),
             "evidence_count": len(self.evidence),
@@ -407,6 +458,7 @@ def synthesize_response(
         ).select_for_response(
             task,
             response_mode=response_record.response_mode.value,
+            response_shape=response_record.response_shape.shape.value,
             invocation_kind=RESPONSE_HUMANIZER_INVOCATION,
         )
         response_record = replace(
@@ -522,10 +574,20 @@ def build_response_record(
         artifacts=artifacts,
         failures=failures,
     )
+    response_shape = _select_response_shape(
+        user_request=task.input,
+        raw_text=raw_text,
+        response_mode=response_mode,
+        actions=actions,
+        evidence=evidence,
+        artifacts=artifacts,
+        failures=failures,
+    )
     return ResponseRecord(
         user_request=task.input,
         raw_answer=raw_text.strip(),
         response_mode=response_mode,
+        response_shape=response_shape,
         task_status=_response_status(failures),
         slack_surface=SlackSurface(
             kind="dm" if task.slack_channel_id.startswith("D") else "channel",
@@ -571,6 +633,13 @@ def _response_skills_from_activations(
 
 
 def _route_tier(response_record: ResponseRecord) -> ModelRouteTier:
+    if response_record.response_shape.shape in {
+        ResponseShape.analyst_audit,
+        ResponseShape.comparison_memo,
+        ResponseShape.research_brief,
+        ResponseShape.file_review,
+    }:
+        return ModelRouteTier.analysis
     if response_record.response_mode in {
         ResponseMode.quick_answer,
         ResponseMode.memory_recall,
@@ -693,6 +762,233 @@ def _select_response_mode(
     return ResponseMode.quick_answer
 
 
+def _select_response_shape(
+    *,
+    user_request: str,
+    raw_text: str,
+    response_mode: ResponseMode,
+    actions: Sequence[ResponseAction],
+    evidence: Sequence[ResponseEvidence],
+    artifacts: Sequence[ResponseArtifact],
+    failures: Sequence[ResponseFailure],
+) -> ResponseShapeProfile:
+    del raw_text, actions, evidence
+    request = user_request.casefold()
+    framework_hint = _framework_hint(request)
+
+    if response_mode is ResponseMode.failure_recovery or failures:
+        return _shape_profile(
+            ResponseShape.failure_note,
+            selected_reason="task has failures or recoverable caveats",
+            framework_hint=framework_hint,
+        )
+    if response_mode is ResponseMode.artifact_delivery or artifacts:
+        return _shape_profile(
+            ResponseShape.document_delivery,
+            selected_reason="task produced one or more artifacts",
+            framework_hint=framework_hint,
+        )
+    if response_mode is ResponseMode.memory_recall:
+        return _shape_profile(
+            ResponseShape.memory_note,
+            selected_reason="task is about memory recall or memory state",
+            framework_hint=framework_hint,
+        )
+    if _is_comparison_request(request):
+        return _shape_profile(
+            ResponseShape.comparison_memo,
+            selected_reason="user asked for a comparison or choice",
+            framework_hint=framework_hint,
+        )
+    if _is_analyst_audit_request(request):
+        return _shape_profile(
+            ResponseShape.analyst_audit,
+            selected_reason="user asked for an audit, review, critique, or framework analysis",
+            framework_hint=framework_hint,
+        )
+    if response_mode is ResponseMode.file_analysis:
+        return _shape_profile(
+            ResponseShape.file_review,
+            selected_reason="task uses file analysis evidence",
+            framework_hint=framework_hint,
+        )
+    if response_mode is ResponseMode.research_summary:
+        return _shape_profile(
+            ResponseShape.research_brief,
+            selected_reason="task uses research or source evidence",
+            framework_hint=framework_hint,
+        )
+    if response_mode is ResponseMode.multi_step_recap:
+        return _shape_profile(
+            ResponseShape.status_recap,
+            selected_reason="task involved multiple actions or a long recap",
+            framework_hint=framework_hint,
+        )
+    return _shape_profile(
+        ResponseShape.quick_reply,
+        selected_reason="default concise Slack reply",
+        framework_hint=framework_hint,
+    )
+
+
+def _shape_profile(
+    shape: ResponseShape,
+    *,
+    selected_reason: str,
+    framework_hint: str | None,
+) -> ResponseShapeProfile:
+    if shape is ResponseShape.analyst_audit:
+        return ResponseShapeProfile(
+            shape=shape,
+            label="Analyst audit",
+            selected_reason=selected_reason,
+            framework_hint=framework_hint,
+            required_elements=[
+                "bottom_line",
+                "scope",
+                "evaluation_lens",
+                "ranked_findings",
+                "evidence_or_limits",
+                "concrete_recommendations",
+                "highest_leverage_move",
+                "next_step",
+            ],
+            quality_checks=[
+                "findings are specific and ranked",
+                "recommendations are concrete enough to act on",
+                "scope and evidence limits are explicit",
+            ],
+            avoid=[
+                "generic advice",
+                "unranked laundry lists",
+                "invented source coverage",
+            ],
+        )
+    if shape is ResponseShape.comparison_memo:
+        return ResponseShapeProfile(
+            shape=shape,
+            label="Comparison memo",
+            selected_reason=selected_reason,
+            framework_hint=framework_hint,
+            required_elements=[
+                "recommendation",
+                "scope",
+                "tradeoffs",
+                "when_to_choose_each",
+                "decision_risk",
+                "next_step",
+            ],
+            quality_checks=[
+                "recommendation is explicit",
+                "tradeoffs explain why, not just what",
+                "decision criteria are visible",
+            ],
+            avoid=["hedging without a pick", "false precision", "tables in Slack"],
+        )
+    if shape is ResponseShape.research_brief:
+        return ResponseShapeProfile(
+            shape=shape,
+            label="Research brief",
+            selected_reason=selected_reason,
+            framework_hint=framework_hint,
+            required_elements=[
+                "bottom_line",
+                "top_findings",
+                "source_context",
+                "limits",
+                "next_step",
+            ],
+            quality_checks=[
+                "findings synthesize across sources",
+                "source limitations are visible",
+                "answer avoids link dumping",
+            ],
+            avoid=["raw search-result lists", "unsupported recency claims"],
+        )
+    if shape is ResponseShape.file_review:
+        return ResponseShapeProfile(
+            shape=shape,
+            label="File review",
+            selected_reason=selected_reason,
+            framework_hint=framework_hint,
+            required_elements=[
+                "bottom_line",
+                "file_scope",
+                "key_points",
+                "gaps_or_caveats",
+                "next_step",
+            ],
+            quality_checks=[
+                "file scope is explicit",
+                "summary distinguishes content from interpretation",
+            ],
+            avoid=["pretending unseen files were reviewed"],
+        )
+    if shape is ResponseShape.document_delivery:
+        return ResponseShapeProfile(
+            shape=shape,
+            label="Document delivery",
+            selected_reason=selected_reason,
+            framework_hint=framework_hint,
+            required_elements=["artifact", "what_changed", "review_prompt"],
+            quality_checks=["message is short because artifact carries detail"],
+            avoid=["repeating the whole document in Slack"],
+        )
+    if shape is ResponseShape.status_recap:
+        return ResponseShapeProfile(
+            shape=shape,
+            label="Status recap",
+            selected_reason=selected_reason,
+            framework_hint=framework_hint,
+            required_elements=["what_matters", "groups", "open_items"],
+            quality_checks=["recap is grouped by topic, not chronological noise"],
+            avoid=["activity logs", "overclaiming blockers"],
+        )
+    if shape is ResponseShape.memory_note:
+        return ResponseShapeProfile(
+            shape=shape,
+            label="Memory note",
+            selected_reason=selected_reason,
+            framework_hint=framework_hint,
+            required_elements=["remembered_fact_or_limit", "scope"],
+            quality_checks=["memory scope is clear"],
+            avoid=["raw ids unless necessary"],
+        )
+    if shape is ResponseShape.failure_note:
+        return ResponseShapeProfile(
+            shape=shape,
+            label="Failure note",
+            selected_reason=selected_reason,
+            framework_hint=framework_hint,
+            required_elements=["what_failed", "impact", "next_safe_step"],
+            quality_checks=["failure is user-safe and non-diagnostic by default"],
+            avoid=["stack traces", "blamey language"],
+        )
+    return ResponseShapeProfile(
+        shape=shape,
+        label="Quick reply",
+        selected_reason=selected_reason,
+        framework_hint=framework_hint,
+        required_elements=["answer"],
+        quality_checks=["answer is direct and concise"],
+        avoid=["boilerplate"],
+    )
+
+
+def _is_comparison_request(value: str) -> bool:
+    return any(phrase in value for phrase in COMPARISON_PHRASES)
+
+
+def _is_analyst_audit_request(value: str) -> bool:
+    return any(phrase in value for phrase in ANALYST_AUDIT_PHRASES)
+
+
+def _framework_hint(value: str) -> str | None:
+    if "framework" in value or "cpt" in value:
+        return "Use the evaluation lens the user requested; name it if the raw answer supports it."
+    return None
+
+
 def _has_research_evidence(
     tool_names: set[str],
     evidence: Sequence[ResponseEvidence],
@@ -716,6 +1012,44 @@ def _suggested_next_actions(
     if response_mode is ResponseMode.research_summary:
         return ["deepen the comparison", "turn findings into a brief"]
     return []
+
+
+COMPARISON_PHRASES = frozenset(
+    {
+        "compare",
+        "tradeoff",
+        "tradeoffs",
+        "which one",
+        "which two",
+        "what would you choose",
+        "recommend",
+        "recommendation",
+        "pick",
+        "best option",
+        "pros and cons",
+    }
+)
+
+ANALYST_AUDIT_PHRASES = frozenset(
+    {
+        "audit",
+        "review",
+        "critique",
+        "analyze",
+        "analyse",
+        "assess",
+        "evaluate",
+        "framework",
+        "cpt",
+        "gaps",
+        "reframe",
+        "strategy",
+        "competitive analysis",
+        "website",
+        "copy",
+        "positioning",
+    }
+)
 
 
 def _task_events(session: Session, task: Task) -> Sequence[TaskEvent]:

@@ -1,8 +1,10 @@
 import os
 import uuid
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from threading import Barrier
 
 import pytest
 from alembic import command
@@ -23,7 +25,7 @@ from kortny.db.models import (
     TaskStatus,
 )
 from kortny.db.session import make_engine, make_session_factory, normalize_database_url
-from kortny.tasks import TaskService
+from kortny.tasks import TaskIdentity, TaskService
 
 TEST_POSTGRES_URL = os.environ.get("KORTNY_TEST_POSTGRES_URL")
 
@@ -85,11 +87,134 @@ def test_create_task_is_idempotent_on_slack_event_id(db_session: Session) -> Non
 
     task_count = db_session.scalar(select(func.count()).select_from(Task))
     event_count = db_session.scalar(select(func.count()).select_from(TaskEvent))
+    mismatch_event = db_session.scalar(
+        select(TaskEvent).where(
+            TaskEvent.task_id == first.id,
+            TaskEvent.payload["message"].as_string() == "task_identity_mismatch",
+        )
+    )
 
     assert first.id == second.id
     assert second.input == "research pandas"
+    assert first.identity_kind == "slack_message"
+    assert first.identity_key == (
+        "slack-message:C123:1716400000.000001:1716400000.000001"
+    )
+    assert task_count == 1
+    assert event_count == 2
+    assert mismatch_event is not None
+    assert mismatch_event.payload["requested_identity_kind"] == "slack_message"
+
+
+def test_create_task_dedupes_equivalent_slack_message_identity(
+    db_session: Session,
+) -> None:
+    installation = create_installation(db_session)
+    service = TaskService(db_session)
+
+    first = service.create_task(
+        installation_id=installation.id,
+        slack_event_id="EvAppMention",
+        slack_channel_id="C123",
+        slack_thread_ts="1716400000.000001",
+        slack_message_ts="1716400000.000001",
+        slack_user_id="U123",
+        input="summarize the decisions",
+        source_surface="app_mention",
+    )
+    second = service.create_task(
+        installation_id=installation.id,
+        slack_event_id="EvGenericMessage",
+        slack_channel_id="C123",
+        slack_thread_ts="1716400000.000001",
+        slack_message_ts="1716400000.000001",
+        slack_user_id="U123",
+        input="summarize the decisions",
+        source_surface="channel_message",
+    )
+
+    task_count = db_session.scalar(select(func.count()).select_from(Task))
+    event_count = db_session.scalar(select(func.count()).select_from(TaskEvent))
+
+    assert second.id == first.id
     assert task_count == 1
     assert event_count == 1
+    assert first.slack_event_id == "EvAppMention"
+
+
+def test_create_task_uses_explicit_synthetic_identity(db_session: Session) -> None:
+    installation = create_installation(db_session)
+    service = TaskService(db_session)
+    identity = TaskIdentity.synthetic(
+        source="channel_assessment",
+        source_id="membership-123",
+        input_text="assess channel",
+        payload={"channel_id": "C123"},
+    )
+
+    first = service.create_task(
+        installation_id=installation.id,
+        slack_event_id="observe:membership-123:channel_assessment",
+        slack_channel_id="C123",
+        slack_thread_ts="1716400000.000010",
+        slack_message_ts="1716400000.000010",
+        slack_user_id="system",
+        input="assess channel",
+        identity=identity,
+        source_surface="member_joined_channel",
+    )
+    second = service.create_task(
+        installation_id=installation.id,
+        slack_event_id="observe:membership-123:channel_assessment",
+        slack_channel_id="C123",
+        slack_thread_ts="1716400000.000010",
+        slack_message_ts="1716400000.000010",
+        slack_user_id="system",
+        input="assess channel",
+        identity=identity,
+        source_surface="app_mention",
+    )
+
+    assert second.id == first.id
+    assert first.identity_kind == "synthetic"
+    assert first.identity_key == "synthetic:channel_assessment:membership-123"
+    assert db_session.scalar(select(func.count()).select_from(Task)) == 1
+
+
+def test_concurrent_create_task_same_identity_is_single(
+    db_session: Session,
+    engine: Engine,
+) -> None:
+    installation = create_installation(db_session)
+    installation_id = installation.id
+    db_session.commit()
+    session_factory = make_session_factory(engine=engine)
+    barrier = Barrier(2)
+
+    def create_with_event(event_id: str) -> uuid.UUID:
+        with session_factory() as session:
+            barrier.wait(timeout=5)
+            task = TaskService(session).create_task(
+                installation_id=installation_id,
+                slack_event_id=event_id,
+                slack_channel_id="CRace",
+                slack_thread_ts="1716400000.000099",
+                slack_message_ts="1716400000.000099",
+                slack_user_id="URace",
+                input="race-safe task",
+            )
+            session.commit()
+            return task.id
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        task_ids = list(
+            executor.map(create_with_event, ["EvRaceA", "EvRaceB"])
+        )
+
+    task_count = db_session.scalar(select(func.count()).select_from(Task))
+
+    assert len(set(task_ids)) == 1
+    assert task_count == 1
 
 
 def test_lookup_and_transition_write_status_event(db_session: Session) -> None:

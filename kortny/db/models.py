@@ -141,6 +141,12 @@ class Task(Base):
     slack_thread_ts: Mapped[str | None] = mapped_column(String)
     slack_message_ts: Mapped[str | None] = mapped_column(String)
     slack_user_id: Mapped[str] = mapped_column(String, nullable=False)
+    identity_kind: Mapped[str | None] = mapped_column(String)
+    identity_key: Mapped[str | None] = mapped_column(String)
+    identity_payload: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    identity_fingerprint: Mapped[str | None] = mapped_column(String)
 
     # Request + result
     input: Mapped[str] = mapped_column(Text, nullable=False)
@@ -186,6 +192,18 @@ class Task(Base):
     )
 
     __table_args__ = (
+        CheckConstraint(
+            "identity_kind is null or identity_kind in "
+            "('slack_message', 'slack_event', 'synthetic', 'scheduled', 'manual')",
+            name="ck_tasks_identity_kind",
+        ),
+        Index(
+            "idx_tasks_identity_unique",
+            "installation_id",
+            "identity_key",
+            unique=True,
+            postgresql_where=text("identity_key IS NOT NULL"),
+        ),
         Index("idx_tasks_claim", "status", "available_at"),
         Index("idx_tasks_history", "installation_id", "created_at"),
         Index("idx_tasks_thread", "slack_channel_id", "slack_thread_ts"),

@@ -44,6 +44,12 @@ def assessment_event_id_for_membership(membership_id: uuid.UUID) -> str:
     return f"observe:{membership_id}:channel_assessment"
 
 
+def assessment_identity_source_id(membership_id: uuid.UUID) -> str:
+    """Stable synthetic task identity source id for one channel assessment."""
+
+    return str(membership_id)
+
+
 def is_channel_assessment_task(session: Session, task: Task) -> bool:
     """Return whether a task is a system channel assessment task."""
 

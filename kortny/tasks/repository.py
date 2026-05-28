@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from kortny.db.models import LLMProvider, LLMUsage, Task, TaskEvent, TaskEventType
 from kortny.db.models import TaskStatus as DbTaskStatus
 from kortny.observability import sanitize_payload
+from kortny.tasks.identity import TaskIdentity
 
 TERMINAL_STATUSES = {
     DbTaskStatus.succeeded,
@@ -48,12 +49,28 @@ class TaskRepository:
         slack_thread_ts: str | None = None,
         slack_message_ts: str | None = None,
         parent_task_id: uuid.UUID | None = None,
+        identity: TaskIdentity | None = None,
+        source_surface: str | None = None,
     ) -> Task:
-        """Create a task, returning the existing row for repeated Slack events."""
+        """Create a task, returning the existing row for the same identity."""
 
+        identity = identity or TaskIdentity.for_task_request(
+            slack_event_id=slack_event_id,
+            slack_channel_id=slack_channel_id,
+            slack_thread_ts=slack_thread_ts,
+            slack_message_ts=slack_message_ts,
+            slack_user_id=slack_user_id,
+            input_text=input,
+            source_surface=source_surface,
+        )
+        existing = self.get_by_identity_key(installation_id, identity.key)
+        if existing is not None:
+            self._record_identity_mismatch_if_needed(existing, identity)
+            return existing
         if slack_event_id is not None:
             existing = self.get_by_slack_event_id(slack_event_id)
             if existing is not None:
+                self._record_identity_mismatch_if_needed(existing, identity)
                 return existing
 
         task = Task(
@@ -64,6 +81,10 @@ class TaskRepository:
             slack_thread_ts=slack_thread_ts,
             slack_message_ts=slack_message_ts,
             slack_user_id=slack_user_id,
+            identity_kind=identity.kind,
+            identity_key=identity.key,
+            identity_payload=identity.payload,
+            identity_fingerprint=identity.fingerprint,
             input=input,
             status=DbTaskStatus.pending,
         )
@@ -73,11 +94,16 @@ class TaskRepository:
                 self.session.add(task)
                 self.session.flush()
         except IntegrityError:
+            existing = self.get_by_identity_key(installation_id, identity.key)
+            if existing is not None:
+                self._record_identity_mismatch_if_needed(existing, identity)
+                return existing
             if slack_event_id is None:
                 raise
             existing = self.get_by_slack_event_id(slack_event_id)
             if existing is None:
                 raise
+            self._record_identity_mismatch_if_needed(existing, identity)
             return existing
 
         self.append_event(
@@ -89,6 +115,9 @@ class TaskRepository:
                 "slack_thread_ts": slack_thread_ts,
                 "slack_message_ts": slack_message_ts,
                 "slack_user_id": slack_user_id,
+                "identity_kind": identity.kind,
+                "identity_key": identity.key,
+                "identity_fingerprint": identity.fingerprint,
             },
         )
         return task
@@ -104,6 +133,54 @@ class TaskRepository:
         return self.session.scalar(
             select(Task).where(Task.slack_event_id == slack_event_id)
         )
+
+    def get_by_identity_key(
+        self,
+        installation_id: uuid.UUID,
+        identity_key: str,
+    ) -> Task | None:
+        """Return a task by its installation-scoped identity key."""
+
+        return self.session.scalar(
+            select(Task).where(
+                Task.installation_id == installation_id,
+                Task.identity_key == identity_key,
+            )
+        )
+
+    def get_by_slack_task_identity(
+        self,
+        *,
+        installation_id: uuid.UUID,
+        slack_event_id: str | None,
+        slack_channel_id: str,
+        slack_thread_ts: str | None,
+        slack_message_ts: str | None,
+        slack_user_id: str,
+        input: str,
+        source_surface: str | None = None,
+    ) -> Task | None:
+        """Return an existing task for a Slack event/message identity."""
+
+        identity = TaskIdentity.for_task_request(
+            slack_event_id=slack_event_id,
+            slack_channel_id=slack_channel_id,
+            slack_thread_ts=slack_thread_ts,
+            slack_message_ts=slack_message_ts,
+            slack_user_id=slack_user_id,
+            input_text=input,
+            source_surface=source_surface,
+        )
+        existing = self.get_by_identity_key(installation_id, identity.key)
+        if existing is not None:
+            self._record_identity_mismatch_if_needed(existing, identity)
+            return existing
+        if slack_event_id is None:
+            return None
+        existing = self.get_by_slack_event_id(slack_event_id)
+        if existing is not None:
+            self._record_identity_mismatch_if_needed(existing, identity)
+        return existing
 
     def get_by_thread(self, channel: str, thread_ts: str) -> Task | None:
         """Return the newest task for a Slack channel/thread pair."""
@@ -399,6 +476,33 @@ class TaskRepository:
         task.total_cost_usd = _coerce_decimal(cost_usd or Decimal("0"))
         task.updated_at = datetime.now(UTC)
         self.session.flush()
+
+    def _record_identity_mismatch_if_needed(
+        self,
+        task: Task,
+        requested_identity: TaskIdentity,
+    ) -> None:
+        existing_fingerprint = task.identity_fingerprint
+        if existing_fingerprint == requested_identity.fingerprint:
+            return
+        if task.identity_key is None and task.slack_event_id is not None:
+            return
+        self.append_event(
+            task,
+            TaskEventType.log,
+            {
+                "message": "task_identity_mismatch",
+                "existing_identity_kind": task.identity_kind,
+                "existing_identity_key": task.identity_key,
+                "existing_identity_fingerprint": existing_fingerprint,
+                "requested_identity_kind": requested_identity.kind,
+                "requested_identity_key": requested_identity.key,
+                "requested_identity_fingerprint": requested_identity.fingerprint,
+                "requested_identity_payload": sanitize_payload(
+                    requested_identity.payload
+                ),
+            },
+        )
 
     def _commit_if_requested(self) -> None:
         if self.commit_after_write:

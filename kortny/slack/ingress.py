@@ -38,7 +38,9 @@ from kortny.observe import (
 from kortny.observe.assessment import (
     CHANNEL_ASSESSMENT_REQUESTED_MESSAGE,
     assessment_event_id_for_membership,
+    assessment_identity_source_id,
     build_channel_assessment_input,
+    channel_assessment_request_event,
 )
 from kortny.slack.acknowledgement import (
     AcknowledgementGenerator,
@@ -58,7 +60,7 @@ from kortny.slack.reactions import (
     LibraryReactionProvider,
     ReactionProvider,
 )
-from kortny.tasks import TaskService
+from kortny.tasks import TaskIdentity, TaskService
 
 LEADING_MENTION_RE = re.compile(r"^\s*<@[^>]+>\s*")
 IGNORED_DM_SUBTYPES = frozenset(
@@ -231,7 +233,22 @@ class SlackIngress:
         event_id = _required_str(body, "event_id")
         channel_id = _required_str(event, "channel")
         message_ts = _required_str(event, "ts")
-        existing = self._find_existing_task(event_id, channel_id, message_ts)
+        input_text = _task_input(event, strip_leading_mention=False)
+        user_id = _required_str(event, "user")
+        existing = self._find_existing_task(
+            installation_id=installation.id,
+            event_id=event_id,
+            channel_id=channel_id,
+            thread_ts=_context_thread_ts(
+                event,
+                source="channel_message",
+                channel_id=channel_id,
+            ),
+            message_ts=message_ts,
+            user_id=user_id,
+            input_text=input_text,
+            source="channel_message",
+        )
         if existing is not None:
             self.inbound_events.mark_task_created(
                 inbound_event,
@@ -256,7 +273,6 @@ class SlackIngress:
                 ),
             )
 
-        input_text = _task_input(event, strip_leading_mention=False)
         intent_decision = self._classify_soft_channel_message(
             event=event,
             input_text=input_text,
@@ -745,6 +761,7 @@ class SlackIngress:
         if not membership.onboarding_message_ts:
             return None
 
+        task_input = build_channel_assessment_input(channel_id=membership.channel_id)
         task = self.task_service.create_task(
             installation_id=installation.id,
             slack_event_id=assessment_event_id_for_membership(membership.id),
@@ -757,19 +774,30 @@ class SlackIngress:
                 or installation.bot_user_id
                 or "system"
             ),
-            input=build_channel_assessment_input(channel_id=membership.channel_id),
+            input=task_input,
+            identity=TaskIdentity.synthetic(
+                source="channel_assessment",
+                source_id=assessment_identity_source_id(membership.id),
+                input_text=task_input,
+                payload={
+                    "channel_id": membership.channel_id,
+                    "membership_id": str(membership.id),
+                },
+            ),
+            source_surface=source,
         )
-        self.task_service.append_event(
-            task,
-            TaskEventType.log,
-            {
-                "message": CHANNEL_ASSESSMENT_REQUESTED_MESSAGE,
-                "source": source,
-                "channel_id": membership.channel_id,
-                "membership_id": str(membership.id),
-                "onboarding_message_ts": membership.onboarding_message_ts,
-            },
-        )
+        if channel_assessment_request_event(self.session, task) is None:
+            self.task_service.append_event(
+                task,
+                TaskEventType.log,
+                {
+                    "message": CHANNEL_ASSESSMENT_REQUESTED_MESSAGE,
+                    "source": source,
+                    "channel_id": membership.channel_id,
+                    "membership_id": str(membership.id),
+                    "onboarding_message_ts": membership.onboarding_message_ts,
+                },
+            )
         membership_service.mark_assessment_queued(
             membership=membership,
             task_id=task.id,
@@ -895,7 +923,16 @@ class SlackIngress:
                 installation=installation,
                 team_id=team_id,
             )
-        existing = self._find_existing_task(event_id, channel_id, message_ts)
+        existing = self._find_existing_task(
+            installation_id=installation.id,
+            event_id=event_id,
+            channel_id=channel_id,
+            thread_ts=_context_thread_ts(event, source=source, channel_id=channel_id),
+            message_ts=message_ts,
+            user_id=_required_str(event, "user"),
+            input_text=input_text,
+            source=source,
+        )
         if existing is not None:
             self.inbound_events.mark_task_created(
                 inbound_event,
@@ -928,6 +965,7 @@ class SlackIngress:
             slack_message_ts=message_ts,
             slack_user_id=user_id,
             input=input_text,
+            source_surface=source,
         )
         self.inbound_events.mark_task_created(
             inbound_event,
@@ -1079,14 +1117,25 @@ class SlackIngress:
 
     def _find_existing_task(
         self,
+        installation_id: uuid.UUID,
         event_id: str,
         channel_id: str,
+        thread_ts: str | None,
         message_ts: str,
+        user_id: str,
+        input_text: str,
+        source: str,
     ) -> Task | None:
-        existing = self.task_service.get_by_slack_event_id(event_id)
-        if existing is None:
-            existing = self.task_service.get_by_slack_message(channel_id, message_ts)
-        return existing
+        return self.task_service.get_by_slack_task_identity(
+            installation_id=installation_id,
+            slack_event_id=event_id,
+            slack_channel_id=channel_id,
+            slack_thread_ts=thread_ts,
+            slack_message_ts=message_ts,
+            slack_user_id=user_id,
+            input=input_text,
+            source_surface=source,
+        )
 
     def _post_ack_reaction(
         self,

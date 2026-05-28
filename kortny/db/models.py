@@ -209,6 +209,91 @@ class TaskEvent(Base):
     __table_args__ = (UniqueConstraint("task_id", "seq", name="idx_events_task_seq"),)
 
 
+class SlackInboundEvent(Base):
+    __tablename__ = "slack_inbound_events"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    installation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("installations.id", ondelete="CASCADE"), nullable=False
+    )
+    slack_team_id: Mapped[str] = mapped_column(String, nullable=False)
+    slack_event_id: Mapped[str | None] = mapped_column(String)
+    event_type: Mapped[str] = mapped_column(String, nullable=False)
+    event_subtype: Mapped[str | None] = mapped_column(String)
+    surface: Mapped[str] = mapped_column(String, nullable=False)
+    channel_id: Mapped[str | None] = mapped_column(String)
+    user_id: Mapped[str | None] = mapped_column(String)
+    message_ts: Mapped[str | None] = mapped_column(String)
+    thread_ts: Mapped[str | None] = mapped_column(String)
+    event_time: Mapped[datetime | None] = mapped_column(TZ)
+    retry_num: Mapped[int | None] = mapped_column(Integer)
+    retry_reason: Mapped[str | None] = mapped_column(String)
+    raw_body: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    raw_event: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    processing_status: Mapped[str] = mapped_column(
+        String, nullable=False, server_default=text("'received'")
+    )
+    processing_attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    task_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("tasks.id", ondelete="SET NULL")
+    )
+    observation_event_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("observation_events.id", ondelete="SET NULL")
+    )
+    metadata_json: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    last_error: Mapped[dict | None] = mapped_column(JSONB)
+    received_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now()
+    )
+    processed_at: Mapped[datetime | None] = mapped_column(TZ)
+    created_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "processing_status in "
+            "('received', 'ignored', 'task_created', 'observed', "
+            "'failed', 'dead_lettered', 'replayed')",
+            name="ck_slack_inbound_events_processing_status",
+        ),
+        Index(
+            "idx_slack_inbound_events_event_unique",
+            "installation_id",
+            "slack_event_id",
+            unique=True,
+            postgresql_where=text("slack_event_id IS NOT NULL"),
+        ),
+        Index(
+            "idx_slack_inbound_events_status",
+            "installation_id",
+            "processing_status",
+            "received_at",
+        ),
+        Index(
+            "idx_slack_inbound_events_channel",
+            "installation_id",
+            "channel_id",
+            "received_at",
+        ),
+        Index("idx_slack_inbound_events_task", "task_id"),
+        Index("idx_slack_inbound_events_observation", "observation_event_id"),
+    )
+
+
 class WorkspaceState(Base):
     __tablename__ = "workspace_state"
 

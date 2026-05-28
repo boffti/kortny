@@ -13,7 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from kortny.db.models import Installation, Task, TaskEventType
+from kortny.db.models import Installation, SlackInboundEvent, Task, TaskEventType
 from kortny.intent import (
     IntentClassifier,
     IntentDecision,
@@ -46,6 +46,7 @@ from kortny.slack.acknowledgement import (
     generate_acknowledgement,
 )
 from kortny.slack.identity import SlackIdentityService
+from kortny.slack.inbound_events import SlackInboundEventService
 from kortny.slack.membership import (
     ChannelMembershipResult,
     SlackChannelMembershipService,
@@ -145,6 +146,7 @@ class SlackIngress:
         )
         self.reaction_provider = reaction_provider or LibraryReactionProvider()
         self.intent_classifier = intent_classifier
+        self.inbound_events = SlackInboundEventService(session)
 
     def handle_app_mention(
         self,
@@ -169,8 +171,18 @@ class SlackIngress:
     ) -> AppMentionResult | None:
         """Create a task for a direct message user event."""
 
+        team_id = _team_id(body, event)
+        installation = self._get_or_create_installation(team_id)
+        inbound_event = self._record_inbound_event(
+            body=body,
+            event=event,
+            surface="dm",
+            installation=installation,
+            team_id=team_id,
+        )
         ignore_reason = _dm_ignore_reason(event)
         if ignore_reason is not None:
+            self.inbound_events.mark_ignored(inbound_event, reason=ignore_reason)
             logger.info(
                 "slack dm ignored reason=%s event_id=%s channel=%s",
                 ignore_reason,
@@ -184,6 +196,9 @@ class SlackIngress:
             event=event,
             input_text=_task_input(event, strip_leading_mention=False),
             source="dm",
+            inbound_event=inbound_event,
+            installation=installation,
+            team_id=team_id,
         )
 
     def handle_channel_message(
@@ -195,7 +210,17 @@ class SlackIngress:
     ) -> AppMentionResult | None:
         """Create a task for a direct soft app-name mention in a channel."""
 
+        team_id = _team_id(body, event)
+        installation = self._get_or_create_installation(team_id)
+        inbound_event = self._record_inbound_event(
+            body=body,
+            event=event,
+            surface="channel_message",
+            installation=installation,
+            team_id=team_id,
+        )
         if not should_classify_channel_message(event, app_name=app_name):
+            self.inbound_events.mark_ignored(inbound_event, reason="not_soft_mention")
             logger.info(
                 "slack channel_message ignored reason=not_soft_mention event_id=%s channel=%s",
                 body.get("event_id"),
@@ -208,6 +233,11 @@ class SlackIngress:
         message_ts = _required_str(event, "ts")
         existing = self._find_existing_task(event_id, channel_id, message_ts)
         if existing is not None:
+            self.inbound_events.mark_task_created(
+                inbound_event,
+                task=existing,
+                metadata={"dedupe": "existing_task"},
+            )
             logger.info(
                 "slack channel_message duplicate task_id=%s event_id=%s channel=%s thread_ts=%s",
                 existing.id,
@@ -233,6 +263,10 @@ class SlackIngress:
             app_name=app_name,
         )
         if intent_decision is None:
+            self.inbound_events.mark_ignored(
+                inbound_event,
+                reason="intent_classification_unavailable",
+            )
             return None
         if not should_create_task_from_soft_mention(intent_decision):
             self._post_rejected_soft_mention_reaction(
@@ -250,6 +284,15 @@ class SlackIngress:
                 intent_decision.confidence,
                 intent_decision.addressed_to_kortny,
             )
+            self.inbound_events.mark_ignored(
+                inbound_event,
+                reason="intent_rejected",
+                metadata={
+                    "classification": intent_decision.classification.value,
+                    "confidence": intent_decision.confidence,
+                    "addressed_to_kortny": intent_decision.addressed_to_kortny,
+                },
+            )
             return None
 
         return self._handle_addressed_message(
@@ -258,6 +301,9 @@ class SlackIngress:
             input_text=input_text,
             source="channel_message",
             preclassified_intent_decision=intent_decision,
+            inbound_event=inbound_event,
+            installation=installation,
+            team_id=team_id,
         )
 
     def observe_channel_message(
@@ -270,6 +316,13 @@ class SlackIngress:
 
         team_id = _team_id(body, event)
         installation = self._get_or_create_installation(team_id)
+        inbound_event = self._record_inbound_event(
+            body=body,
+            event=event,
+            surface="message_observation",
+            installation=installation,
+            team_id=team_id,
+        )
         self._record_channel_seen(
             installation=installation,
             body=body,
@@ -284,6 +337,11 @@ class SlackIngress:
             event=dict(event),
         )
         if result.observed:
+            self.inbound_events.mark_observed(
+                inbound_event,
+                observation=result.event,
+                metadata={"reason": result.reason},
+            )
             logger.info(
                 "slack observation recorded event_id=%s channel=%s observation_id=%s",
                 body.get("event_id"),
@@ -291,6 +349,14 @@ class SlackIngress:
                 result.event.id if result.event is not None else None,
             )
         else:
+            if result.event is not None:
+                self.inbound_events.mark_observed(
+                    inbound_event,
+                    observation=result.event,
+                    metadata={"reason": result.reason},
+                )
+            else:
+                self.inbound_events.mark_ignored(inbound_event, reason=result.reason)
             logger.info(
                 "slack observation skipped reason=%s event_id=%s channel=%s",
                 result.reason,
@@ -307,17 +373,26 @@ class SlackIngress:
     ) -> ChannelJoinObservationResult:
         """Idempotently onboard channels when an app mention implicitly adds Kortny."""
 
+        team_id = _team_id(body, event)
+        installation = self._get_or_create_installation(team_id)
+        inbound_event = self._record_inbound_event(
+            body=body,
+            event=event,
+            surface="app_mention",
+            installation=installation,
+            team_id=team_id,
+        )
         if event.get("channel_type") == "im":
+            self.inbound_events.mark_ignored(inbound_event, reason="dm_excluded")
             return ChannelJoinObservationResult(
                 observed=False,
                 reason="dm_excluded",
             )
 
-        team_id = _team_id(body, event)
-        installation = self._get_or_create_installation(team_id)
         self._resolve_bot_user_id(installation)
         channel_id = _optional_str(event.get("channel"))
         if channel_id is None:
+            self.inbound_events.mark_ignored(inbound_event, reason="missing_channel")
             return ChannelJoinObservationResult(
                 observed=False,
                 reason="missing_channel",
@@ -333,6 +408,7 @@ class SlackIngress:
             membership_service=membership_service,
         )
         if membership_result is None:
+            self.inbound_events.mark_ignored(inbound_event, reason="missing_channel")
             return ChannelJoinObservationResult(
                 observed=False,
                 reason="missing_channel",
@@ -349,6 +425,9 @@ class SlackIngress:
                 body.get("event_id"),
                 channel_id,
             )
+            # Do not stamp normal task rows with a redundant onboarding skip reason.
+            # If this app_mention also becomes a user task, task creation owns the
+            # final inbound status and metadata.
             return ChannelJoinObservationResult(
                 observed=False,
                 reason=reason,
@@ -376,13 +455,27 @@ class SlackIngress:
             membership_result=membership_result,
             result=result,
         )
-        self._queue_channel_assessment_if_needed(
+        assessment_task = self._queue_channel_assessment_if_needed(
             installation=installation,
             membership_service=membership_service,
             membership_result=membership_result,
             event=event,
             source="app_mention",
         )
+        if assessment_task is not None:
+            self.inbound_events.mark_task_created(
+                inbound_event,
+                task=assessment_task,
+                metadata={"task_kind": "channel_assessment", "reason": result.reason},
+            )
+        elif result.event is not None:
+            self.inbound_events.mark_observed(
+                inbound_event,
+                observation=result.event,
+                metadata={"reason": result.reason},
+            )
+        else:
+            self.inbound_events.mark_ignored(inbound_event, reason=result.reason)
         if result.observed:
             logger.info(
                 "slack app_mention channel onboarding observed event_id=%s channel=%s reason=%s",
@@ -409,12 +502,20 @@ class SlackIngress:
 
         team_id = _team_id(body, event)
         installation = self._get_or_create_installation(team_id)
+        inbound_event = self._record_inbound_event(
+            body=body,
+            event=event,
+            surface="member_joined_channel",
+            installation=installation,
+            team_id=team_id,
+        )
         bot_user_id = self._resolve_joined_bot_user_id(
             installation=installation,
             body=body,
             event=event,
         )
         if bot_user_id is None:
+            self.inbound_events.mark_ignored(inbound_event, reason="bot_user_unresolved")
             logger.info(
                 "slack member_joined_channel ignored reason=bot_user_unresolved event_id=%s channel=%s user=%s",
                 body.get("event_id"),
@@ -427,6 +528,7 @@ class SlackIngress:
             )
 
         if _optional_str(event.get("user")) != bot_user_id:
+            self.inbound_events.mark_ignored(inbound_event, reason="not_bot_join")
             logger.info(
                 "slack member_joined_channel ignored reason=not_bot_join event_id=%s channel=%s user=%s bot_user_id=%s",
                 body.get("event_id"),
@@ -441,6 +543,7 @@ class SlackIngress:
 
         channel_id = _optional_str(event.get("channel"))
         if channel_id is None:
+            self.inbound_events.mark_ignored(inbound_event, reason="missing_channel")
             return ChannelJoinObservationResult(
                 observed=False,
                 reason="missing_channel",
@@ -456,6 +559,7 @@ class SlackIngress:
             membership_service=membership_service,
         )
         if membership_result is None:
+            self.inbound_events.mark_ignored(inbound_event, reason="missing_channel")
             return ChannelJoinObservationResult(
                 observed=False,
                 reason="missing_channel",
@@ -484,13 +588,27 @@ class SlackIngress:
             membership_result=membership_result,
             result=result,
         )
-        self._queue_channel_assessment_if_needed(
+        assessment_task = self._queue_channel_assessment_if_needed(
             installation=installation,
             membership_service=membership_service,
             membership_result=membership_result,
             event=event,
             source="member_joined_channel",
         )
+        if assessment_task is not None:
+            self.inbound_events.mark_task_created(
+                inbound_event,
+                task=assessment_task,
+                metadata={"task_kind": "channel_assessment", "reason": result.reason},
+            )
+        elif result.event is not None:
+            self.inbound_events.mark_observed(
+                inbound_event,
+                observation=result.event,
+                metadata={"reason": result.reason},
+            )
+        else:
+            self.inbound_events.mark_ignored(inbound_event, reason=result.reason)
         if result.intro_text and result.policy is not None:
             pass
         elif result.observed:
@@ -673,7 +791,38 @@ class SlackIngress:
     ) -> ReactionResult:
         """Dispatch a Slack reaction to cancel/retry/confirmation handlers."""
 
-        del body
+        team_id = _team_id(body, event)
+        installation = self._get_or_create_installation(team_id)
+        inbound_event = self._record_inbound_event(
+            body=body,
+            event=event,
+            surface="reaction_added",
+            installation=installation,
+            team_id=team_id,
+        )
+        try:
+            result = self._handle_reaction_added(event)
+        except Exception as exc:
+            self.inbound_events.mark_failed(
+                inbound_event,
+                error=exc,
+                metadata={"surface": "reaction_added"},
+            )
+            raise
+        if result.handled:
+            self.inbound_events.mark_observed(
+                inbound_event,
+                metadata={"action": result.action},
+            )
+        else:
+            self.inbound_events.mark_ignored(
+                inbound_event,
+                reason=result.reason or "ignored",
+                metadata={"action": result.action},
+            )
+        return result
+
+    def _handle_reaction_added(self, event: Mapping[str, Any]) -> ReactionResult:
         reaction = _required_str(event, "reaction")
         user_id = _required_str(event, "user")
         item = event.get("item")
@@ -729,12 +878,30 @@ class SlackIngress:
         input_text: str,
         source: str,
         preclassified_intent_decision: IntentDecision | None = None,
+        inbound_event: SlackInboundEvent | None = None,
+        installation: Installation | None = None,
+        team_id: str | None = None,
     ) -> AppMentionResult:
         event_id = _required_str(body, "event_id")
         channel_id = _required_str(event, "channel")
         message_ts = _required_str(event, "ts")
+        team_id = team_id or _team_id(body, event)
+        installation = installation or self._get_or_create_installation(team_id)
+        if inbound_event is None:
+            inbound_event = self._record_inbound_event(
+                body=body,
+                event=event,
+                surface=source,
+                installation=installation,
+                team_id=team_id,
+            )
         existing = self._find_existing_task(event_id, channel_id, message_ts)
         if existing is not None:
+            self.inbound_events.mark_task_created(
+                inbound_event,
+                task=existing,
+                metadata={"dedupe": "existing_task"},
+            )
             logger.info(
                 "slack %s duplicate task_id=%s event_id=%s channel=%s thread_ts=%s",
                 source,
@@ -750,10 +917,8 @@ class SlackIngress:
                 or _context_thread_ts(event, source=source, channel_id=channel_id),
             )
 
-        team_id = _team_id(body, event)
         user_id = _required_str(event, "user")
         thread_ts = _context_thread_ts(event, source=source, channel_id=channel_id)
-        installation = self._get_or_create_installation(team_id)
 
         task = self.task_service.create_task(
             installation_id=installation.id,
@@ -763,6 +928,11 @@ class SlackIngress:
             slack_message_ts=message_ts,
             slack_user_id=user_id,
             input=input_text,
+        )
+        self.inbound_events.mark_task_created(
+            inbound_event,
+            task=task,
+            metadata={"source": source},
         )
         set_span_attributes(
             {
@@ -1216,6 +1386,25 @@ class SlackIngress:
             decision.classification.value,
             decision.confidence,
         )
+
+    def _record_inbound_event(
+        self,
+        *,
+        body: Mapping[str, Any],
+        event: Mapping[str, Any],
+        surface: str,
+        installation: Installation | None = None,
+        team_id: str | None = None,
+    ) -> SlackInboundEvent:
+        team_id = team_id or _team_id(body, event)
+        installation = installation or self._get_or_create_installation(team_id)
+        return self.inbound_events.record(
+            installation=installation,
+            slack_team_id=team_id,
+            body=body,
+            event=event,
+            surface=surface,
+        ).event
 
     def _get_or_create_installation(self, slack_team_id: str) -> Installation:
         existing = self.session.scalar(

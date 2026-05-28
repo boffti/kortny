@@ -19,6 +19,7 @@ from kortny.db.models import (
     ObservePolicy,
     SlackChannelMembership,
     SlackIdentity,
+    SlackInboundEvent,
     Task,
     TaskEvent,
     TaskEventType,
@@ -314,6 +315,24 @@ def test_app_mention_creates_task_and_adds_reaction_ack(
         for event in events
     )
 
+    inbound = db_session.scalar(
+        select(SlackInboundEvent).where(
+            SlackInboundEvent.slack_event_id == "EvMention1"
+        )
+    )
+    assert inbound is not None
+    assert inbound.installation_id == result.task.installation_id
+    assert inbound.event_type == "app_mention"
+    assert inbound.surface == "app_mention"
+    assert inbound.channel_id == "C123"
+    assert inbound.user_id == "U123"
+    assert inbound.message_ts == "1716400000.000001"
+    assert inbound.processing_status == "task_created"
+    assert inbound.task_id == result.task.id
+    assert inbound.raw_event["text"] == "<@UBOT> research pandas and make a PDF"
+    assert inbound.metadata_json["source"] == "app_mention"
+    assert inbound.processed_at is not None
+
 
 def test_app_mention_refreshes_slack_identity_cache(
     db_session: Session,
@@ -579,10 +598,17 @@ def test_redelivered_app_mention_is_idempotent(db_session: Session) -> None:
     client = FakeSlackClient()
     ingress = SlackIngress(session=db_session, client=client)
     body = app_mention_body(event_id="EvMentionDuplicate")
+    redelivery_body = {
+        **body,
+        "headers": {
+            "X-Slack-Retry-Num": "1",
+            "X-Slack-Retry-Reason": "http_timeout",
+        },
+    }
     event = app_mention_event(text="<@UBOT> search duplicate delivery")
 
     first = ingress.handle_app_mention(body=body, event=event)
-    second = ingress.handle_app_mention(body=body, event=event)
+    second = ingress.handle_app_mention(body=redelivery_body, event=event)
     db_session.commit()
 
     task_count = db_session.scalar(select(func.count()).select_from(Task))
@@ -590,6 +616,11 @@ def test_redelivered_app_mention_is_idempotent(db_session: Session) -> None:
         select(func.count())
         .select_from(TaskEvent)
         .where(TaskEvent.type == TaskEventType.message_posted)
+    )
+    inbound = db_session.scalar(
+        select(SlackInboundEvent).where(
+            SlackInboundEvent.slack_event_id == "EvMentionDuplicate"
+        )
     )
 
     assert first.created is True
@@ -599,6 +630,12 @@ def test_redelivered_app_mention_is_idempotent(db_session: Session) -> None:
     assert message_event_count == 0
     assert client.calls == []
     assert len(client.reactions) == 1
+    assert inbound is not None
+    assert inbound.processing_status == "task_created"
+    assert inbound.task_id == first.task.id
+    assert inbound.retry_num == 1
+    assert inbound.retry_reason == "http_timeout"
+    assert inbound.metadata_json["delivery_count"] == 2
 
 
 def test_app_mention_dedupes_by_slack_message_timestamp(db_session: Session) -> None:
@@ -687,10 +724,17 @@ def test_dm_from_bot_is_ignored(db_session: Session) -> None:
     db_session.commit()
 
     task_count = db_session.scalar(select(func.count()).select_from(Task))
+    inbound = db_session.scalar(
+        select(SlackInboundEvent).where(SlackInboundEvent.slack_event_id == "EvDmBot")
+    )
 
     assert result is None
     assert task_count == 0
     assert client.calls == []
+    assert inbound is not None
+    assert inbound.processing_status == "ignored"
+    assert inbound.metadata_json["reason"] == "bot_id"
+    assert inbound.task_id is None
 
 
 def test_dm_edit_event_is_ignored(db_session: Session) -> None:
@@ -743,6 +787,11 @@ def test_channel_message_observation_records_policy_gated_event(
     observation = db_session.scalar(select(ObservationEvent))
     membership = db_session.scalar(select(SlackChannelMembership))
     task_count = db_session.scalar(select(func.count()).select_from(Task))
+    inbound = db_session.scalar(
+        select(SlackInboundEvent).where(
+            SlackInboundEvent.slack_event_id == "EvObserveMessage"
+        )
+    )
 
     assert result.observed is True
     assert result.reason == "observed"
@@ -767,6 +816,11 @@ def test_channel_message_observation_records_policy_gated_event(
     assert membership.onboarding_status == "pending"
     assert membership.last_event_id == "EvObserveMessage"
     assert task_count == 0
+    assert inbound is not None
+    assert inbound.processing_status == "observed"
+    assert inbound.observation_event_id == observation.id
+    assert inbound.task_id is None
+    assert inbound.metadata_json["reason"] == "observed"
 
 
 def test_channel_observation_skips_dm_events(db_session: Session) -> None:
@@ -874,6 +928,11 @@ def test_member_joined_channel_records_onboarding_and_posts_intro(
             select(ObservationEvent).order_by(ObservationEvent.event_type)
         )
     )
+    inbound = db_session.scalar(
+        select(SlackInboundEvent).where(
+            SlackInboundEvent.slack_event_id == "EvObserveJoin"
+        )
+    )
 
     assert result.observed is True
     assert result.intro_text is not None
@@ -911,6 +970,10 @@ def test_member_joined_channel_records_onboarding_and_posts_intro(
             "thread_ts": None,
         }
     ]
+    assert inbound is not None
+    assert inbound.processing_status == "task_created"
+    assert inbound.task_id == assessment_task.id
+    assert inbound.metadata_json["task_kind"] == "channel_assessment"
     assert (
         db_session.scalar(
             select(func.count())
@@ -1094,6 +1157,48 @@ def test_app_mention_can_trigger_channel_onboarding_when_join_event_missing(
             "thread_ts": None,
         }
     ]
+
+
+def test_app_mention_after_onboarding_does_not_keep_onboarding_skip_reason(
+    db_session: Session,
+) -> None:
+    client = FakeSlackClient(auth_test={"ok": True, "user_id": "UBOT"})
+    ingress = SlackIngress(session=db_session, client=client)
+
+    initial = ingress.ensure_channel_onboarding_from_mention(
+        body=app_mention_body(event_id="EvInitialOnboarding"),
+        event=app_mention_event(text="<@UBOT> hi"),
+    )
+    follow_up_body = app_mention_body(event_id="EvAlreadyOnboardedTask")
+    follow_up_event = app_mention_event(
+        text="<@UBOT> summarize the unresolved items here",
+        ts="1716400200.000001",
+    )
+    onboarding_preflight = ingress.ensure_channel_onboarding_from_mention(
+        body=follow_up_body,
+        event=follow_up_event,
+    )
+    task_result = ingress.handle_app_mention(
+        body=follow_up_body,
+        event=follow_up_event,
+    )
+    db_session.commit()
+
+    inbound = db_session.scalar(
+        select(SlackInboundEvent).where(
+            SlackInboundEvent.slack_event_id == "EvAlreadyOnboardedTask"
+        )
+    )
+
+    assert initial.observed is True
+    assert onboarding_preflight.observed is False
+    assert onboarding_preflight.reason == "intro_already_posted"
+    assert task_result.created is True
+    assert inbound is not None
+    assert inbound.processing_status == "task_created"
+    assert inbound.task_id == task_result.task.id
+    assert inbound.metadata_json["source"] == "app_mention"
+    assert "reason" not in inbound.metadata_json
 
 
 def test_member_joined_channel_ignores_non_bot_joins(db_session: Session) -> None:
@@ -1585,6 +1690,7 @@ def cleanup_database(session: Session) -> None:
     for model in (
         Artifact,
         LLMUsage,
+        SlackInboundEvent,
         TaskEvent,
         Task,
         ModelPricing,

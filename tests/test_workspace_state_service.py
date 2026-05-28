@@ -15,6 +15,7 @@ from kortny.db.models import (
     Installation,
     LLMUsage,
     ModelPricing,
+    SlackInboundEvent,
     Task,
     TaskEvent,
     TaskEventType,
@@ -159,7 +160,7 @@ def test_propose_confirm_round_trip_materializes_active_fact(
         session=db_session,
         client=slack_client,
     ).handle_reaction_added(
-        body={"event_id": "EvMemoryConfirm"},
+        body={"event_id": "EvMemoryConfirm", "team_id": "T123"},
         event=reaction_event(
             reaction="white_check_mark",
             user="UConfirming",
@@ -247,7 +248,7 @@ def test_propose_reject_does_not_write_workspace_state(db_session: Session) -> N
         session=db_session,
         client=slack_client,
     ).handle_reaction_added(
-        body={"event_id": "EvMemoryReject"},
+        body={"event_id": "EvMemoryReject", "team_id": "T123"},
         event=reaction_event(
             reaction="no_entry_sign",
             user="URejecting",
@@ -569,6 +570,7 @@ def cleanup_database(session: Session) -> None:
         WorkspaceState,
         Artifact,
         LLMUsage,
+        SlackInboundEvent,
         TaskEvent,
         Task,
         ModelPricing,

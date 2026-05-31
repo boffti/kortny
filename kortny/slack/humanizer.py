@@ -29,12 +29,21 @@ from kortny.skills import (
     SkillRegistryService,
 )
 from kortny.slack.formatting import normalize_slack_mrkdwn
+from kortny.slack.synthesis import (
+    EvidenceKind,
+    EvidenceTrust,
+    SlackRef,
+    SynthesisApprovalState,
+    SynthesisContext,
+    SynthesisEvidence,
+    SynthesisOutcome,
+)
 from kortny.tasks import TaskService
 from kortny.tools.types import JsonObject
 
 RESPONSE_HUMANIZER_PROMPT_NAME = "kortny.response_humanizer"
 RESPONSE_HUMANIZER_RESPONSE_FORMAT: JsonObject = {"type": "json_object"}
-RESPONSE_HUMANIZER_SYSTEM_PROMPT = """You write Kortny's final Slack response from a typed ResponseRecord.
+RESPONSE_HUMANIZER_SYSTEM_PROMPT = """You write Kortny's final Slack response from a typed ResponseRecord and SynthesisContext.
 
 Return exactly one JSON object:
 {"message":"Slack-ready message"}
@@ -45,7 +54,11 @@ your rewrite.
 
 Rules:
 - Use only facts, actions, artifacts, failures, uncertainties, links, and the raw
-  answer present in the ResponseRecord.
+  answer present in the ResponseRecord, bounded by the evidence and outcome in
+  SynthesisContext.
+- Treat SynthesisContext as the evidence boundary. If its outcome is no_result,
+  partial_failure, needs_approval, or error, make that state clear and do not
+  imply completed work that the context does not support.
 - Do not add new facts, numbers, source claims, tools, or conclusions.
 - Lead with the answer, not with boilerplate.
 - Follow the selected response_shape. Include required elements when the
@@ -71,6 +84,7 @@ Rules:
 MAX_RAW_ANSWER_CHARS = 8000
 MAX_TRACE_OUTPUT_CHARS = 1200
 MAX_HUMANIZED_CHARS = 12000
+MAX_SYNTHESIS_EVIDENCE_CHARS = 900
 HUMANIZER_LEAK_MARKERS = frozenset(
     {
         "_mode is",
@@ -347,6 +361,7 @@ class ResponseSynthesizer(Protocol):
         session: Session,
         task: Task,
         response_record: ResponseRecord,
+        synthesis_context: SynthesisContext,
         task_service: TaskService,
     ) -> ResponseSynthesisResult:
         """Return Slack-ready text."""
@@ -363,9 +378,10 @@ class StaticResponseSynthesizer:
         session: Session,
         task: Task,
         response_record: ResponseRecord,
+        synthesis_context: SynthesisContext,
         task_service: TaskService,
     ) -> ResponseSynthesisResult:
-        del session, task, task_service
+        del session, task, synthesis_context, task_service
         raw_text = response_record.raw_answer
         normalized = normalize_slack_mrkdwn(raw_text)
         return ResponseSynthesisResult(
@@ -403,6 +419,7 @@ class LLMResponseSynthesizer:
         session: Session,
         task: Task,
         response_record: ResponseRecord,
+        synthesis_context: SynthesisContext,
         task_service: TaskService,
     ) -> ResponseSynthesisResult:
         if _should_skip(response_record, min_chars=self.min_chars):
@@ -435,7 +452,7 @@ class LLMResponseSynthesizer:
                 ChatMessage(
                     role="user",
                     content=json.dumps(
-                        _synthesis_payload(response_record),
+                        _synthesis_payload(response_record, synthesis_context),
                         default=str,
                         separators=(",", ":"),
                         sort_keys=True,
@@ -485,12 +502,26 @@ def synthesize_response(
             response_record,
             procedural_skills=_response_skills_from_activations(activations),
         )
+    synthesis_context = build_synthesis_context(
+        session=session,
+        task=task,
+        raw_text=raw_text,
+        response_record=response_record,
+    )
     task_service.append_event(
         task,
         TaskEventType.log,
         {
             "message": "response_record_built",
             **response_record.summary_payload(),
+        },
+    )
+    task_service.append_event(
+        task,
+        TaskEventType.log,
+        {
+            "message": "synthesis_context_built",
+            **synthesis_context.summary_payload(),
         },
     )
     task_service.append_event(
@@ -507,6 +538,7 @@ def synthesize_response(
             session=session,
             task=task,
             response_record=response_record,
+            synthesis_context=synthesis_context,
             task_service=task_service,
         )
     except Exception as exc:
@@ -651,6 +683,45 @@ def build_response_record(
     )
 
 
+def build_synthesis_context(
+    *,
+    session: Session,
+    task: Task,
+    raw_text: str,
+    response_record: ResponseRecord,
+) -> SynthesisContext:
+    """Build the typed evidence pack for final Slack response synthesis."""
+
+    events = _task_events(session, task)
+    evidence = _synthesis_evidence_from_events(events, task)
+    approvals = _approval_states_from_events(events)
+    outcome, outcome_reason = _select_synthesis_outcome(
+        raw_text=raw_text,
+        response_record=response_record,
+        events=events,
+        approvals=approvals,
+    )
+    uncertainty = _synthesis_uncertainty(
+        response_record=response_record,
+        outcome=outcome,
+        outcome_reason=outcome_reason,
+    )
+    return SynthesisContext(
+        user_intent=task.input,
+        outcome=outcome,
+        outcome_reason=outcome_reason,
+        slack_surface=response_record.slack_surface.kind,
+        threaded=response_record.slack_surface.threaded,
+        addressee_user_id=task.slack_user_id,
+        evidence=evidence[-10:],
+        approvals=approvals[-5:],
+        uncertainty=uncertainty[-8:],
+        skills_loaded=[skill.slug for skill in response_record.procedural_skills],
+        allowed_claim_sources=[item.source_id for item in evidence[-10:]],
+        forbidden_claims=_default_forbidden_claims(outcome),
+    )
+
+
 def _should_skip(response_record: ResponseRecord, *, min_chars: int) -> bool:
     raw_text = response_record.raw_answer
     if len(raw_text) < min_chars:
@@ -691,14 +762,321 @@ def _route_tier(response_record: ResponseRecord) -> ModelRouteTier:
     return ModelRouteTier.standard
 
 
-def _synthesis_payload(response_record: ResponseRecord) -> JsonObject:
+def _synthesis_payload(
+    response_record: ResponseRecord,
+    synthesis_context: SynthesisContext,
+) -> JsonObject:
     return {
         "response_record": response_record.to_payload(),
+        "synthesis_context": synthesis_context.to_payload(),
         "renderer_constraints": {
             "target": "Slack mrkdwn",
             "avoid": ["GitHub Markdown headings", "Markdown tables"],
         },
     }
+
+
+def _synthesis_evidence_from_events(
+    events: Sequence[TaskEvent],
+    task: Task,
+) -> list[SynthesisEvidence]:
+    evidence: list[SynthesisEvidence] = []
+    calls_by_id = _tool_calls_by_id(events)
+    slack_ref = SlackRef(
+        channel_id=task.slack_channel_id,
+        thread_ts=task.slack_thread_ts,
+        message_ts=task.slack_message_ts,
+        user_id=task.slack_user_id,
+    )
+    for event in events:
+        payload = event.payload
+        if event.type is TaskEventType.tool_result:
+            tool_call_id = _string(payload.get("tool_call_id")) or f"event-{event.id}"
+            call = calls_by_id.get(tool_call_id, {})
+            tool = _string(payload.get("tool")) or _string(call.get("tool")) or "tool"
+            output = payload.get("output")
+            content = _synthesis_tool_content(tool, output)
+            if content is None:
+                content = _tool_result_summary(output) or "Tool returned a result."
+            urls = _extract_urls(output)
+            evidence.append(
+                SynthesisEvidence(
+                    source_id=tool_call_id,
+                    kind=_evidence_kind_for_tool(tool),
+                    content=_shorten(content, max_chars=MAX_SYNTHESIS_EVIDENCE_CHARS),
+                    trust=_trust_for_tool(tool),
+                    confidence=_confidence_for_tool_result(payload, output),
+                    tool=tool,
+                    urls=urls,
+                    slack_ref=slack_ref,
+                    metadata=_synthesis_tool_metadata(payload, output),
+                )
+            )
+        elif event.type is TaskEventType.error:
+            failure = _response_failure_from_error_event(event)
+            content = failure.message or failure.code or "Task recorded an error."
+            evidence.append(
+                SynthesisEvidence(
+                    source_id=f"error-{event.id}",
+                    kind=EvidenceKind.error,
+                    content=_shorten(content, max_chars=MAX_SYNTHESIS_EVIDENCE_CHARS),
+                    trust=EvidenceTrust.trusted,
+                    confidence=1.0,
+                    slack_ref=slack_ref,
+                    metadata={
+                        "source": failure.source,
+                        "code": failure.code,
+                        "recovery_action": failure.recovery_action,
+                    },
+                )
+            )
+    return evidence
+
+
+def _synthesis_tool_content(tool: str, output: object) -> str | None:
+    if not isinstance(output, dict):
+        return None
+    error = _tool_error_payload(output)
+    if error is not None:
+        return _string(error.get("message")) or "Tool reported an error."
+
+    if tool == "inspect_memory":
+        count = _optional_int(output.get("count")) or 0
+        scope = _string(output.get("scope")) or "memory"
+        facts = output.get("facts")
+        if count == 0 or not isinstance(facts, list) or not facts:
+            return f"Inspected {scope} memory and found no active facts."
+        fact_summaries = [
+            summary
+            for fact in facts[:5]
+            if isinstance(fact, dict)
+            if (summary := _memory_fact_summary(fact)) is not None
+        ]
+        if fact_summaries:
+            return (
+                f"Inspected {scope} memory and found {count} active fact(s): "
+                + "; ".join(fact_summaries)
+            )
+        return f"Inspected {scope} memory and found {count} active fact(s)."
+
+    if tool == "recall_fact":
+        key = _string(output.get("key")) or "requested key"
+        if output.get("found") is False:
+            return f"No active memory fact was found for {key}."
+        value_text = _string(output.get("value_text"))
+        if value_text:
+            return f"Recalled memory fact {key}: {value_text}"
+        return f"Recalled memory fact {key}."
+
+    if tool == "forget_fact":
+        key = _string(output.get("key")) or "requested key"
+        forgotten_count = _optional_int(output.get("forgotten_count")) or 0
+        if forgotten_count == 0:
+            return f"No active memory fact matched {key}."
+        return f"Forgot memory fact {key}."
+
+    if tool == "remember_fact":
+        status = _string(output.get("status"))
+        key = _string(output.get("key")) or "memory fact"
+        value_text = _string(output.get("value_text"))
+        if status == "pending_confirmation":
+            if value_text:
+                return f"Proposed memory fact {key} for confirmation: {value_text}"
+            return f"Proposed memory fact {key} for confirmation."
+
+    summary = _string(output.get("summary")) or _string(output.get("message"))
+    if summary:
+        return summary
+    titles = _result_titles(output)
+    if titles:
+        return "Tool returned these result titles: " + "; ".join(titles[:5])
+    return None
+
+
+def _memory_fact_summary(fact: JsonObject) -> str | None:
+    key = _string(fact.get("key"))
+    value_text = _string(fact.get("value_text"))
+    if key and value_text:
+        return f"{key}: {value_text}"
+    if key:
+        return key
+    return value_text
+
+
+def _result_titles(value: object) -> list[str]:
+    titles: list[str] = []
+
+    def walk(item: object) -> None:
+        if len(titles) >= 8:
+            return
+        if isinstance(item, dict):
+            title = item.get("title")
+            if isinstance(title, str) and title.strip():
+                titles.append(title.strip())
+            for child in item.values():
+                walk(child)
+        elif isinstance(item, list):
+            for child in item:
+                walk(child)
+
+    walk(value)
+    return list(dict.fromkeys(titles))
+
+
+def _evidence_kind_for_tool(tool: str) -> EvidenceKind:
+    if tool in {"remember_fact", "recall_fact", "inspect_memory", "forget_fact"}:
+        return EvidenceKind.memory
+    return EvidenceKind.tool_result
+
+
+def _trust_for_tool(tool: str) -> EvidenceTrust:
+    if tool in {"remember_fact", "recall_fact", "inspect_memory", "forget_fact"}:
+        return EvidenceTrust.trusted
+    return EvidenceTrust.untrusted
+
+
+def _confidence_for_tool_result(payload: JsonObject, output: object) -> float:
+    if payload.get("recoverable") is True or _tool_error_payload(output) is not None:
+        return 0.3
+    if isinstance(output, dict) and output.get("successful") is False:
+        return 0.3
+    return 0.9
+
+
+def _synthesis_tool_metadata(payload: JsonObject, output: object) -> JsonObject:
+    metadata: JsonObject = {
+        "artifact_count": payload.get("artifact_count"),
+        "recoverable": payload.get("recoverable"),
+        "error_category": payload.get("error_category"),
+        "recovery_action": payload.get("recovery_action"),
+    }
+    if isinstance(output, dict):
+        for key in (
+            "scope",
+            "key",
+            "count",
+            "found",
+            "forgotten_count",
+            "status",
+            "successful",
+        ):
+            if key in output:
+                metadata[key] = output[key]
+    return {key: value for key, value in metadata.items() if value is not None}
+
+
+def _approval_states_from_events(
+    events: Sequence[TaskEvent],
+) -> list[SynthesisApprovalState]:
+    approvals: list[SynthesisApprovalState] = []
+    for event in events:
+        payload = event.payload
+        if event.type is not TaskEventType.log:
+            continue
+        message = _string(payload.get("message"))
+        if message not in {
+            "tool_approval_required",
+            "tool_approval_waiting",
+            "tool_approval_decision",
+        }:
+            continue
+        approvals.append(
+            SynthesisApprovalState(
+                tool=_string(payload.get("tool")),
+                status=_approval_status(message, payload),
+                reason=_string(payload.get("reason")),
+                approver_user_id=_string(payload.get("user_id"))
+                or _string(payload.get("approver_user_id")),
+                metadata={
+                    "message": message,
+                    "tool_call_id": payload.get("tool_call_id"),
+                    "decision": payload.get("decision"),
+                },
+            )
+        )
+    return approvals
+
+
+def _approval_status(message: str, payload: JsonObject) -> str:
+    if message == "tool_approval_decision":
+        decision = _string(payload.get("decision"))
+        return decision or "decided"
+    if message == "tool_approval_waiting":
+        return "waiting"
+    return "required"
+
+
+def _select_synthesis_outcome(
+    *,
+    raw_text: str,
+    response_record: ResponseRecord,
+    events: Sequence[TaskEvent],
+    approvals: Sequence[SynthesisApprovalState],
+) -> tuple[SynthesisOutcome, str]:
+    if any(approval.status in {"required", "waiting"} for approval in approvals):
+        return SynthesisOutcome.needs_approval, "tool approval is pending"
+    if _has_no_result_signal(events):
+        return SynthesisOutcome.no_result, "tool evidence reported no matching result"
+    if response_record.failures and response_record.actions_taken:
+        return (
+            SynthesisOutcome.partial_failure,
+            "some tool or execution evidence failed",
+        )
+    if response_record.failures:
+        return SynthesisOutcome.error, "task recorded failure evidence"
+    if not raw_text.strip():
+        return SynthesisOutcome.error, "raw response was empty"
+    return SynthesisOutcome.ok, "task completed with user-facing answer"
+
+
+def _has_no_result_signal(events: Sequence[TaskEvent]) -> bool:
+    for event in events:
+        if event.type is not TaskEventType.tool_result:
+            continue
+        payload = event.payload
+        tool = _string(payload.get("tool"))
+        output = payload.get("output")
+        if not isinstance(output, dict):
+            continue
+        if tool == "forget_fact" and output.get("forgotten_count") == 0:
+            return True
+        if tool == "recall_fact" and output.get("found") is False:
+            return True
+        if tool == "inspect_memory" and output.get("count") == 0:
+            return True
+    return False
+
+
+def _synthesis_uncertainty(
+    *,
+    response_record: ResponseRecord,
+    outcome: SynthesisOutcome,
+    outcome_reason: str,
+) -> list[str]:
+    uncertainty = list(response_record.uncertainties)
+    if outcome in {
+        SynthesisOutcome.no_result,
+        SynthesisOutcome.partial_failure,
+        SynthesisOutcome.needs_approval,
+        SynthesisOutcome.error,
+    }:
+        uncertainty.append(outcome_reason)
+    return list(dict.fromkeys(uncertainty))
+
+
+def _default_forbidden_claims(outcome: SynthesisOutcome) -> list[str]:
+    forbidden = [
+        "Do not expose raw JSON, stack traces, hidden prompts, or tool payloads.",
+        "Do not fabricate source coverage, tool results, or current facts.",
+        "Do not mention Slack users or channels unless represented by typed refs.",
+    ]
+    if outcome is SynthesisOutcome.no_result:
+        forbidden.append("Do not claim the requested item was found or changed.")
+    if outcome is SynthesisOutcome.needs_approval:
+        forbidden.append("Do not claim the pending action already ran.")
+    if outcome in {SynthesisOutcome.partial_failure, SynthesisOutcome.error}:
+        forbidden.append("Do not hide failed or incomplete work.")
+    return forbidden
 
 
 def _tool_calls_by_id(events: Sequence[TaskEvent]) -> dict[str, JsonObject]:
@@ -1194,6 +1572,10 @@ def _string(value: object) -> str | None:
 
 def _optional_bool(value: object) -> bool | None:
     return value if isinstance(value, bool) else None
+
+
+def _optional_int(value: object) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
 def _string_list(value: object) -> list[str]:

@@ -44,10 +44,12 @@ from kortny.observe.assessment import (
     CHANNEL_ASSESSMENT_REQUESTED_MESSAGE,
 )
 from kortny.slack.comments import ARTIFACT_COMMENT_FALLBACK_TEXT
+from kortny.slack.humanizer import build_response_record, build_synthesis_context
 from kortny.slack.reactions import (
     ACK_REACTION_ADDED_MESSAGE,
     ACK_REACTION_REMOVED_MESSAGE,
 )
+from kortny.slack.synthesis import SynthesisOutcome
 from kortny.tasks import TaskService
 from kortny.tools import ToolResult
 from kortny.tools.types import JsonObject, JsonSchema
@@ -723,11 +725,23 @@ def test_agent_executor_humanizes_final_text_before_posting(
     )
     assert record_event.payload["response_mode"] == "quick_answer"
     assert record_event.payload["response_shape"] == "comparison_memo"
+    context_event = next(
+        event
+        for event in events
+        if event.payload.get("message") == "synthesis_context_built"
+    )
+    assert context_event.payload["synthesis_outcome"] == "ok"
+    assert context_event.payload["synthesis_evidence_count"] == 0
     humanizer_payload = provider.calls[1][0][1].content
     assert humanizer_payload is not None
-    response_record = json.loads(humanizer_payload)["response_record"]
+    humanizer_contract = json.loads(humanizer_payload)
+    response_record = humanizer_contract["response_record"]
+    synthesis_context = humanizer_contract["synthesis_context"]
     assert response_record["response_mode"] == "quick_answer"
     assert response_record["response_shape"]["shape"] == "comparison_memo"
+    assert synthesis_context["outcome"] == "ok"
+    assert synthesis_context["user_intent"] == task.input
+    assert synthesis_context["addressee_user_id"] == "U123"
     assert response_record["response_shape"]["required_elements"] == [
         "recommendation",
         "scope",
@@ -862,11 +876,26 @@ def test_agent_executor_builds_research_response_record_for_tool_results(
     assert record_event.payload["response_shape"] == "research_brief"
     assert record_event.payload["action_count"] == 1
     assert record_event.payload["evidence_count"] == 1
+    context_event = next(
+        event
+        for event in events
+        if event.payload.get("message") == "synthesis_context_built"
+    )
+    assert context_event.payload["synthesis_outcome"] == "ok"
+    assert context_event.payload["synthesis_evidence_count"] == 1
+    assert context_event.payload["synthesis_evidence_kinds"] == ["tool_result"]
+    assert context_event.payload["synthesis_evidence_trust"] == ["untrusted"]
     humanizer_payload = provider.calls[2][0][1].content
     assert humanizer_payload is not None
-    response_record = json.loads(humanizer_payload)["response_record"]
+    humanizer_contract = json.loads(humanizer_payload)
+    response_record = humanizer_contract["response_record"]
+    synthesis_context = humanizer_contract["synthesis_context"]
     assert response_record["response_mode"] == "research_summary"
     assert response_record["response_shape"]["shape"] == "research_brief"
+    assert synthesis_context["outcome"] == "ok"
+    assert synthesis_context["evidence"][0]["tool"] == "web_search"
+    assert synthesis_context["evidence"][0]["trust"] == "untrusted"
+    assert "tempfile" in synthesis_context["evidence"][0]["content"]
     assert [skill["slug"] for skill in response_record["procedural_skills"]] == [
         "slack-humanizer",
         "research-synthesis",
@@ -984,6 +1013,66 @@ def test_agent_executor_builds_analyst_audit_response_record(
         "slack-humanizer",
         "analyst-grade-synthesis",
     ]
+
+
+def test_synthesis_context_marks_memory_no_result_from_tool_evidence(
+    db_session: Session,
+) -> None:
+    task = create_task(db_session, event_id="EvMemoryNoResultContext")
+    task.input = "forget my old report style preference"
+    service = TaskService(db_session)
+    service.append_event(
+        task,
+        TaskEventType.tool_call,
+        {
+            "tool_call_id": "call-forget-style",
+            "tool": "forget_fact",
+            "argument_keys": ["scope", "key"],
+        },
+    )
+    service.append_event(
+        task,
+        TaskEventType.tool_result,
+        {
+            "tool_call_id": "call-forget-style",
+            "tool": "forget_fact",
+            "output": {
+                "scope": "user",
+                "scope_id": "U123",
+                "key": "old_report_style_preference",
+                "forgotten_count": 0,
+                "message": "No active memory fact matched that scope and key.",
+            },
+            "artifact_count": 0,
+        },
+    )
+    raw_answer = (
+        "I checked what I remember and don't see that saved right now, "
+        "so there is nothing for me to remove."
+    )
+
+    response_record = build_response_record(
+        session=db_session,
+        task=task,
+        raw_text=raw_answer,
+    )
+    synthesis_context = build_synthesis_context(
+        session=db_session,
+        task=task,
+        raw_text=raw_answer,
+        response_record=response_record,
+    )
+
+    assert synthesis_context.outcome is SynthesisOutcome.no_result
+    assert (
+        synthesis_context.outcome_reason == "tool evidence reported no matching result"
+    )
+    assert synthesis_context.evidence[0].kind == "memory"
+    assert synthesis_context.evidence[0].trust == "trusted"
+    assert synthesis_context.evidence[0].metadata["forgotten_count"] == 0
+    assert "Do not claim the requested item was found or changed." in (
+        synthesis_context.forbidden_claims
+    )
 
 
 def test_agent_executor_removes_ack_reaction_after_success(

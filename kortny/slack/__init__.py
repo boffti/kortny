@@ -29,6 +29,7 @@ from kortny.slack.posting import (
     SlackPostingError,
     SlackThread,
 )
+from kortny.slack.synthesis import SynthesisContext, SynthesisOutcome
 
 __all__ = [
     "AppMentionResult",
@@ -48,6 +49,8 @@ __all__ = [
     "StaticArtifactCommentGenerator",
     "StaticAcknowledgementGenerator",
     "StaticResponseSynthesizer",
+    "SynthesisContext",
+    "SynthesisOutcome",
     "acknowledge_then_handle",
     "create_bolt_app",
     "normalize_slack_mrkdwn",

@@ -312,6 +312,79 @@ class SlackInboundEvent(Base):
     )
 
 
+class SlackSideEffect(Base):
+    __tablename__ = "slack_side_effects"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    installation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("installations.id", ondelete="CASCADE"), nullable=False
+    )
+    task_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("tasks.id", ondelete="SET NULL")
+    )
+    idempotency_key: Mapped[str] = mapped_column(String, nullable=False)
+    operation: Mapped[str] = mapped_column(String, nullable=False)
+    purpose: Mapped[str | None] = mapped_column(String)
+    target_channel_id: Mapped[str | None] = mapped_column(String)
+    target_thread_ts: Mapped[str | None] = mapped_column(String)
+    target_message_ts: Mapped[str | None] = mapped_column(String)
+    request_json: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    response_json: Mapped[dict | None] = mapped_column(JSONB)
+    status: Mapped[str] = mapped_column(
+        String, nullable=False, server_default=text("'pending'")
+    )
+    attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    last_error: Mapped[dict | None] = mapped_column(JSONB)
+    available_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now()
+    )
+    started_at: Mapped[datetime | None] = mapped_column(TZ)
+    delivered_at: Mapped[datetime | None] = mapped_column(TZ)
+    created_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "operation in "
+            "('chat_postMessage', 'files_upload_v2', 'reactions_add', "
+            "'reactions_remove')",
+            name="ck_slack_side_effects_operation",
+        ),
+        CheckConstraint(
+            "status in ('pending', 'in_progress', 'succeeded', 'failed')",
+            name="ck_slack_side_effects_status",
+        ),
+        UniqueConstraint(
+            "installation_id",
+            "idempotency_key",
+            name="idx_slack_side_effects_idempotency",
+        ),
+        Index(
+            "idx_slack_side_effects_status",
+            "installation_id",
+            "status",
+            "available_at",
+        ),
+        Index("idx_slack_side_effects_task", "task_id", "created_at"),
+        Index(
+            "idx_slack_side_effects_target",
+            "installation_id",
+            "target_channel_id",
+            "target_message_ts",
+        ),
+    )
+
+
 class WorkspaceState(Base):
     __tablename__ = "workspace_state"
 

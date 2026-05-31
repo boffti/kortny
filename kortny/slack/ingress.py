@@ -7,7 +7,7 @@ import re
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -53,6 +53,12 @@ from kortny.slack.membership import (
     ChannelMembershipResult,
     SlackChannelMembershipService,
 )
+from kortny.slack.outbox import (
+    SlackSideEffectOutbox,
+    slack_channel_intro_key,
+    slack_reaction_key,
+)
+from kortny.slack.posting import SlackPoster, SlackPostingClient, SlackThread
 from kortny.slack.reactions import (
     ACK_REACTION_ADD_FAILED_MESSAGE,
     ACK_REACTION_ADDED_MESSAGE,
@@ -63,6 +69,8 @@ from kortny.slack.reactions import (
 from kortny.tasks import TaskIdentity, TaskService
 
 LEADING_MENTION_RE = re.compile(r"^\s*<@[^>]+>\s*")
+WHITESPACE_RE = re.compile(r"\s+")
+SPACE_BEFORE_PUNCTUATION_RE = re.compile(r"\s+([,.!?;:])")
 IGNORED_DM_SUBTYPES = frozenset(
     {
         "bot_message",
@@ -158,11 +166,20 @@ class SlackIngress:
     ) -> AppMentionResult:
         """Create a task for a Slack app_mention and acknowledge it visually."""
 
+        team_id = _team_id(body, event)
+        installation = self._get_or_create_installation(team_id)
+        bot_user_id = self._resolve_bot_user_id(installation)
         return self._handle_addressed_message(
             body=body,
             event=event,
-            input_text=_task_input(event, strip_leading_mention=True),
+            input_text=_task_input(
+                event,
+                strip_leading_mention=True,
+                bot_user_id=bot_user_id,
+            ),
             source="app_mention",
+            installation=installation,
+            team_id=team_id,
         )
 
     def handle_dm(
@@ -286,6 +303,7 @@ class SlackIngress:
             return None
         if not should_create_task_from_soft_mention(intent_decision):
             self._post_rejected_soft_mention_reaction(
+                installation=installation,
                 source="channel_message",
                 channel_id=channel_id,
                 message_ts=message_ts,
@@ -378,7 +396,7 @@ class SlackIngress:
                 result.reason,
                 body.get("event_id"),
                 event.get("channel"),
-        )
+            )
         return result
 
     def ensure_channel_onboarding_from_mention(
@@ -531,7 +549,9 @@ class SlackIngress:
             event=event,
         )
         if bot_user_id is None:
-            self.inbound_events.mark_ignored(inbound_event, reason="bot_user_unresolved")
+            self.inbound_events.mark_ignored(
+                inbound_event, reason="bot_user_unresolved"
+            )
             logger.info(
                 "slack member_joined_channel ignored reason=bot_user_unresolved event_id=%s channel=%s user=%s",
                 body.get("event_id"),
@@ -660,12 +680,28 @@ class SlackIngress:
             return
         if not result.intro_text or result.policy is None or channel_id is None:
             return
+        intro_text = result.intro_text
 
-        response = self.client.chat_postMessage(
-            channel=channel_id,
-            text=result.intro_text,
+        installation = self._get_or_create_installation(team_id)
+        outbox_result = SlackSideEffectOutbox(self.session).deliver(
+            installation_id=installation.id,
+            idempotency_key=slack_channel_intro_key(
+                installation_id=installation.id,
+                channel_id=channel_id,
+            ),
+            operation="chat_postMessage",
+            purpose="channel_intro",
+            target_channel_id=channel_id,
+            request={
+                "channel": channel_id,
+                "text": intro_text,
+            },
+            call=lambda: self.client.chat_postMessage(
+                channel=channel_id,
+                text=intro_text,
+            ),
         )
-        message_ts = _optional_response_ts(response)
+        message_ts = _optional_response_ts(outbox_result.response)
         observe_service.mark_channel_intro_posted(
             policy=result.policy,
             slack_team_id=team_id,
@@ -1045,22 +1081,18 @@ class SlackIngress:
             task=task,
             task_service=self.task_service,
         )
-        acknowledgement = self.client.chat_postMessage(
-            channel=channel_id,
-            text=acknowledgement_text,
-            thread_ts=thread_ts,
-        )
-        acknowledgement_ts = _optional_response_ts(acknowledgement)
-        self.task_service.append_event(
-            task,
-            TaskEventType.message_posted,
-            {
-                "channel": channel_id,
-                "thread_ts": thread_ts,
-                "message_ts": acknowledgement_ts,
-                "text": acknowledgement_text,
-                "purpose": "acknowledgement",
-            },
+        acknowledgement_ts = SlackPoster(
+            session=self.session,
+            client=cast(SlackPostingClient, self.client),
+            task_service=self.task_service,
+        ).post_message(
+            SlackThread(
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+                task_id=task.id,
+            ),
+            acknowledgement_text,
+            purpose="acknowledgement",
         )
         logger.info(
             "slack %s acknowledgement posted task_id=%s channel=%s thread_ts=%s message_ts=%s",
@@ -1167,10 +1199,32 @@ class SlackIngress:
             )
             return
         try:
-            reactions_add(
-                channel=channel_id,
-                name=choice.name,
-                timestamp=message_ts,
+            outbox_result = SlackSideEffectOutbox(self.session).deliver(
+                installation_id=task.installation_id,
+                task_id=task.id,
+                idempotency_key=slack_reaction_key(
+                    task_id=task.id,
+                    operation="reactions_add",
+                    channel_id=channel_id,
+                    message_ts=message_ts,
+                    reaction=choice.name,
+                ),
+                operation="reactions_add",
+                purpose="acknowledgement",
+                target_channel_id=channel_id,
+                target_message_ts=message_ts,
+                request={
+                    "channel": channel_id,
+                    "name": choice.name,
+                    "timestamp": message_ts,
+                    "reaction_intent": choice.intent,
+                    "source": source,
+                },
+                call=lambda: reactions_add(
+                    channel=channel_id,
+                    name=choice.name,
+                    timestamp=message_ts,
+                ),
             )
         except Exception as exc:
             logger.info(
@@ -1209,6 +1263,8 @@ class SlackIngress:
                 "message_ts": message_ts,
                 "reaction": choice.name,
                 "reaction_intent": choice.intent,
+                "slack_side_effect_id": str(outbox_result.side_effect.id),
+                "idempotency_key": outbox_result.side_effect.idempotency_key,
             },
         )
         logger.info(
@@ -1237,6 +1293,7 @@ class SlackIngress:
     def _post_rejected_soft_mention_reaction(
         self,
         *,
+        installation: Installation,
         source: str,
         channel_id: str,
         message_ts: str,
@@ -1262,10 +1319,29 @@ class SlackIngress:
             )
             return
         try:
-            reactions_add(
-                channel=channel_id,
-                name=choice.name,
-                timestamp=message_ts,
+            SlackSideEffectOutbox(self.session).deliver(
+                installation_id=installation.id,
+                idempotency_key=(
+                    f"slack:reactions_add:soft_rejected:"
+                    f"{installation.id}:{channel_id}:{message_ts}:{choice.name}"
+                ),
+                operation="reactions_add",
+                purpose="rejected_soft_mention",
+                target_channel_id=channel_id,
+                target_message_ts=message_ts,
+                request={
+                    "channel": channel_id,
+                    "name": choice.name,
+                    "timestamp": message_ts,
+                    "reaction_intent": choice.intent,
+                    "source": source,
+                    "classification": intent_decision.classification.value,
+                },
+                call=lambda: reactions_add(
+                    channel=channel_id,
+                    name=choice.name,
+                    timestamp=message_ts,
+                ),
             )
         except Exception as exc:
             logger.info(
@@ -1699,22 +1775,21 @@ class SlackIngress:
         if task is None:
             return
 
-        thread_ts = _result_thread_ts(task)
-        response = self.client.chat_postMessage(
-            channel=channel_id,
-            text=text,
-            thread_ts=thread_ts,
-        )
-        self.task_service.append_event(
-            task,
-            TaskEventType.message_posted,
-            {
-                "channel": channel_id,
-                "thread_ts": thread_ts,
-                "message_ts": _optional_response_ts(response),
-                "text": text,
-                "purpose": purpose,
-            },
+        thread_ts = task.slack_thread_ts or task.slack_message_ts
+        if thread_ts is None:
+            return
+        SlackPoster(
+            session=self.session,
+            client=cast(SlackPostingClient, self.client),
+            task_service=self.task_service,
+        ).post_message(
+            SlackThread(
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+                task_id=task.id,
+            ),
+            text,
+            purpose=purpose,
         )
 
 
@@ -1813,14 +1888,29 @@ def _task_input(
     event: Mapping[str, Any],
     *,
     strip_leading_mention: bool,
+    bot_user_id: str | None = None,
 ) -> str:
     text = event.get("text")
     if not isinstance(text, str):
         return ""
     stripped = text.strip()
+    if bot_user_id is not None:
+        stripped = _strip_bot_mention(stripped, bot_user_id=bot_user_id)
     if strip_leading_mention:
-        stripped = LEADING_MENTION_RE.sub("", text, count=1).strip()
+        stripped = LEADING_MENTION_RE.sub("", stripped, count=1).strip()
     return _append_file_context(stripped or text.strip(), event)
+
+
+def _strip_bot_mention(text: str, *, bot_user_id: str) -> str:
+    """Remove Kortny's Slack mention from addressed-message task text."""
+
+    mention_re = re.compile(rf"<@{re.escape(bot_user_id)}>")
+    without_self_mention = mention_re.sub(" ", text)
+    without_self_mention = SPACE_BEFORE_PUNCTUATION_RE.sub(
+        r"\1",
+        without_self_mention,
+    )
+    return WHITESPACE_RE.sub(" ", without_self_mention).strip()
 
 
 def _append_file_context(input_text: str, event: Mapping[str, Any]) -> str:

@@ -20,6 +20,7 @@ from kortny.db.models import (
     SlackChannelMembership,
     SlackIdentity,
     SlackInboundEvent,
+    SlackSideEffect,
     Task,
     TaskEvent,
     TaskEventType,
@@ -334,6 +335,26 @@ def test_app_mention_creates_task_and_adds_reaction_ack(
     assert inbound.processed_at is not None
 
 
+def test_app_mention_strips_bot_mention_outside_leading_position(
+    db_session: Session,
+) -> None:
+    client = FakeSlackClient(auth_test={"ok": True, "user_id": "UBOT"})
+
+    result = SlackIngress(session=db_session, client=client).handle_app_mention(
+        body=app_mention_body(event_id="EvMentionMidSentence"),
+        event=app_mention_event(text="Yo <@UBOT> are you up?"),
+    )
+    db_session.commit()
+
+    task = db_session.get(Task, result.task.id)
+    installation = db_session.scalar(select(Installation))
+
+    assert task is not None
+    assert task.input == "Yo are you up?"
+    assert installation is not None
+    assert installation.bot_user_id == "UBOT"
+
+
 def test_app_mention_refreshes_slack_identity_cache(
     db_session: Session,
 ) -> None:
@@ -384,6 +405,7 @@ def test_app_mention_refreshes_slack_identity_cache(
     assert channel_identity is not None
     assert channel_identity.display_name == "#general"
     assert client.identity_calls == [
+        {"method": "auth_test", "id": "self"},
         {"method": "users_info", "id": "U123"},
         {"method": "conversations_info", "id": "C123"},
     ]
@@ -1692,6 +1714,7 @@ def cleanup_database(session: Session) -> None:
         LLMUsage,
         SlackInboundEvent,
         TaskEvent,
+        SlackSideEffect,
         Task,
         ModelPricing,
         ObservationEvent,

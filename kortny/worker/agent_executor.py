@@ -43,6 +43,7 @@ from kortny.slack.humanizer import (
     synthesize_response,
 )
 from kortny.slack.membership import SlackChannelMembershipService
+from kortny.slack.outbox import SlackSideEffectOutbox, slack_reaction_key
 from kortny.slack.posting import SlackPostingClient
 from kortny.slack.reactions import (
     ACK_REACTION_ADDED_MESSAGE,
@@ -521,9 +522,7 @@ class AgentTaskExecutor:
             "tool_selection_completed",
             task=task,
             candidate_count=candidate_count,
-            selected_tools=[
-                item.registry_name for item in selection.selected_tools
-            ],
+            selected_tools=[item.registry_name for item in selection.selected_tools],
             suppressed_native_tools=list(selection.suppressed_native_tools),
             route_reason=selection.route_reason,
             fallback_used=selection.fallback_used,
@@ -805,10 +804,30 @@ class AgentTaskExecutor:
         if not callable(reactions_remove):
             return
         try:
-            reactions_remove(
-                channel=channel_id,
-                name=reaction,
-                timestamp=message_ts,
+            outbox_result = SlackSideEffectOutbox(task_service.session).deliver(
+                installation_id=task.installation_id,
+                task_id=task.id,
+                idempotency_key=slack_reaction_key(
+                    task_id=task.id,
+                    operation="reactions_remove",
+                    channel_id=channel_id,
+                    message_ts=message_ts,
+                    reaction=reaction,
+                ),
+                operation="reactions_remove",
+                purpose="acknowledgement_complete",
+                target_channel_id=channel_id,
+                target_message_ts=message_ts,
+                request={
+                    "channel": channel_id,
+                    "name": reaction,
+                    "timestamp": message_ts,
+                },
+                call=lambda: reactions_remove(
+                    channel=channel_id,
+                    name=reaction,
+                    timestamp=message_ts,
+                ),
             )
         except Exception as exc:
             logger.info(
@@ -842,6 +861,8 @@ class AgentTaskExecutor:
                 "channel": channel_id,
                 "message_ts": message_ts,
                 "reaction": reaction,
+                "slack_side_effect_id": str(outbox_result.side_effect.id),
+                "idempotency_key": outbox_result.side_effect.idempotency_key,
             },
         )
 

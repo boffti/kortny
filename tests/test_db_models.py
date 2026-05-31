@@ -10,6 +10,8 @@ def test_mvp_schema_declares_all_core_tables() -> None:
         "workspace_state",
         "slack_identities",
         "slack_channel_memberships",
+        "slack_inbound_events",
+        "slack_side_effects",
         "dashboard_users",
         "dashboard_oauth_states",
         "composio_connections",
@@ -122,6 +124,23 @@ def test_slack_channel_membership_table_has_presence_constraints_and_indexes() -
         "idx_slack_channel_memberships_lookup",
         "idx_slack_channel_memberships_status",
         "idx_slack_channel_memberships_onboarding",
+    } <= index_names
+
+
+def test_slack_side_effects_table_has_outbox_constraints_and_indexes() -> None:
+    side_effects = Base.metadata.tables["slack_side_effects"]
+    constraint_names = {constraint.name for constraint in side_effects.constraints}
+    index_names = {index.name for index in side_effects.indexes}
+
+    assert {
+        "ck_slack_side_effects_operation",
+        "ck_slack_side_effects_status",
+        "idx_slack_side_effects_idempotency",
+    } <= constraint_names
+    assert {
+        "idx_slack_side_effects_status",
+        "idx_slack_side_effects_task",
+        "idx_slack_side_effects_target",
     } <= index_names
 
 

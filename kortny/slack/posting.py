@@ -13,9 +13,14 @@ from typing import Any, Protocol
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from kortny.db.models import Artifact, Task, TaskEventType
+from kortny.db.models import Artifact, Task, TaskEvent, TaskEventType
 from kortny.observability import set_span_attributes, start_span
 from kortny.slack.formatting import normalize_slack_mrkdwn
+from kortny.slack.outbox import (
+    SlackSideEffectOutbox,
+    slack_file_upload_key,
+    slack_message_key,
+)
 from kortny.tasks import TaskService
 
 
@@ -103,17 +108,55 @@ class SlackPoster:
                 "slack.text_chars": len(slack_text),
             },
         ):
-            response = self.client.chat_postMessage(
-                channel=thread.channel_id,
-                text=slack_text,
-                thread_ts=post_thread_ts,
-            )
+            side_effect_id = None
+            idempotency_key = None
+            deduped = False
+            if thread.task_id is None:
+                response = self.client.chat_postMessage(
+                    channel=thread.channel_id,
+                    text=slack_text,
+                    thread_ts=post_thread_ts,
+                )
+            else:
+                task = self._resolve_task(thread.task_id)
+                idempotency_key = slack_message_key(task.id, purpose)
+                result = SlackSideEffectOutbox(self.session).deliver(
+                    installation_id=task.installation_id,
+                    task_id=task.id,
+                    idempotency_key=idempotency_key,
+                    operation="chat_postMessage",
+                    purpose=purpose,
+                    target_channel_id=thread.channel_id,
+                    target_thread_ts=post_thread_ts,
+                    request={
+                        "channel": thread.channel_id,
+                        "text": slack_text,
+                        "thread_ts": post_thread_ts,
+                    },
+                    call=lambda: self.client.chat_postMessage(
+                        channel=thread.channel_id,
+                        text=slack_text,
+                        thread_ts=post_thread_ts,
+                    ),
+                )
+                response = result.response
+                side_effect_id = str(result.side_effect.id)
+                deduped = result.deduped
             message_ts = _response_ts(response)
             if message_ts is None:
                 raise SlackPostingError("Slack chat_postMessage response is missing ts")
-            set_span_attributes({"slack.posted_message_ts": message_ts})
+            set_span_attributes(
+                {
+                    "slack.posted_message_ts": message_ts,
+                    "slack.side_effect_id": side_effect_id,
+                    "slack.side_effect_deduped": deduped,
+                }
+            )
 
-        if thread.task_id is not None:
+        if thread.task_id is not None and not self._message_event_exists(
+            task_id=thread.task_id,
+            side_effect_id=side_effect_id,
+        ):
             self.task_service.append_event(
                 thread.task_id,
                 TaskEventType.message_posted,
@@ -123,6 +166,8 @@ class SlackPoster:
                     "message_ts": message_ts,
                     "text": slack_text,
                     "purpose": purpose,
+                    "slack_side_effect_id": side_effect_id,
+                    "idempotency_key": idempotency_key,
                 },
             )
         return message_ts
@@ -145,6 +190,7 @@ class SlackPoster:
         task_id = thread.task_id
         if task_id is None:
             raise ValueError("SlackThread.task_id is required for file uploads")
+        task = self._resolve_task(task_id)
 
         artifact_obj = self._resolve_or_create_artifact(thread, file_path, artifact)
         if artifact_obj.posted_at is not None:
@@ -165,37 +211,69 @@ class SlackPoster:
                 "file.initial_comment_chars": len(initial_comment or ""),
             },
         ):
-            response = self.client.files_upload_v2(
-                file=str(file_path),
-                filename=file_path.name,
-                title=title or file_path.name,
-                channel=thread.channel_id,
-                initial_comment=initial_comment,
-                thread_ts=post_thread_ts,
+            idempotency_key = slack_file_upload_key(artifact_obj.id)
+            result = SlackSideEffectOutbox(self.session).deliver(
+                installation_id=task.installation_id,
+                task_id=task_id,
+                idempotency_key=idempotency_key,
+                operation="files_upload_v2",
+                purpose="file_upload",
+                target_channel_id=thread.channel_id,
+                target_thread_ts=post_thread_ts,
+                request={
+                    "file": str(file_path),
+                    "filename": file_path.name,
+                    "title": title or file_path.name,
+                    "channel": thread.channel_id,
+                    "initial_comment": initial_comment,
+                    "thread_ts": post_thread_ts,
+                    "artifact_id": str(artifact_obj.id),
+                },
+                call=lambda: self.client.files_upload_v2(
+                    file=str(file_path),
+                    filename=file_path.name,
+                    title=title or file_path.name,
+                    channel=thread.channel_id,
+                    initial_comment=initial_comment,
+                    thread_ts=post_thread_ts,
+                ),
             )
+            response = result.response
             slack_file_id = _response_file_id(response)
             if slack_file_id is None:
                 raise SlackPostingError(
                     "Slack files_upload_v2 response is missing file id"
                 )
-            set_span_attributes({"slack.file_id": slack_file_id})
+            set_span_attributes(
+                {
+                    "slack.file_id": slack_file_id,
+                    "slack.side_effect_id": str(result.side_effect.id),
+                    "slack.side_effect_deduped": result.deduped,
+                }
+            )
 
         artifact_obj.slack_file_id = slack_file_id
         artifact_obj.posted_at = now or datetime.now(UTC)
         self.session.flush()
 
-        self.task_service.append_event(
-            task_id,
-            TaskEventType.message_posted,
-            {
-                "channel": thread.channel_id,
-                "thread_ts": post_thread_ts,
-                "slack_file_id": slack_file_id,
-                "artifact_id": str(artifact_obj.id),
-                "filename": artifact_obj.filename,
-                "purpose": "file_upload",
-            },
-        )
+        if not self._message_event_exists(
+            task_id=task_id,
+            side_effect_id=str(result.side_effect.id),
+        ):
+            self.task_service.append_event(
+                task_id,
+                TaskEventType.message_posted,
+                {
+                    "channel": thread.channel_id,
+                    "thread_ts": post_thread_ts,
+                    "slack_file_id": slack_file_id,
+                    "artifact_id": str(artifact_obj.id),
+                    "filename": artifact_obj.filename,
+                    "purpose": "file_upload",
+                    "slack_side_effect_id": str(result.side_effect.id),
+                    "idempotency_key": idempotency_key,
+                },
+            )
         return slack_file_id
 
     def _resolve_or_create_artifact(
@@ -261,7 +339,6 @@ class SlackPoster:
         )
         if artifact is not None:
             return artifact
-
         return self.session.scalar(
             select(Artifact)
             .where(
@@ -270,6 +347,34 @@ class SlackPoster:
             )
             .order_by(Artifact.created_at.desc())
             .limit(1)
+        )
+
+    def _resolve_task(self, task_id: uuid.UUID) -> Task:
+        task = self.session.scalar(select(Task).where(Task.id == task_id))
+        if task is None:
+            raise LookupError(f"Task not found: {task_id}")
+        return task
+
+    def _message_event_exists(
+        self,
+        *,
+        task_id: uuid.UUID,
+        side_effect_id: str | None,
+    ) -> bool:
+        if side_effect_id is None:
+            return False
+        return (
+            self.session.scalar(
+                select(TaskEvent.id)
+                .where(
+                    TaskEvent.task_id == task_id,
+                    TaskEvent.type == TaskEventType.message_posted,
+                    TaskEvent.payload["slack_side_effect_id"].as_string()
+                    == side_effect_id,
+                )
+                .limit(1)
+            )
+            is not None
         )
 
 
@@ -281,11 +386,26 @@ def _post_thread_ts(thread: SlackThread) -> str | None:
     return thread.thread_ts
 
 
-def _response_ts(response: Mapping[str, Any]) -> str | None:
-    ts = response.get("ts")
+def _response_mapping(response: Any) -> Mapping[str, Any]:
+    if isinstance(response, Mapping):
+        return response
+    data = getattr(response, "data", None)
+    if isinstance(data, Mapping):
+        return data
+    to_dict = getattr(response, "to_dict", None)
+    if callable(to_dict):
+        payload = to_dict()
+        if isinstance(payload, Mapping):
+            return payload
+    return {}
+
+
+def _response_ts(response: Any) -> str | None:
+    payload = _response_mapping(response)
+    ts = payload.get("ts")
     if isinstance(ts, str) and ts:
         return ts
-    message = response.get("message")
+    message = payload.get("message")
     if isinstance(message, Mapping):
         message_ts = message.get("ts")
         if isinstance(message_ts, str) and message_ts:
@@ -293,14 +413,15 @@ def _response_ts(response: Mapping[str, Any]) -> str | None:
     return None
 
 
-def _response_file_id(response: Mapping[str, Any]) -> str | None:
-    file_obj = response.get("file")
+def _response_file_id(response: Any) -> str | None:
+    payload = _response_mapping(response)
+    file_obj = payload.get("file")
     if isinstance(file_obj, Mapping):
         file_id = file_obj.get("id")
         if isinstance(file_id, str) and file_id:
             return file_id
 
-    files = response.get("files")
+    files = payload.get("files")
     if isinstance(files, list) and files:
         first_file = files[0]
         if isinstance(first_file, Mapping):

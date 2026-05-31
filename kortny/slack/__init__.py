@@ -19,6 +19,7 @@ from kortny.slack.humanizer import (
     synthesize_response,
 )
 from kortny.slack.ingress import AppMentionResult, SlackIngress
+from kortny.slack.outbox import SlackSideEffectOutbox, SlackSideEffectResult
 from kortny.slack.posting import (
     SlackPoster,
     SlackPostingError,
@@ -33,6 +34,8 @@ __all__ = [
     "LLMResponseSynthesizer",
     "ResponseSynthesisResult",
     "ROOT_ACK_FALLBACK_TEXT",
+    "SlackSideEffectOutbox",
+    "SlackSideEffectResult",
     "SlackPoster",
     "SlackPostingError",
     "SlackThread",

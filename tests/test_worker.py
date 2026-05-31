@@ -26,6 +26,7 @@ from kortny.db.models import (
     ObserveChannelProfile,
     ProceduralSkillInvocation,
     SlackChannelMembership,
+    SlackSideEffect,
     Task,
     TaskEvent,
     TaskEventType,
@@ -583,8 +584,7 @@ def test_agent_executor_humanizes_final_text_before_posting(
         for event in events
     )
     assert any(
-        event.payload.get("message") == "response_humanizer_started"
-        for event in events
+        event.payload.get("message") == "response_humanizer_started" for event in events
     )
     completed = next(
         event
@@ -645,8 +645,7 @@ def test_agent_executor_builds_research_response_record_for_tool_results(
     claim_time = datetime(2026, 5, 23, 9, 51, tzinfo=UTC)
     task = create_task(db_session, event_id="EvAgentWorkerResearchHumanizer")
     task.input = (
-        "Research current Python tempfile guidance and summarize the practical "
-        "points."
+        "Research current Python tempfile guidance and summarize the practical points."
     )
     task.available_at = claim_time - timedelta(seconds=1)
     db_session.add(
@@ -1194,6 +1193,7 @@ def cleanup_database(session: Session) -> None:
         Artifact,
         LLMUsage,
         TaskEvent,
+        SlackSideEffect,
         Task,
         ModelPricing,
         EncryptedSecret,

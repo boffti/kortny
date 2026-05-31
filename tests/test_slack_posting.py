@@ -17,6 +17,7 @@ from kortny.db.models import (
     Installation,
     LLMUsage,
     ModelPricing,
+    SlackSideEffect,
     Task,
     TaskEvent,
     TaskEventType,
@@ -70,6 +71,33 @@ class FakeSlackClient:
             }
         )
         return {"ok": True, "files": [{"id": f"F{len(self.uploads):06d}"}]}
+
+
+class FakeSlackSdkResponse:
+    """Slack SDK responses expose data but are not plain dict mappings."""
+
+    def __init__(self, data: dict[str, Any]) -> None:
+        self.data = data
+
+
+class FakeSlackSdkResponseClient(FakeSlackClient):
+    def chat_postMessage(
+        self,
+        *,
+        channel: str,
+        text: str,
+        thread_ts: str | None = None,
+    ) -> FakeSlackSdkResponse:
+        self.messages.append(
+            {
+                "channel": channel,
+                "text": text,
+                "thread_ts": thread_ts,
+            }
+        )
+        return FakeSlackSdkResponse(
+            {"ok": True, "ts": f"1716400001.{len(self.messages):06d}"}
+        )
 
 
 @pytest.fixture(scope="session")
@@ -130,7 +158,16 @@ def test_post_message_posts_to_thread_and_logs_event(db_session: Session) -> Non
         "message_ts": "1716400001.000001",
         "text": "Done.",
         "purpose": "result",
+        "slack_side_effect_id": event.payload["slack_side_effect_id"],
+        "idempotency_key": f"slack:message:{task.id}:result",
     }
+    side_effect = db_session.scalar(
+        select(SlackSideEffect).where(SlackSideEffect.task_id == task.id)
+    )
+    assert side_effect is not None
+    assert side_effect.status == "succeeded"
+    assert side_effect.operation == "chat_postMessage"
+    assert side_effect.idempotency_key == f"slack:message:{task.id}:result"
 
 
 def test_post_message_in_dm_posts_without_thread_ts(db_session: Session) -> None:
@@ -190,6 +227,59 @@ def test_post_message_normalizes_slack_mrkdwn(db_session: Session) -> None:
     assert event.payload["text"] == expected_text
 
 
+def test_post_message_reuses_successful_side_effect(
+    db_session: Session,
+) -> None:
+    task = create_task(db_session)
+    client = FakeSlackClient()
+    poster = SlackPoster(session=db_session, client=client)
+    thread = SlackThread.from_task(task)
+
+    first_ts = poster.post_message(thread, "Done.")
+    second_ts = poster.post_message(thread, "Done.")
+
+    events = list(
+        db_session.scalars(
+            select(TaskEvent).where(
+                TaskEvent.task_id == task.id,
+                TaskEvent.type == TaskEventType.message_posted,
+            )
+        )
+    )
+    side_effects = list(
+        db_session.scalars(
+            select(SlackSideEffect).where(SlackSideEffect.task_id == task.id)
+        )
+    )
+
+    assert first_ts == second_ts == "1716400001.000001"
+    assert len(client.messages) == 1
+    assert len(events) == 1
+    assert len(side_effects) == 1
+    assert side_effects[0].attempts == 1
+
+
+def test_post_message_accepts_slack_sdk_response_shape(
+    db_session: Session,
+) -> None:
+    task = create_task(db_session)
+    client = FakeSlackSdkResponseClient()
+
+    message_ts = SlackPoster(session=db_session, client=client).post_message(
+        SlackThread.from_task(task),
+        "Done.",
+    )
+
+    side_effect = db_session.scalar(
+        select(SlackSideEffect).where(SlackSideEffect.task_id == task.id)
+    )
+
+    assert message_ts == "1716400001.000001"
+    assert side_effect is not None
+    assert side_effect.status == "succeeded"
+    assert side_effect.response_json == {"ok": True, "ts": "1716400001.000001"}
+
+
 def test_upload_file_updates_artifact_and_logs_event(
     db_session: Session,
     tmp_path: Path,
@@ -242,6 +332,7 @@ def test_upload_file_updates_artifact_and_logs_event(
     assert event.payload["slack_file_id"] == "F000001"
     assert event.payload["artifact_id"] == str(artifact.id)
     assert event.payload["purpose"] == "file_upload"
+    assert event.payload["idempotency_key"] == f"slack:file_upload:{artifact.id}"
 
 
 def test_upload_file_in_dm_posts_without_thread_ts(
@@ -359,6 +450,7 @@ def cleanup_database(session: Session) -> None:
         Artifact,
         LLMUsage,
         TaskEvent,
+        SlackSideEffect,
         Task,
         ModelPricing,
         EncryptedSecret,

@@ -19,6 +19,7 @@ from kortny.db.models import (
     LLMProvider,
     LLMUsage,
     ModelPricing,
+    SlackSideEffect,
     Task,
     TaskEvent,
     TaskEventType,
@@ -207,9 +208,7 @@ def test_concurrent_create_task_same_identity_is_single(
             return task.id
 
     with ThreadPoolExecutor(max_workers=2) as executor:
-        task_ids = list(
-            executor.map(create_with_event, ["EvRaceA", "EvRaceB"])
-        )
+        task_ids = list(executor.map(create_with_event, ["EvRaceA", "EvRaceB"]))
 
     task_count = db_session.scalar(select(func.count()).select_from(Task))
 
@@ -351,6 +350,7 @@ def cleanup_database(session: Session) -> None:
         Artifact,
         LLMUsage,
         TaskEvent,
+        SlackSideEffect,
         Task,
         ModelPricing,
         EncryptedSecret,

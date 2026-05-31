@@ -6,6 +6,7 @@ import argparse
 import logging
 import os
 import socket
+import threading
 import time
 import uuid
 from collections.abc import Sequence
@@ -23,6 +24,7 @@ from kortny.memory import EpisodeService
 from kortny.observability import configure_tracing, start_span
 from kortny.queue import TaskQueue
 from kortny.queue.service import DEFAULT_LEASE_SECONDS
+from kortny.slack.outbox import SlackSideEffectOutbox
 from kortny.tasks import TaskCancelledError, TaskService
 from kortny.worker.agent_executor import AgentTaskExecutor, TaskExecutor
 
@@ -38,6 +40,7 @@ class WorkerRunResult:
     status: str
     task_id: uuid.UUID | None = None
     reclaimed_task_ids: tuple[uuid.UUID, ...] = ()
+    recovered_side_effect_ids: tuple[uuid.UUID, ...] = ()
 
     @property
     def handled_task(self) -> bool:
@@ -56,12 +59,14 @@ class TaskWorker:
         worker_id: str | None = None,
         executor: TaskExecutor | None = None,
         lease_for: timedelta = timedelta(seconds=DEFAULT_LEASE_SECONDS),
+        lease_heartbeat_interval_seconds: float | None = None,
         poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS,
     ) -> None:
         self.session_factory = session_factory or make_session_factory()
         self.worker_id = worker_id or default_worker_id()
         self.executor = executor or AgentTaskExecutor()
         self.lease_for = lease_for
+        self.lease_heartbeat_interval_seconds = lease_heartbeat_interval_seconds
         self.poll_interval_seconds = poll_interval_seconds
 
     def run_once(self, *, now: datetime | None = None) -> WorkerRunResult:
@@ -70,6 +75,15 @@ class TaskWorker:
         with self.session_factory.begin() as session:
             task_service = TaskService(session)
             queue = TaskQueue(session)
+            side_effect_recovery = SlackSideEffectOutbox(
+                session
+            ).recover_stale_in_progress(now=now)
+            if side_effect_recovery.recovered_count:
+                logger.warning(
+                    "worker recovered stale slack side effects worker_id=%s side_effect_ids=%s",
+                    self.worker_id,
+                    ",".join(str(id_) for id_ in side_effect_recovery.recovered_ids),
+                )
             reclaimed = queue.reclaim_expired_leases(now=now)
             if reclaimed:
                 logger.info(
@@ -83,6 +97,7 @@ class TaskWorker:
                 now=now,
             )
             reclaimed_task_ids = tuple(task.id for task in reclaimed)
+            recovered_side_effect_ids = side_effect_recovery.recovered_ids
 
             if task is None:
                 logger.debug("worker idle worker_id=%s", self.worker_id)
@@ -90,6 +105,7 @@ class TaskWorker:
                     worker_id=self.worker_id,
                     status="idle",
                     reclaimed_task_ids=reclaimed_task_ids,
+                    recovered_side_effect_ids=recovered_side_effect_ids,
                 )
 
             task_id = task.id
@@ -124,6 +140,12 @@ class TaskWorker:
                         "worker.id": self.worker_id,
                     },
                     linked_traceparent=_task_traceparent(session, task),
+                ), _LeaseHeartbeat(
+                    session_factory=self.session_factory,
+                    task_id=task.id,
+                    worker_id=self.worker_id,
+                    lease_for=self.lease_for,
+                    interval_seconds=self.lease_heartbeat_interval_seconds,
                 ):
                     execution_result = self.executor.execute(
                         session=session,
@@ -154,6 +176,7 @@ class TaskWorker:
                     status=TaskStatus.succeeded.value,
                     task_id=task.id,
                     reclaimed_task_ids=reclaimed_task_ids,
+                    recovered_side_effect_ids=recovered_side_effect_ids,
                 )
             except TaskCancelledError:
                 session.rollback()
@@ -187,6 +210,7 @@ class TaskWorker:
                     status=TaskStatus.cancelled.value,
                     task_id=task.id,
                     reclaimed_task_ids=reclaimed_task_ids,
+                    recovered_side_effect_ids=recovered_side_effect_ids,
                 )
             except Exception as exc:
                 session.rollback()
@@ -223,6 +247,7 @@ class TaskWorker:
                     status=TaskStatus.failed.value,
                     task_id=task.id,
                     reclaimed_task_ids=reclaimed_task_ids,
+                    recovered_side_effect_ids=recovered_side_effect_ids,
                 )
 
     def run_forever(self) -> None:
@@ -248,6 +273,71 @@ class TaskWorker:
             logger.exception("failed to record task episode task_id=%s", task.id)
 
 
+class _LeaseHeartbeat:
+    """Background lease renewal while a worker is executing a task."""
+
+    def __init__(
+        self,
+        *,
+        session_factory: sessionmaker[Session],
+        task_id: uuid.UUID,
+        worker_id: str,
+        lease_for: timedelta,
+        interval_seconds: float | None,
+    ) -> None:
+        self.session_factory = session_factory
+        self.task_id = task_id
+        self.worker_id = worker_id
+        self.lease_for = lease_for
+        self.interval_seconds = (
+            interval_seconds
+            if interval_seconds is not None
+            else _default_heartbeat_interval(lease_for)
+        )
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def __enter__(self) -> _LeaseHeartbeat:
+        if self.interval_seconds <= 0:
+            return self
+        self._thread = threading.Thread(
+            target=self._run,
+            name=f"kortny-lease-heartbeat-{self.task_id}",
+            daemon=True,
+        )
+        self._thread.start()
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=max(1.0, self.interval_seconds))
+
+    def _run(self) -> None:
+        while not self._stop.wait(self.interval_seconds):
+            try:
+                with self.session_factory.begin() as session:
+                    renewed = TaskQueue(session).renew_lease(
+                        task_id=self.task_id,
+                        worker_id=self.worker_id,
+                        lease_for=self.lease_for,
+                    )
+                if renewed is None:
+                    logger.warning(
+                        "worker lease heartbeat stopped task_id=%s worker_id=%s reason=lease_not_owned",
+                        self.task_id,
+                        self.worker_id,
+                    )
+                    self._stop.set()
+                    return
+            except Exception:
+                logger.exception(
+                    "worker lease heartbeat failed task_id=%s worker_id=%s",
+                    self.task_id,
+                    self.worker_id,
+                )
+
+
 def walking_skeleton_handler(task: Task) -> str:
     """Deprecated trivial MVP handler retained for compatibility."""
 
@@ -258,6 +348,13 @@ def default_worker_id() -> str:
     """Return a stable-enough process identifier for lease ownership."""
 
     return f"{socket.gethostname()}-{os.getpid()}"
+
+
+def _default_heartbeat_interval(lease_for: timedelta) -> float:
+    seconds = lease_for.total_seconds()
+    if seconds <= 0:
+        return 0.0
+    return max(1.0, min(60.0, seconds / 3.0))
 
 
 def _task_traceparent(session: Session, task: Task) -> str | None:

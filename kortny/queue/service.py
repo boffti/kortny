@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
@@ -12,6 +13,8 @@ from kortny.tasks import TaskRepository
 
 DEFAULT_LEASE_SECONDS = 300
 DEFAULT_RECLAIM_LIMIT = 100
+DEFAULT_RETRY_BACKOFF_SECONDS = 30
+DEFAULT_MAX_RETRY_BACKOFF_SECONDS = 300
 
 
 class TaskQueue:
@@ -94,6 +97,49 @@ class TaskQueue:
 
         return expired_tasks
 
+    def renew_lease(
+        self,
+        *,
+        task_id: uuid.UUID,
+        worker_id: str,
+        lease_for: timedelta = timedelta(seconds=DEFAULT_LEASE_SECONDS),
+        now: datetime | None = None,
+    ) -> Task | None:
+        """Extend a running task lease when the same worker still owns it."""
+
+        if lease_for.total_seconds() <= 0:
+            raise ValueError("lease_for must be positive")
+
+        renewal_time = _coerce_utc(now)
+        task = self.session.scalar(
+            select(Task)
+            .where(
+                Task.id == task_id,
+                Task.status == TaskStatus.running,
+                Task.locked_by == worker_id,
+                Task.lease_expires_at.is_not(None),
+                Task.lease_expires_at > renewal_time,
+            )
+            .with_for_update(skip_locked=True)
+            .limit(1)
+        )
+        if task is None:
+            return None
+
+        task.lease_expires_at = renewal_time + lease_for
+        task.updated_at = renewal_time
+        self.session.flush()
+        self.tasks.append_event(
+            task,
+            TaskEventType.log,
+            {
+                "message": "task_lease_renewed",
+                "worker_id": worker_id,
+                "lease_expires_at": task.lease_expires_at.isoformat(),
+            },
+        )
+        return task
+
     def _reclaim_task(self, task: Task, reclaim_time: datetime) -> None:
         crashed_payload = {
             "from": TaskStatus.running.value,
@@ -122,24 +168,31 @@ class TaskQueue:
                 "reason": "lease_expired",
                 "attempts": next_attempts,
                 "max_attempts": task.max_attempts,
+                "dead_letter": True,
+                "last_worker_id": crashed_payload["locked_by"],
+                "lease_expires_at": crashed_payload["lease_expires_at"],
             }
         else:
+            retry_backoff = _retry_backoff(next_attempts)
+            retry_at = reclaim_time + retry_backoff
             task.status = TaskStatus.pending
-            task.available_at = reclaim_time
+            task.available_at = retry_at
             task.error = None
 
         self.session.flush()
-        self.tasks.append_event(
-            task,
-            TaskEventType.status_changed,
-            {
-                "from": TaskStatus.crashed.value,
-                "to": TaskStatus(task.status).value,
-                "reason": "lease_expired",
-                "attempts": next_attempts,
-                "max_attempts": task.max_attempts,
-            },
-        )
+        payload = {
+            "from": TaskStatus.crashed.value,
+            "to": TaskStatus(task.status).value,
+            "reason": "lease_expired",
+            "attempts": next_attempts,
+            "max_attempts": task.max_attempts,
+        }
+        if task.status is TaskStatus.pending:
+            payload["retry_at"] = task.available_at.isoformat()
+            payload["retry_backoff_seconds"] = int(retry_backoff.total_seconds())
+        else:
+            payload["dead_letter"] = True
+        self.tasks.append_event(task, TaskEventType.status_changed, payload)
 
 
 def _coerce_utc(value: datetime | None) -> datetime:
@@ -154,3 +207,12 @@ def _isoformat_optional(value: datetime | None) -> str | None:
     if value is None:
         return None
     return _coerce_utc(value).isoformat()
+
+
+def _retry_backoff(attempts: int) -> timedelta:
+    exponent = max(0, attempts - 1)
+    seconds = min(
+        DEFAULT_RETRY_BACKOFF_SECONDS * (2**exponent),
+        DEFAULT_MAX_RETRY_BACKOFF_SECONDS,
+    )
+    return timedelta(seconds=seconds)

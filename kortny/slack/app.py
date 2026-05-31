@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from typing import Any, TypeVar
 
@@ -18,8 +19,10 @@ from kortny.logging_config import configure_logging
 from kortny.observability import configure_tracing, record_span_exception, start_span
 from kortny.slack.acknowledgement import LLMAcknowledgementGenerator
 from kortny.slack.ingress import SlackIngress, is_bare_app_mention
+from kortny.slack.outbox import SlackSideEffectOutbox
 
 T = TypeVar("T")
+logger = logging.getLogger(__name__)
 
 
 def acknowledge_then_handle(ack: Callable[[], None], handler: Callable[[], T]) -> T:
@@ -42,6 +45,7 @@ def create_bolt_app(
         token=resolved_settings.slack_bot_token,
         signing_secret=resolved_settings.slack_signing_secret,
     )
+    _recover_stale_side_effects_on_start(session_factory)
 
     @app.event("app_mention")
     def handle_app_mention(
@@ -241,6 +245,18 @@ def _pre_task_intent_classifier(settings: Settings) -> LLMIntentClassifier:
     return LLMIntentClassifier(
         provider=create_llm_provider(settings, model=model_route.model)
     )
+
+
+def _recover_stale_side_effects_on_start(
+    session_factory: sessionmaker[Session] | None,
+) -> None:
+    with session_scope(session_factory) as session:
+        result = SlackSideEffectOutbox(session).recover_stale_in_progress()
+        if result.recovered_count:
+            logger.warning(
+                "slack app recovered stale slack side effects side_effect_ids=%s",
+                ",".join(str(id_) for id_ in result.recovered_ids),
+            )
 
 
 def run_socket_mode(settings: Settings | None = None) -> None:

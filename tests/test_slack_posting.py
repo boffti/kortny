@@ -1,7 +1,7 @@
 import os
 import uuid
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +24,12 @@ from kortny.db.models import (
 )
 from kortny.db.session import make_engine, make_session_factory, normalize_database_url
 from kortny.slack import SlackPoster, SlackThread
+from kortny.slack.outbox import (
+    SLACK_EFFECT_FAILED,
+    SLACK_EFFECT_IN_PROGRESS,
+    SlackSideEffectOutbox,
+    slack_message_key,
+)
 from kortny.tasks import TaskService
 
 TEST_POSTGRES_URL = os.environ.get("KORTNY_TEST_POSTGRES_URL")
@@ -278,6 +284,86 @@ def test_post_message_accepts_slack_sdk_response_shape(
     assert side_effect is not None
     assert side_effect.status == "succeeded"
     assert side_effect.response_json == {"ok": True, "ts": "1716400001.000001"}
+
+
+def test_outbox_marks_stale_in_progress_rows_failed(db_session: Session) -> None:
+    task = create_task(db_session)
+    now = datetime(2026, 5, 31, 12, 0, tzinfo=UTC)
+    stale = SlackSideEffect(
+        installation_id=task.installation_id,
+        task_id=task.id,
+        idempotency_key=f"stale:{task.id}",
+        operation="chat_postMessage",
+        purpose="result",
+        request_json={"channel": "C123"},
+        status=SLACK_EFFECT_IN_PROGRESS,
+        attempts=1,
+        started_at=now - timedelta(minutes=10),
+        available_at=now - timedelta(minutes=10),
+    )
+    fresh = SlackSideEffect(
+        installation_id=task.installation_id,
+        task_id=task.id,
+        idempotency_key=f"fresh:{task.id}",
+        operation="chat_postMessage",
+        purpose="result",
+        request_json={"channel": "C123"},
+        status=SLACK_EFFECT_IN_PROGRESS,
+        attempts=1,
+        started_at=now - timedelta(seconds=30),
+        available_at=now - timedelta(seconds=30),
+    )
+    db_session.add_all([stale, fresh])
+    db_session.flush()
+
+    result = SlackSideEffectOutbox(db_session).recover_stale_in_progress(
+        now=now,
+        stale_after=timedelta(minutes=5),
+    )
+
+    assert result.recovered_ids == (stale.id,)
+    assert result.recovered_count == 1
+    assert stale.status == SLACK_EFFECT_FAILED
+    assert stale.available_at == now
+    assert stale.last_error is not None
+    assert stale.last_error["type"] == "StaleSideEffectLease"
+    assert stale.last_error["delivery_state"] == "unknown"
+    assert fresh.status == SLACK_EFFECT_IN_PROGRESS
+    assert fresh.last_error is None
+
+
+def test_post_message_retries_failed_side_effect(db_session: Session) -> None:
+    task = create_task(db_session)
+    idempotency_key = slack_message_key(task.id, "result")
+    failed = SlackSideEffect(
+        installation_id=task.installation_id,
+        task_id=task.id,
+        idempotency_key=idempotency_key,
+        operation="chat_postMessage",
+        purpose="result",
+        target_channel_id="C123",
+        target_thread_ts="1716400000.000001",
+        request_json={"channel": "C123", "text": "Done."},
+        status=SLACK_EFFECT_FAILED,
+        attempts=1,
+        last_error={"type": "StaleSideEffectLease"},
+        available_at=datetime(2026, 5, 31, 12, 0, tzinfo=UTC),
+    )
+    db_session.add(failed)
+    db_session.flush()
+    client = FakeSlackClient()
+
+    message_ts = SlackPoster(session=db_session, client=client).post_message(
+        SlackThread.from_task(task),
+        "Done.",
+    )
+
+    assert message_ts == "1716400001.000001"
+    assert len(client.messages) == 1
+    assert failed.status == "succeeded"
+    assert failed.attempts == 2
+    assert failed.last_error is None
+    assert failed.response_json == {"ok": True, "ts": "1716400001.000001"}
 
 
 def test_upload_file_updates_artifact_and_logs_event(

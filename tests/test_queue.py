@@ -140,11 +140,13 @@ def test_reclaim_expired_lease_requeues_with_attempt_increment(
     assert task.locked_by is None
     assert task.locked_at is None
     assert task.lease_expires_at is None
-    assert task.available_at == now
+    assert task.available_at == now + timedelta(seconds=60)
     assert task.error is None
 
     events = status_events(db_session, task)
     assert [event.payload["to"] for event in events] == ["crashed", "pending"]
+    assert events[-1].payload["retry_at"] == task.available_at.isoformat()
+    assert events[-1].payload["retry_backoff_seconds"] == 60
 
 
 def test_reclaim_expired_lease_fails_exhausted_task(db_session: Session) -> None:
@@ -168,10 +170,14 @@ def test_reclaim_expired_lease_fails_exhausted_task(db_session: Session) -> None
         "reason": "lease_expired",
         "attempts": 3,
         "max_attempts": 3,
+        "dead_letter": True,
+        "last_worker_id": "worker-a",
+        "lease_expires_at": (now - timedelta(minutes=5)).isoformat(),
     }
 
     events = status_events(db_session, task)
     assert [event.payload["to"] for event in events] == ["crashed", "failed"]
+    assert events[-1].payload["dead_letter"] is True
 
 
 def test_reclaim_ignores_unexpired_running_tasks(db_session: Session) -> None:
@@ -188,6 +194,70 @@ def test_reclaim_ignores_unexpired_running_tasks(db_session: Session) -> None:
     assert reclaimed == []
     assert task.status is TaskStatus.running
     assert task.locked_by == "worker-a"
+
+
+def test_renew_lease_extends_owned_running_task(db_session: Session) -> None:
+    now = datetime(2026, 5, 23, 2, 45, tzinfo=UTC)
+    task = create_task(db_session, event_id="EvRenew")
+    task.status = TaskStatus.running
+    task.locked_by = "worker-a"
+    task.locked_at = now - timedelta(minutes=1)
+    task.lease_expires_at = now + timedelta(minutes=1)
+    db_session.commit()
+
+    renewed = TaskQueue(db_session).renew_lease(
+        task_id=task.id,
+        worker_id="worker-a",
+        lease_for=timedelta(minutes=5),
+        now=now,
+    )
+
+    assert renewed is not None
+    assert renewed.id == task.id
+    assert task.status is TaskStatus.running
+    assert task.locked_by == "worker-a"
+    assert task.lease_expires_at == now + timedelta(minutes=5)
+
+    events = list(
+        db_session.scalars(
+            select(TaskEvent)
+            .where(TaskEvent.task_id == task.id)
+            .order_by(TaskEvent.seq)
+        )
+    )
+    assert events[-1].payload["message"] == "task_lease_renewed"
+    assert events[-1].payload["worker_id"] == "worker-a"
+
+
+def test_renew_lease_rejects_wrong_worker_or_expired_lease(
+    db_session: Session,
+) -> None:
+    now = datetime(2026, 5, 23, 2, 50, tzinfo=UTC)
+    task = create_task(db_session, event_id="EvRenewReject")
+    task.status = TaskStatus.running
+    task.locked_by = "worker-a"
+    task.locked_at = now - timedelta(minutes=2)
+    task.lease_expires_at = now + timedelta(minutes=1)
+    db_session.commit()
+
+    wrong_worker = TaskQueue(db_session).renew_lease(
+        task_id=task.id,
+        worker_id="worker-b",
+        lease_for=timedelta(minutes=5),
+        now=now,
+    )
+    task.lease_expires_at = now - timedelta(seconds=1)
+    db_session.flush()
+    expired = TaskQueue(db_session).renew_lease(
+        task_id=task.id,
+        worker_id="worker-a",
+        lease_for=timedelta(minutes=5),
+        now=now,
+    )
+
+    assert wrong_worker is None
+    assert expired is None
+    assert task.lease_expires_at == now - timedelta(seconds=1)
 
 
 def cleanup_database(session: Session) -> None:

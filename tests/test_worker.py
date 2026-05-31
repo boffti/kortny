@@ -165,6 +165,43 @@ def test_worker_run_once_is_idle_without_pending_task(
     assert result.handled_task is False
 
 
+def test_worker_recovers_stale_slack_side_effects_before_poll(
+    db_session: Session,
+    worker_session_factory: sessionmaker[Session],
+) -> None:
+    now = datetime(2026, 5, 31, 12, 15, tzinfo=UTC)
+    installation = Installation(slack_team_id=f"T{uuid.uuid4().hex}")
+    db_session.add(installation)
+    db_session.flush()
+    side_effect = SlackSideEffect(
+        installation_id=installation.id,
+        idempotency_key=f"stale:{uuid.uuid4()}",
+        operation="chat_postMessage",
+        purpose="result",
+        request_json={"channel": "C123"},
+        status="in_progress",
+        attempts=1,
+        started_at=now - timedelta(minutes=7),
+        available_at=now - timedelta(minutes=7),
+    )
+    db_session.add(side_effect)
+    db_session.commit()
+
+    result = TaskWorker(
+        session_factory=worker_session_factory,
+        worker_id="worker-test",
+        executor=WalkingSkeletonExecutor(),
+    ).run_once(now=now)
+
+    db_session.refresh(side_effect)
+    assert result.status == "idle"
+    assert result.recovered_side_effect_ids == (side_effect.id,)
+    assert side_effect.status == "failed"
+    assert side_effect.last_error is not None
+    assert side_effect.last_error["type"] == "StaleSideEffectLease"
+    assert side_effect.last_error["delivery_state"] == "unknown"
+
+
 def test_worker_marks_task_failed_when_handler_raises(
     db_session: Session,
     worker_session_factory: sessionmaker[Session],

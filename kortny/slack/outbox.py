@@ -5,12 +5,12 @@ from __future__ import annotations
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from slack_sdk.errors import SlackApiError
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -20,6 +20,8 @@ SLACK_EFFECT_PENDING = "pending"
 SLACK_EFFECT_IN_PROGRESS = "in_progress"
 SLACK_EFFECT_SUCCEEDED = "succeeded"
 SLACK_EFFECT_FAILED = "failed"
+DEFAULT_STALE_SIDE_EFFECT_AFTER = timedelta(minutes=5)
+DEFAULT_STALE_SIDE_EFFECT_LIMIT = 100
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,6 +32,17 @@ class SlackSideEffectResult:
     response: Mapping[str, Any]
     delivered: bool
     deduped: bool
+
+
+@dataclass(frozen=True, slots=True)
+class SlackSideEffectRecoveryResult:
+    """Summary of one stale side-effect recovery pass."""
+
+    recovered_ids: tuple[uuid.UUID, ...]
+
+    @property
+    def recovered_count(self) -> int:
+        return len(self.recovered_ids)
 
 
 class SlackSideEffectOutbox:
@@ -50,13 +63,13 @@ class SlackSideEffectOutbox:
         target_message_ts: str | None = None,
         task_id: uuid.UUID | None = None,
         purpose: str | None = None,
-        call: Callable[[], Mapping[str, Any]],
+        call: Callable[[], Any],
     ) -> SlackSideEffectResult:
         """Record and deliver a Slack side effect.
 
         Delivery is at-least-once while successful rows are deduped by
-        ``(installation_id, idempotency_key)``. HIG-96 can add a relay/lease
-        around rows left failed or in-progress after crashes.
+        ``(installation_id, idempotency_key)``. Stale in-progress rows are
+        marked failed by the recovery path instead of being blindly replayed.
         """
 
         side_effect = self._get_or_create(
@@ -113,6 +126,58 @@ class SlackSideEffectOutbox:
             response=payload,
             delivered=True,
             deduped=False,
+        )
+
+    def recover_stale_in_progress(
+        self,
+        *,
+        now: datetime | None = None,
+        stale_after: timedelta = DEFAULT_STALE_SIDE_EFFECT_AFTER,
+        limit: int = DEFAULT_STALE_SIDE_EFFECT_LIMIT,
+    ) -> SlackSideEffectRecoveryResult:
+        """Mark abandoned in-progress rows failed without replaying Slack calls."""
+
+        if stale_after.total_seconds() <= 0:
+            raise ValueError("stale_after must be positive")
+        if limit < 1:
+            raise ValueError("limit must be at least 1")
+
+        recovered_at = now or datetime.now(UTC)
+        cutoff = recovered_at - stale_after
+        rows = tuple(
+            self.session.scalars(
+                select(SlackSideEffect)
+                .where(
+                    SlackSideEffect.status == SLACK_EFFECT_IN_PROGRESS,
+                    or_(
+                        SlackSideEffect.started_at.is_(None),
+                        SlackSideEffect.started_at <= cutoff,
+                    ),
+                )
+                .order_by(SlackSideEffect.started_at.asc().nullsfirst())
+                .limit(limit)
+                .with_for_update(skip_locked=True)
+            )
+        )
+        for side_effect in rows:
+            side_effect.status = SLACK_EFFECT_FAILED
+            side_effect.last_error = {
+                "type": "StaleSideEffectLease",
+                "message": "Slack side effect was left in progress past its lease window.",
+                "delivery_state": "unknown",
+                "recovered_at": recovered_at.isoformat(),
+                "started_at": side_effect.started_at.isoformat()
+                if side_effect.started_at is not None
+                else None,
+                "stale_after_seconds": int(stale_after.total_seconds()),
+            }
+            side_effect.available_at = recovered_at
+            side_effect.updated_at = recovered_at
+
+        if rows:
+            self.session.flush()
+        return SlackSideEffectRecoveryResult(
+            recovered_ids=tuple(side_effect.id for side_effect in rows),
         )
 
     def _get_or_create(

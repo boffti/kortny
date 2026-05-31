@@ -13,7 +13,18 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from kortny.db.models import Installation, SlackInboundEvent, Task, TaskEventType
+from kortny.approvals import (
+    TOOL_APPROVAL_PROMPT_PURPOSE,
+    TOOL_APPROVAL_REJECTED_PURPOSE,
+)
+from kortny.db.models import (
+    Installation,
+    SlackInboundEvent,
+    Task,
+    TaskEvent,
+    TaskEventType,
+)
+from kortny.db.models import TaskStatus as DbTaskStatus
 from kortny.intent import (
     IntentClassifier,
     IntentDecision,
@@ -900,12 +911,23 @@ class SlackIngress:
         channel_id = _required_str(item, "channel")
         message_ts = _required_str(item, "ts")
         if reaction in CONFIRMATION_REACTIONS:
-            return self._handle_confirmation_reaction(
+            result = self._handle_confirmation_reaction(
                 reaction=reaction,
                 channel_id=channel_id,
                 message_ts=message_ts,
                 user_id=user_id,
             )
+            if result.handled:
+                return result
+            approval_result = self._handle_tool_approval_reaction(
+                reaction=reaction,
+                channel_id=channel_id,
+                message_ts=message_ts,
+                user_id=user_id,
+            )
+            if approval_result.handled or approval_result.reason != "no_task":
+                return approval_result
+            return result
 
         task = self.task_service.get_by_slack_reaction_target(channel_id, message_ts)
         if task is None:
@@ -1697,6 +1719,113 @@ class SlackIngress:
         logger.info("slack retry reaction handled task_id=%s user=%s", task.id, user_id)
         return ReactionResult(handled=True, action="retry", task=retried)
 
+    def _handle_tool_approval_reaction(
+        self,
+        *,
+        reaction: str,
+        channel_id: str,
+        message_ts: str,
+        user_id: str,
+    ) -> ReactionResult:
+        task = self.task_service.get_by_slack_reaction_target(channel_id, message_ts)
+        if task is None:
+            return ReactionResult(
+                handled=False,
+                action="tool_approval",
+                reason="no_task",
+            )
+        if task.slack_user_id != user_id:
+            logger.info(
+                "slack tool approval reaction ignored reason=non_owner task_id=%s owner=%s user=%s",
+                task.id,
+                task.slack_user_id,
+                user_id,
+            )
+            return ReactionResult(
+                handled=False,
+                action="tool_approval",
+                task=task,
+                reason="non_owner",
+            )
+        if DbTaskStatus(task.status) is not DbTaskStatus.waiting_approval:
+            return ReactionResult(
+                handled=False,
+                action="tool_approval",
+                task=task,
+                reason="not_waiting_approval",
+            )
+
+        prompt_ts = self._latest_posted_message_ts(
+            task=task,
+            purpose=TOOL_APPROVAL_PROMPT_PURPOSE,
+        )
+        if prompt_ts != message_ts:
+            return ReactionResult(
+                handled=False,
+                action="tool_approval",
+                task=task,
+                reason="not_approval_prompt",
+            )
+
+        pending = self.task_service.latest_pending_tool_approval(task)
+        if pending is None:
+            return ReactionResult(
+                handled=False,
+                action="tool_approval",
+                task=task,
+                reason="no_pending_tool_approval",
+            )
+        approval_key = pending.get("approval_key")
+        if not isinstance(approval_key, str):
+            return ReactionResult(
+                handled=False,
+                action="tool_approval",
+                task=task,
+                reason="invalid_approval_key",
+            )
+
+        if reaction == REACTION_CONFIRM:
+            approved = self.task_service.approve_tool_approval(
+                task,
+                approval_key=approval_key,
+                by_user_id=user_id,
+            )
+            if approved is None:
+                return ReactionResult(
+                    handled=False,
+                    action="approve_tool",
+                    task=task,
+                    reason="approval_not_pending",
+                )
+            logger.info(
+                "slack tool approval handled task_id=%s approval_key=%s user=%s",
+                approved.id,
+                approval_key,
+                user_id,
+            )
+            return ReactionResult(handled=True, action="approve_tool", task=approved)
+
+        rejected = self.task_service.reject_tool_approval(
+            task,
+            approval_key=approval_key,
+            by_user_id=user_id,
+        )
+        if rejected is None:
+            return ReactionResult(
+                handled=False,
+                action="reject_tool",
+                task=task,
+                reason="approval_not_pending",
+            )
+        self._post_tool_approval_rejection(task=rejected, request=pending)
+        logger.info(
+            "slack tool approval rejected task_id=%s approval_key=%s user=%s",
+            rejected.id,
+            approval_key,
+            user_id,
+        )
+        return ReactionResult(handled=True, action="reject_tool", task=rejected)
+
     def _handle_confirmation_reaction(
         self,
         *,
@@ -1791,6 +1920,47 @@ class SlackIngress:
             text,
             purpose=purpose,
         )
+
+    def _post_tool_approval_rejection(
+        self,
+        *,
+        task: Task,
+        request: Mapping[str, Any],
+    ) -> None:
+        text = "Okay, I won't run that action."
+        tool_name = request.get("tool")
+        if isinstance(tool_name, str) and tool_name:
+            text = f"Okay, I won't run *{tool_name}*."
+        try:
+            SlackPoster(
+                session=self.session,
+                client=cast(SlackPostingClient, self.client),
+                task_service=self.task_service,
+            ).post_message(
+                SlackThread.from_task(task),
+                text,
+                purpose=TOOL_APPROVAL_REJECTED_PURPOSE,
+            )
+        except Exception:
+            logger.exception(
+                "failed to post tool approval rejection task_id=%s", task.id
+            )
+
+    def _latest_posted_message_ts(self, *, task: Task, purpose: str) -> str | None:
+        event = self.session.scalar(
+            select(TaskEvent)
+            .where(
+                TaskEvent.task_id == task.id,
+                TaskEvent.type == TaskEventType.message_posted,
+                TaskEvent.payload["purpose"].as_string() == purpose,
+            )
+            .order_by(TaskEvent.seq.desc())
+            .limit(1)
+        )
+        if event is None:
+            return None
+        message_ts = event.payload.get("message_ts")
+        return message_ts if isinstance(message_ts, str) else None
 
 
 def _required_str(values: Mapping[str, Any], key: str) -> str:

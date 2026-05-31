@@ -13,6 +13,11 @@ from alembic.config import Config
 from sqlalchemy import Engine, delete, select
 from sqlalchemy.orm import Session, sessionmaker
 
+from kortny.approvals import (
+    TOOL_APPROVAL_PROMPT_PURPOSE,
+    TOOL_APPROVAL_REQUIRED_MESSAGE,
+    TOOL_APPROVAL_WAITING_MESSAGE,
+)
 from kortny.config.settings import LLMProvider as SettingsLLMProvider
 from kortny.config.settings import Settings
 from kortny.db.models import (
@@ -423,6 +428,87 @@ def test_worker_runs_agent_flow_and_posts_pdf(
     ] == [
         "running",
         "succeeded",
+    ]
+
+
+def test_worker_posts_approval_prompt_for_sensitive_tool(
+    db_session: Session,
+    worker_session_factory: sessionmaker[Session],
+    tmp_path: Path,
+) -> None:
+    claim_time = datetime(2026, 5, 31, 14, 10, tzinfo=UTC)
+    task = create_task(db_session, event_id="EvApprovalGate")
+    task.input = "forget my pdf policy"
+    task.available_at = claim_time - timedelta(seconds=1)
+    db_session.add(
+        ModelPricing(
+            provider=LLMProvider.openrouter,
+            model="openai/gpt-4o-mini",
+            input_price_per_mtok=Decimal("1.000000"),
+            output_price_per_mtok=Decimal("2.000000"),
+            effective_from=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+    )
+    db_session.commit()
+
+    slack_client = FakeSlackClient()
+    provider = FakeAgentProvider(
+        [
+            Completion(
+                content=None,
+                tool_calls=(
+                    ToolCall(
+                        id="call-forget",
+                        name="forget_fact",
+                        arguments={"scope": "user", "key": "pdf_policy"},
+                    ),
+                ),
+                usage=TokenUsage(input_tokens=500, output_tokens=100),
+                model="openai/gpt-4o-mini",
+            )
+        ]
+    )
+
+    result = TaskWorker(
+        session_factory=worker_session_factory,
+        worker_id="approval-worker-test",
+        executor=AgentTaskExecutor(
+            settings=make_settings(),
+            llm_provider=provider,
+            provider_name=LLMProvider.openrouter,
+            slack_client=slack_client,
+            workspace_base_dir=tmp_path,
+        ),
+    ).run_once(now=claim_time)
+
+    db_session.refresh(task)
+    events = task_events(db_session, task)
+    posted_events = [
+        event for event in events if event.type is TaskEventType.message_posted
+    ]
+
+    assert result.status == TaskStatus.waiting_approval.value
+    assert task.status is TaskStatus.waiting_approval
+    assert task.locked_by is None
+    assert task.lease_expires_at is None
+    assert len(slack_client.messages) == 1
+    assert "approval before I run *forget_fact*" in slack_client.messages[0]["text"]
+    assert "React with :white_check_mark:" in slack_client.messages[0]["text"]
+    assert posted_events[0].payload["purpose"] == TOOL_APPROVAL_PROMPT_PURPOSE
+    assert any(
+        event.payload.get("message") == TOOL_APPROVAL_REQUIRED_MESSAGE
+        for event in events
+    )
+    assert any(
+        event.payload.get("message") == TOOL_APPROVAL_WAITING_MESSAGE
+        for event in events
+    )
+    assert not any(event.type is TaskEventType.tool_call for event in events)
+    assert [
+        event.payload["to"] for event in events if event.type == "status_changed"
+    ] == [
+        "running",
+        "waiting_approval",
     ]
 
 

@@ -57,6 +57,9 @@ Rules:
 - For comparison_memo responses, make the recommendation explicit and then show
   the tradeoffs.
 - Make tool usage sound natural when it helps, not mechanical.
+- For memory no-match cases, use normal coworker language: say Kortny checked
+  what it remembers, does not see that saved right now, and has nothing to
+  remove. Do not expose raw tool phrases.
 - Use Slack mrkdwn: *bold*, simple bullets, and <https://url|label> links.
 - Do not use Markdown headings with #.
 - Avoid repetitive endings like "If you want..." unless a next step is
@@ -322,9 +325,7 @@ class ResponseRecord:
             "uncertainty_count": len(self.uncertainties),
             "suggested_next_action_count": len(self.suggested_next_actions),
             "procedural_skill_count": len(self.procedural_skills),
-            "procedural_skill_slugs": [
-                skill.slug for skill in self.procedural_skills
-            ],
+            "procedural_skill_slugs": [skill.slug for skill in self.procedural_skills],
         }
 
 
@@ -543,9 +544,9 @@ def sanitize_humanized_response(text: str | None, *, fallback: str) -> str:
     if text is None:
         return normalize_slack_mrkdwn(fallback)
     message = _json_message(text)
-    normalized = (message if message is not None else text).strip().strip('"').strip(
-        "'"
-    ).strip()
+    normalized = (
+        (message if message is not None else text).strip().strip('"').strip("'").strip()
+    )
     if not normalized:
         return normalize_slack_mrkdwn(fallback)
     if _looks_like_humanizer_leak(normalized):
@@ -767,7 +768,9 @@ def _response_failure_from_error_event(event: TaskEvent) -> ResponseFailure:
 
 def _artifact_summary(session: Session, task: Task) -> list[ResponseArtifact]:
     artifacts = session.scalars(
-        select(Artifact).where(Artifact.task_id == task.id).order_by(Artifact.created_at)
+        select(Artifact)
+        .where(Artifact.task_id == task.id)
+        .order_by(Artifact.created_at)
     )
     return [
         ResponseArtifact(
@@ -992,9 +995,13 @@ def _shape_profile(
             label="Memory note",
             selected_reason=selected_reason,
             framework_hint=framework_hint,
-            required_elements=["remembered_fact_or_limit", "scope"],
+            required_elements=[
+                "remembered_fact_or_limit",
+                "scope",
+                "natural_no_match_explanation_when_relevant",
+            ],
             quality_checks=["memory scope is clear"],
-            avoid=["raw ids unless necessary"],
+            avoid=["raw ids unless necessary", "raw tool-result phrasing"],
         )
     if shape is ResponseShape.failure_note:
         return ResponseShapeProfile(
@@ -1097,7 +1104,9 @@ ANALYST_AUDIT_PHRASES = frozenset(
 def _task_events(session: Session, task: Task) -> Sequence[TaskEvent]:
     return tuple(
         session.scalars(
-            select(TaskEvent).where(TaskEvent.task_id == task.id).order_by(TaskEvent.seq)
+            select(TaskEvent)
+            .where(TaskEvent.task_id == task.id)
+            .order_by(TaskEvent.seq)
         )
     )
 

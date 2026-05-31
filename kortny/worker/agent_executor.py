@@ -14,6 +14,11 @@ from sqlalchemy.orm import Session
 from kortny.agent import AgentCoordinator
 from kortny.agent.coordinator import DEFAULT_SYSTEM_PROMPT
 from kortny.agent.thread_context import ThreadTranscriptProvider
+from kortny.approvals import (
+    TOOL_APPROVAL_PROMPT_PURPOSE,
+    ToolApprovalRequired,
+    approval_prompt_text,
+)
 from kortny.composio import ComposioClient
 from kortny.composio.provider import ComposioExternalToolProvider
 from kortny.config import Settings, load_settings
@@ -203,6 +208,35 @@ class AgentTaskExecutor:
                     agent_result.artifact_count,
                 )
                 return TaskExecutionResult(result_summary=agent_result.result_summary)
+        except ToolApprovalRequired as exc:
+            logger.info(
+                "agent executor waiting for approval task_id=%s tool=%s approval_key=%s",
+                task.id,
+                exc.request.tool_name,
+                exc.request.approval_key,
+            )
+            prompt_ts = self._post_approval_request(
+                settings=settings,
+                session=session,
+                task=task,
+                task_service=task_service,
+                approval=exc,
+            )
+            task_service.mark_waiting_for_tool_approval(
+                task,
+                request=exc.request.to_payload(),
+                prompt_message_ts=prompt_ts,
+            )
+            self._complete_ack_reaction(
+                settings=settings,
+                session=session,
+                task=task,
+                task_service=task_service,
+                succeeded=True,
+            )
+            return TaskExecutionResult(
+                result_summary=(f"Waiting for approval to run {exc.request.tool_name}.")
+            )
         except TaskCancelledError:
             logger.info("agent executor cancelled task_id=%s", task.id)
             raise
@@ -643,6 +677,31 @@ class AgentTaskExecutor:
                 initial_comment=initial_comment,
                 title=artifact.filename,
             )
+
+    def _post_approval_request(
+        self,
+        *,
+        settings: Settings,
+        session: Session,
+        task: Task,
+        task_service: TaskService,
+        approval: ToolApprovalRequired,
+    ) -> str:
+        client = self.slack_client
+        if client is None:
+            client = cast(
+                SlackPostingClient,
+                WebClient(token=settings.slack_bot_token),
+            )
+        return SlackPoster(
+            session=session,
+            client=client,
+            task_service=task_service,
+        ).post_message(
+            SlackThread.from_task(task),
+            approval_prompt_text(approval.request),
+            purpose=TOOL_APPROVAL_PROMPT_PURPOSE,
+        )
 
     def _mark_channel_assessment_completed(
         self,

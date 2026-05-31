@@ -47,12 +47,19 @@ from kortny.agent.planner import (
     render_execution_plan_context,
     render_recovery_plan_context,
 )
+from kortny.approvals import (
+    ApprovalScope,
+    ToolApprovalPolicy,
+    ToolApprovalRequest,
+    ToolApprovalRequired,
+)
 
 __all__ = [
     "AgentCoordinator",
     "AgentExecutionGuardrailError",
     "AgentLoopError",
     "AgentRunResult",
+    "ApprovalScope",
     "ClassifiedToolError",
     "AgentTurnLimitError",
     "ContextAcknowledgement",
@@ -82,6 +89,9 @@ __all__ = [
     "RecoveryPlan",
     "RecoveryPlanPayload",
     "ToolAttemptRecord",
+    "ToolApprovalPolicy",
+    "ToolApprovalRequest",
+    "ToolApprovalRequired",
     "render_execution_plan_context",
     "render_recovery_plan_context",
 ]

@@ -21,9 +21,12 @@ from kortny.agent import (
     ContextPackage,
     ExecutionErrorCategory,
     ExecutionGuardrailLimits,
+    PlannerGateDecision,
     RecoveryAction,
+    ToolApprovalRequired,
 )
 from kortny.agent.thread_context import ThreadTranscriptMessage
+from kortny.approvals import TOOL_APPROVAL_REQUIRED_MESSAGE
 from kortny.db.models import (
     Artifact,
     EncryptedSecret,
@@ -147,6 +150,18 @@ class FakeContextEngine:
         self.after_turn_calls.append((task.id, outcome))
 
 
+class NoopExecutionPlanner:
+    def should_plan(
+        self,
+        *,
+        task: Task,
+        tool_schemas: Sequence[JsonSchema],
+        intent_decision: dict[str, object] | None,
+    ) -> PlannerGateDecision:
+        del task, tool_schemas, intent_decision
+        return PlannerGateDecision(False, "test_no_plan")
+
+
 class EchoJsonTool:
     name = "echo_json"
     description = "Echoes JSON arguments."
@@ -159,6 +174,36 @@ class EchoJsonTool:
 
     def invoke(self, args: JsonObject) -> ToolResult:
         return ToolResult(output={"echoed": args["message"]}, cost_usd=Decimal("0.1"))
+
+
+class InspectMemoryDifferentTool:
+    name = "inspect_memory"
+    description = "Returns active memories that do not match the requested one."
+    parameters: JsonSchema = {
+        "type": "object",
+        "properties": {"scope": {"type": "string"}},
+        "required": ["scope"],
+        "additionalProperties": False,
+    }
+
+    def __init__(self) -> None:
+        self.calls: list[JsonObject] = []
+
+    def invoke(self, args: JsonObject) -> ToolResult:
+        self.calls.append(args)
+        return ToolResult(
+            output={
+                "scope": args["scope"],
+                "count": 1,
+                "facts": [
+                    {
+                        "key": "pdf_generation_policy",
+                        "value_text": "Do not generate PDFs unless explicitly asked.",
+                        "status": "active",
+                    }
+                ],
+            }
+        )
 
 
 class MissingRequiredContextTool:
@@ -293,6 +338,24 @@ class RecordingNotionComposioTool:
         return ToolResult(output={"received": args})
 
 
+class DangerousExternalTool:
+    name = "composio_linear_create_issue"
+    description = "Creates a Linear issue."
+    parameters: JsonSchema = {
+        "type": "object",
+        "properties": {"title": {"type": "string"}},
+        "required": ["title"],
+        "additionalProperties": False,
+    }
+
+    def __init__(self) -> None:
+        self.calls: list[JsonObject] = []
+
+    def invoke(self, args: JsonObject) -> ToolResult:
+        self.calls.append(args)
+        return ToolResult(output={"created": True})
+
+
 @pytest.fixture(scope="session")
 def engine() -> Iterator[Engine]:
     assert TEST_POSTGRES_URL is not None
@@ -372,11 +435,207 @@ def test_coordinator_finishes_with_final_answer(db_session: Session) -> None:
     )
     assert context_event.payload["selected_fact_ids"] == []
     assert context_event.payload["selected_episode_ids"] == []
-    assert (
-        context_event.payload["context_engine_id"] == "kortny.default_context_engine"
-    )
+    assert context_event.payload["context_engine_id"] == "kortny.default_context_engine"
     assert context_event.payload["context_engine_name"] == "Default Context Engine"
     assert context_event.payload["context_budget"]["thread_context_max_chars"] == 12000
+
+
+def test_coordinator_gates_sensitive_tool_before_invocation(
+    db_session: Session,
+) -> None:
+    task = create_task(db_session, input_text="create an issue")
+    tool = DangerousExternalTool()
+    llm = FakeLLM(
+        [
+            Completion(
+                content=None,
+                tool_calls=(
+                    ToolCall(
+                        id="call-create",
+                        name="composio_linear_create_issue",
+                        arguments={"title": "Follow up"},
+                    ),
+                ),
+                usage=TokenUsage(input_tokens=30, output_tokens=5),
+            )
+        ]
+    )
+
+    with pytest.raises(ToolApprovalRequired) as exc_info:
+        AgentCoordinator(
+            session=db_session,
+            llm=llm,
+            registry=ToolRegistry([tool]),
+            execution_planner=NoopExecutionPlanner(),
+        ).run(task)
+
+    assert tool.calls == []
+    assert exc_info.value.request.tool_name == "composio_linear_create_issue"
+    assert exc_info.value.request.argument_keys == ("title",)
+
+    events = task_events(db_session, task)
+    required = next(
+        event
+        for event in events
+        if event.payload.get("message") == TOOL_APPROVAL_REQUIRED_MESSAGE
+    )
+    assert required.payload["request"]["tool"] == "composio_linear_create_issue"
+    assert required.payload["request"]["scope"] == "user"
+    assert required.payload["request"]["argument_keys"] == ["title"]
+    assert not any(event.type is TaskEventType.tool_call for event in events)
+
+
+def test_coordinator_uses_prior_approval_for_same_tool_signature(
+    db_session: Session,
+) -> None:
+    task = create_task(db_session, input_text="create an issue")
+    tool = DangerousExternalTool()
+    tool_call = ToolCall(
+        id="call-create",
+        name="composio_linear_create_issue",
+        arguments={"title": "Follow up"},
+    )
+
+    with pytest.raises(ToolApprovalRequired) as exc_info:
+        AgentCoordinator(
+            session=db_session,
+            llm=FakeLLM(
+                [
+                    Completion(
+                        content=None,
+                        tool_calls=(tool_call,),
+                        usage=TokenUsage(input_tokens=30, output_tokens=5),
+                    )
+                ]
+            ),
+            registry=ToolRegistry([tool]),
+            execution_planner=NoopExecutionPlanner(),
+        ).run(task)
+    TaskService(db_session).append_event(
+        task,
+        TaskEventType.log,
+        {
+            "message": "tool_approval_decision",
+            "decision": "approved",
+            "approval_key": exc_info.value.request.approval_key,
+            "tool": exc_info.value.request.tool_name,
+            "by_user_id": "U123",
+        },
+    )
+
+    result = AgentCoordinator(
+        session=db_session,
+        llm=FakeLLM(
+            [
+                Completion(
+                    content=None,
+                    tool_calls=(tool_call,),
+                    usage=TokenUsage(input_tokens=30, output_tokens=5),
+                ),
+                Completion(
+                    content="Created it.",
+                    tool_calls=(),
+                    usage=TokenUsage(input_tokens=40, output_tokens=8),
+                ),
+            ]
+        ),
+        registry=ToolRegistry([tool]),
+        execution_planner=NoopExecutionPlanner(),
+    ).run(task)
+
+    assert result.result_summary == "Created it."
+    assert tool.calls == [{"title": "Follow up"}]
+
+
+def test_coordinator_retries_empty_response_after_tool_result(
+    db_session: Session,
+) -> None:
+    task = create_task(db_session, input_text="inspect this and answer")
+    llm = FakeLLM(
+        [
+            Completion(
+                content=None,
+                tool_calls=(
+                    ToolCall(
+                        id="call-echo",
+                        name="echo_json",
+                        arguments={"message": "memory"},
+                    ),
+                ),
+                usage=TokenUsage(input_tokens=30, output_tokens=5),
+            ),
+            Completion(
+                content="",
+                tool_calls=(),
+                usage=TokenUsage(input_tokens=20, output_tokens=0),
+            ),
+            Completion(
+                content="I found the memory topic.",
+                tool_calls=(),
+                usage=TokenUsage(input_tokens=25, output_tokens=7),
+            ),
+        ]
+    )
+
+    result = AgentCoordinator(
+        session=db_session,
+        llm=llm,
+        registry=ToolRegistry([EchoJsonTool()]),
+        execution_planner=NoopExecutionPlanner(),
+    ).run(task)
+
+    assert result.result_summary == "I found the memory topic."
+    assert len(llm.calls) == 3
+    assert any(
+        message.role == "system" and "previous response was empty" in message.content
+        for message in llm.calls[2][1]
+    )
+    assert any(
+        event.payload.get("message") == "agent_empty_response_retry"
+        for event in task_events(db_session, task)
+    )
+
+
+def test_coordinator_humanizes_memory_no_match_final_text(
+    db_session: Session,
+) -> None:
+    task = create_task(db_session, input_text="forget my PDF branding preference")
+    inspect_memory = InspectMemoryDifferentTool()
+    llm = FakeLLM(
+        [
+            Completion(
+                content=None,
+                tool_calls=(
+                    ToolCall(
+                        id="call-inspect-memory",
+                        name="inspect_memory",
+                        arguments={"scope": "user"},
+                    ),
+                ),
+                usage=TokenUsage(input_tokens=30, output_tokens=5),
+            ),
+            Completion(
+                content="No active memory fact matched that scope and key.",
+                tool_calls=(),
+                usage=TokenUsage(input_tokens=40, output_tokens=8),
+            ),
+        ]
+    )
+
+    result = AgentCoordinator(
+        session=db_session,
+        llm=llm,
+        registry=ToolRegistry([inspect_memory]),
+        execution_planner=NoopExecutionPlanner(),
+    ).run(task)
+
+    assert inspect_memory.calls == [{"scope": "user"}]
+    assert result.result_summary == (
+        "I checked what I remember and don't see anything matching "
+        '"PDF branding preference" saved right now, so there is nothing for me '
+        "to remove."
+    )
+    assert "No active memory fact matched" not in result.result_summary
 
 
 def test_coordinator_uses_context_engine_lifecycle(db_session: Session) -> None:
@@ -407,9 +666,7 @@ def test_coordinator_uses_context_engine_lifecycle(db_session: Session) -> None:
     assert context_engine.ingested_task_ids == [task.id]
     assert context_engine.assembled_task_ids == [task.id]
     assert context_engine.after_turn_calls == [(task.id, "succeeded")]
-    assert llm.calls[0][1] == (
-        ChatMessage(role="user", content="from context engine"),
-    )
+    assert llm.calls[0][1] == (ChatMessage(role="user", content="from context engine"),)
 
 
 def test_coordinator_injects_workspace_facts(db_session: Session) -> None:
@@ -1636,8 +1893,9 @@ def test_coordinator_records_tool_attempt_metadata(db_session: Session) -> None:
     assert len(budget_event.payload["attempt"]["normalized_args_hash"]) == 64
     assert tool_call_event.payload["step_id"] == "step-1"
     assert tool_call_event.payload["attempt_no"] == 1
-    assert tool_call_event.payload["normalized_args_hash"] == (
-        budget_event.payload["attempt"]["normalized_args_hash"]
+    assert (
+        tool_call_event.payload["normalized_args_hash"]
+        == (budget_event.payload["attempt"]["normalized_args_hash"])
     )
 
 

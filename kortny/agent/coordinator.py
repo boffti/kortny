@@ -55,6 +55,14 @@ from kortny.agent.planner import (
     render_recovery_plan_context,
 )
 from kortny.agent.thread_context import ThreadTranscriptProvider
+from kortny.approvals import (
+    TOOL_APPROVAL_DECISION_MESSAGE,
+    TOOL_APPROVAL_REQUIRED_MESSAGE,
+    ToolApprovalPolicy,
+    ToolApprovalRequest,
+    ToolApprovalRequired,
+    approval_key,
+)
 from kortny.db.models import Task, TaskEvent, TaskEventType
 from kortny.llm import ChatMessage, Completion, ToolCall
 from kortny.llm.routing import latest_intent_decision
@@ -76,7 +84,20 @@ from kortny.tools.types import (
 
 DEFAULT_MAX_TURNS = 6
 REQUESTED_PAGES_RE = re.compile(r"\b(\d{1,2})\s+pages?\b", re.I)
+MEMORY_FORGET_REQUEST_RE = re.compile(
+    r"\b(forget|remove|delete|clear)\b.*\b(memory|memories|preference|preferences|fact|facts|rule|rules|remembered|stored)\b",
+    re.I,
+)
+MEMORY_NO_MATCH_RE = re.compile(
+    r"\bno\s+(?:active\s+)?memory(?:\s+fact)?\s+(?:matched|was\s+found|found)\b",
+    re.I,
+)
 logger = logging.getLogger(__name__)
+EMPTY_RESPONSE_REPAIR_PROMPT = (
+    "Your previous response was empty. Use the available context and tool "
+    "results to either call the next required tool or provide a concise final "
+    "answer. Do not return an empty message."
+)
 DEFAULT_SYSTEM_PROMPT = (
     "You are Kortny, a Slack-native AI coworker. Use the available tools when "
     "they are needed to complete the user's request. If the user asks for "
@@ -95,8 +116,14 @@ DEFAULT_SYSTEM_PROMPT = (
     "inspect_memory when the user asks what you remember about them, this "
     "channel, this workspace, or why you believe a remembered fact. Use "
     "recall_fact only when you need one specific memory key. Use forget_fact "
-    "when the user asks you to forget a remembered fact; tell them if no active "
-    "memory matched. Never store secrets, API keys, tokens, passwords, or "
+    "when the user asks you to forget a remembered fact. If the user describes "
+    "the memory in natural language and you do not know the exact key, call "
+    "inspect_memory first, then call forget_fact only when an inspected active "
+    "fact clearly matches the user's requested memory. Do not call forget_fact "
+    "just to probe whether a vague memory exists. If no active fact seems to "
+    'match, answer naturally, for example: "I checked what I remember and '
+    "don't see that saved right now, so there's nothing for me to remove.\" "
+    "Never store secrets, API keys, tokens, passwords, or "
     "private keys in memory; if asked, explain that secrets belong in "
     "environment variables or a secret manager. "
     "When calling remember_fact, preserve every actionable detail from the "
@@ -182,6 +209,7 @@ class AgentCoordinator:
         context_engine: ContextEngine | None = None,
         guardrail_limits: ExecutionGuardrailLimits | None = None,
         execution_planner: ExecutionPlanner | None = None,
+        approval_policy: ToolApprovalPolicy | None = None,
     ) -> None:
         if max_turns < 1:
             raise ValueError("max_turns must be at least 1")
@@ -205,6 +233,7 @@ class AgentCoordinator:
         )
         self.max_turns = self.guardrail_limits.max_turns
         self.execution_planner = execution_planner or ExecutionPlanner()
+        self.approval_policy = approval_policy or ToolApprovalPolicy()
         if context_engine is not None:
             self.context_engine = context_engine
         else:
@@ -234,6 +263,9 @@ class AgentCoordinator:
             result = self._run_with_context(task_obj, messages)
             run_outcome = "succeeded"
             return result
+        except ToolApprovalRequired:
+            run_outcome = "waiting_approval"
+            raise
         finally:
             if context_package is not None:
                 self._after_context_turn(
@@ -291,6 +323,20 @@ class AgentCoordinator:
             )
 
             if not completion.tool_calls:
+                if not (completion.content or "").strip() and turn < self.max_turns:
+                    self._append_log(
+                        task_obj,
+                        "agent_empty_response_retry",
+                        {
+                            "turn": turn,
+                            "message_count": len(messages),
+                            "tool_count": len(schemas),
+                        },
+                    )
+                    messages.append(
+                        ChatMessage(role="system", content=EMPTY_RESPONSE_REPAIR_PROMPT)
+                    )
+                    continue
                 result = self._finish_with_text(
                     task_obj,
                     completion.content,
@@ -396,6 +442,14 @@ class AgentCoordinator:
                 arguments=arguments,
                 turn=turn,
             )
+            self._raise_if_tool_approval_required(
+                task_obj=task_obj,
+                tool_call=tool_call,
+                arguments=arguments,
+                attempt=attempt,
+                turn=turn,
+                step_id=plan.current_step.step_id,
+            )
             self.task_service.append_event(
                 task_obj,
                 TaskEventType.tool_call,
@@ -476,9 +530,7 @@ class AgentCoordinator:
                                 ),
                             }
                         )
-                    set_span_attributes(
-                        span_attributes
-                    )
+                    set_span_attributes(span_attributes)
             except Exception as exc:
                 latency_ms = _latency_ms(started)
                 record_span_exception(exc)
@@ -619,9 +671,7 @@ class AgentCoordinator:
                         "tool_call_id": tool_call.id,
                         "error_code": error_classification.code,
                         "error_category": error_classification.category.value,
-                        "recovery_action": (
-                            error_classification.recovery_action.value
-                        ),
+                        "recovery_action": (error_classification.recovery_action.value),
                         "normalized_args_hash": attempt.normalized_args_hash,
                         "attempt_no": attempt.attempt_no,
                         "budget_remaining": plan.budget.remaining(plan.limits),
@@ -773,7 +823,7 @@ class AgentCoordinator:
         *,
         plan: ExecutionPlan,
     ) -> AgentRunResult:
-        summary = (content or "").strip()
+        summary = _humanize_memory_no_match(task.input, content or "").strip()
         if not summary:
             error = AgentLoopError("Agent returned no final content or tool calls")
             self._fail_execution_plan(
@@ -1046,6 +1096,90 @@ class AgentCoordinator:
             raise error
         return attempt
 
+    def _raise_if_tool_approval_required(
+        self,
+        *,
+        task_obj: Task,
+        tool_call: ToolCall,
+        arguments: JsonObject,
+        attempt: ToolAttemptRecord,
+        turn: int,
+        step_id: str,
+    ) -> None:
+        tool = self.registry.get(tool_call.name)
+        requirement = self.approval_policy.requirement_for(tool, arguments)
+        if not requirement.required:
+            return
+
+        key = approval_key(tool_call.name, attempt.normalized_args_hash)
+        if self._approval_is_granted(task_obj, key):
+            self._append_log(
+                task_obj,
+                "tool_approval_previously_granted",
+                {
+                    "turn": turn,
+                    "tool_call_id": tool_call.id,
+                    "tool": tool_call.name,
+                    "step_id": step_id,
+                    "approval_key": key,
+                    "normalized_args_hash": attempt.normalized_args_hash,
+                    "attempt_no": attempt.attempt_no,
+                },
+            )
+            return
+
+        request = ToolApprovalRequest(
+            approval_key=key,
+            tool_name=tool_call.name,
+            tool_call_id=tool_call.id,
+            normalized_args_hash=attempt.normalized_args_hash,
+            argument_keys=tuple(sorted(arguments)),
+            scope=requirement.scope,
+            reason=requirement.reason,
+            risk=requirement.risk,
+            arguments=arguments,
+        )
+        self.task_service.append_event(
+            task_obj,
+            TaskEventType.log,
+            {
+                "message": TOOL_APPROVAL_REQUIRED_MESSAGE,
+                "turn": turn,
+                "step_id": step_id,
+                "request": request.to_payload(),
+            },
+        )
+        log_observation(
+            logger,
+            "tool_approval_required",
+            task=task_obj,
+            turn=turn,
+            tool_call_id=tool_call.id,
+            tool=tool_call.name,
+            step_id=step_id,
+            approval_key=key,
+            scope=requirement.scope.value,
+            risk=requirement.risk,
+            reason=requirement.reason,
+            argument_keys=sorted(arguments),
+        )
+        raise ToolApprovalRequired(request)
+
+    def _approval_is_granted(self, task: Task, key: str) -> bool:
+        event = self.session.scalar(
+            select(TaskEvent)
+            .where(
+                TaskEvent.task_id == task.id,
+                TaskEvent.type == TaskEventType.log,
+                TaskEvent.payload["message"].as_string()
+                == TOOL_APPROVAL_DECISION_MESSAGE,
+                TaskEvent.payload["approval_key"].as_string() == key,
+            )
+            .order_by(TaskEvent.seq.desc())
+            .limit(1)
+        )
+        return event is not None and event.payload.get("decision") == "approved"
+
     def _record_recoverable_failure(
         self,
         *,
@@ -1088,8 +1222,7 @@ class AgentCoordinator:
             },
         )
         exceeded_total = (
-            plan.budget.recoverable_failure_count
-            > plan.limits.max_recoverable_failures
+            plan.budget.recoverable_failure_count > plan.limits.max_recoverable_failures
         )
         exceeded_same_error = same_error_count > plan.limits.max_same_recoverable_error
         if exceeded_total or exceeded_same_error:
@@ -1288,6 +1421,41 @@ def _requested_pdf_min_pages(input_text: str) -> int | None:
     if requested < 1 or requested > 50:
         return None
     return requested
+
+
+def _humanize_memory_no_match(input_text: str, content: str) -> str:
+    summary = content.strip()
+    if not summary:
+        return summary
+    if not MEMORY_FORGET_REQUEST_RE.search(input_text):
+        return summary
+    if not MEMORY_NO_MATCH_RE.search(summary):
+        return summary
+
+    target = _memory_forget_target(input_text)
+    if target:
+        return (
+            "I checked what I remember and don't see anything matching "
+            f'"{target}" saved right now, so there is nothing for me to remove.'
+        )
+    return (
+        "I checked what I remember and don't see that saved right now, "
+        "so there is nothing for me to remove."
+    )
+
+
+def _memory_forget_target(input_text: str) -> str | None:
+    cleaned = re.sub(r"<@[^>]+>", " ", input_text)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" \t\r\n.!?")
+    cleaned = re.sub(
+        r"^(?:please\s+)?(?:forget|remove|delete|clear)\s+",
+        "",
+        cleaned,
+        flags=re.I,
+    ).strip(" \t\r\n.!?")
+    cleaned = re.sub(r"^(?:my|the|a|an)\s+", "", cleaned, flags=re.I).strip()
+    cleaned = cleaned[:120].strip(" \t\r\n.!?")
+    return cleaned or None
 
 
 def _json_dumps(payload: object) -> str:

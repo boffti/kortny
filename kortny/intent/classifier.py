@@ -9,7 +9,12 @@ from typing import Protocol
 
 from pydantic import ValidationError
 
-from kortny.intent.models import IntentDecision, IntentRequest
+from kortny.intent.models import (
+    IntentClassification,
+    IntentDecision,
+    IntentRequest,
+    ModelTier,
+)
 from kortny.intent.prompts import INTENT_CLASSIFIER_SYSTEM_PROMPT
 from kortny.llm import ChatMessage, Completion
 from kortny.tools.types import JsonObject, JsonSchema
@@ -103,7 +108,8 @@ class LLMIntentClassifier:
                 messages,
                 response_format=INTENT_RESPONSE_FORMAT,
             )
-        return parse_intent_decision(completion.content)
+        decision = parse_intent_decision(completion.content)
+        return _with_deterministic_overrides(request, decision)
 
 
 def parse_intent_decision(content: str | None) -> IntentDecision:
@@ -136,3 +142,56 @@ def _extract_json_object(content: str) -> str:
     candidate = stripped[start : end + 1]
     json.loads(candidate)
     return candidate
+
+
+def _with_deterministic_overrides(
+    request: IntentRequest,
+    decision: IntentDecision,
+) -> IntentDecision:
+    if not _is_memory_forget_request(request.text):
+        return decision
+    return decision.model_copy(
+        update={
+            "addressed_to_kortny": True,
+            "classification": IntentClassification.task_request,
+            "should_create_task": True,
+            "should_ack_with_reaction": True,
+            "suggested_reaction": "memo",
+            "needs_channel_context": False,
+            "needs_thread_context": request.is_thread_follow_up,
+            "needs_file_context": False,
+            "likely_tools": ["inspect_memory", "forget_fact"],
+            "model_tier": ModelTier.cheap,
+            "reason": "User asked Kortny to forget a stored memory or preference.",
+        }
+    )
+
+
+def _is_memory_forget_request(text: str) -> bool:
+    normalized = f" {text.casefold()} "
+    has_forget_action = any(
+        phrase in normalized
+        for phrase in (
+            " forget ",
+            " remove ",
+            " delete ",
+            " clear ",
+        )
+    )
+    if not has_forget_action:
+        return False
+    return any(
+        phrase in normalized
+        for phrase in (
+            " memory",
+            " memories",
+            " preference",
+            " preferences",
+            " fact",
+            " facts",
+            " rule",
+            " rules",
+            " remembered",
+            " stored",
+        )
+    )

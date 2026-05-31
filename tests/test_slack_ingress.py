@@ -9,6 +9,11 @@ from alembic.config import Config
 from sqlalchemy import Engine, delete, func, select
 from sqlalchemy.orm import Session
 
+from kortny.approvals import (
+    TOOL_APPROVAL_PROMPT_PURPOSE,
+    TOOL_APPROVAL_REJECTED_PURPOSE,
+    TOOL_APPROVAL_REQUIRED_MESSAGE,
+)
 from kortny.db.models import (
     Artifact,
     EncryptedSecret,
@@ -1676,6 +1681,153 @@ def test_retry_reaction_requeues_failed_task_from_failure_notice(
     assert task.attempts == 0
     assert task.error is None
     assert task.finished_at is None
+
+
+def test_approval_reaction_requeues_waiting_task(db_session: Session) -> None:
+    installation = create_installation(db_session)
+    service = TaskService(db_session)
+    task = service.create_task(
+        installation_id=installation.id,
+        slack_event_id="EvApprovalApprove",
+        slack_channel_id="C123",
+        slack_thread_ts="1716404000.000001",
+        slack_message_ts="1716404000.000001",
+        slack_user_id="U123",
+        input="create a Linear issue",
+    )
+    approval_key = "composio_linear_create_issue:abc123"
+    service.append_event(
+        task,
+        TaskEventType.log,
+        {
+            "message": TOOL_APPROVAL_REQUIRED_MESSAGE,
+            "request": {
+                "approval_key": approval_key,
+                "tool": "composio_linear_create_issue",
+                "tool_call_id": "call-create",
+                "normalized_args_hash": "abc123",
+                "argument_keys": ["title"],
+                "scope": "user",
+                "reason": "create action",
+                "risk": "external_side_effect",
+                "arguments": {"title": "Follow up"},
+            },
+        },
+    )
+    service.append_event(
+        task,
+        TaskEventType.message_posted,
+        {
+            "channel": "C123",
+            "thread_ts": "1716404000.000001",
+            "message_ts": "1716404001.000001",
+            "purpose": TOOL_APPROVAL_PROMPT_PURPOSE,
+        },
+    )
+    task.status = TaskStatus.waiting_approval
+    db_session.commit()
+
+    result = SlackIngress(
+        session=db_session,
+        client=FakeSlackClient(),
+    ).handle_reaction_added(
+        body=app_mention_body(event_id="EvReactionApprovalApprove"),
+        event=reaction_event(
+            reaction="white_check_mark",
+            user="U123",
+            channel="C123",
+            ts="1716404001.000001",
+        ),
+    )
+
+    assert result.handled is True
+    assert result.action == "approve_tool"
+    assert task.status is TaskStatus.pending
+    events = task_events(db_session, task)
+    assert any(
+        event.payload.get("message") == "tool_approval_decision"
+        and event.payload.get("decision") == "approved"
+        and event.payload.get("approval_key") == approval_key
+        for event in events
+    )
+
+
+def test_reject_approval_reaction_cancels_task_and_posts_note(
+    db_session: Session,
+) -> None:
+    installation = create_installation(db_session)
+    service = TaskService(db_session)
+    task = service.create_task(
+        installation_id=installation.id,
+        slack_event_id="EvApprovalReject",
+        slack_channel_id="C123",
+        slack_thread_ts="1716405000.000001",
+        slack_message_ts="1716405000.000001",
+        slack_user_id="U123",
+        input="create a Linear issue",
+    )
+    approval_key = "composio_linear_create_issue:def456"
+    service.append_event(
+        task,
+        TaskEventType.log,
+        {
+            "message": TOOL_APPROVAL_REQUIRED_MESSAGE,
+            "request": {
+                "approval_key": approval_key,
+                "tool": "composio_linear_create_issue",
+                "tool_call_id": "call-create",
+                "normalized_args_hash": "def456",
+                "argument_keys": ["title"],
+                "scope": "user",
+                "reason": "create action",
+                "risk": "external_side_effect",
+                "arguments": {"title": "Follow up"},
+            },
+        },
+    )
+    service.append_event(
+        task,
+        TaskEventType.message_posted,
+        {
+            "channel": "C123",
+            "thread_ts": "1716405000.000001",
+            "message_ts": "1716405001.000001",
+            "purpose": TOOL_APPROVAL_PROMPT_PURPOSE,
+        },
+    )
+    task.status = TaskStatus.waiting_approval
+    db_session.commit()
+    client = FakeSlackClient()
+
+    result = SlackIngress(
+        session=db_session,
+        client=client,
+    ).handle_reaction_added(
+        body=app_mention_body(event_id="EvReactionApprovalReject"),
+        event=reaction_event(
+            reaction="no_entry_sign",
+            user="U123",
+            channel="C123",
+            ts="1716405001.000001",
+        ),
+    )
+
+    assert result.handled is True
+    assert result.action == "reject_tool"
+    assert task.status is TaskStatus.cancelled
+    assert client.calls == [
+        {
+            "channel": "C123",
+            "text": "Okay, I won't run *composio_linear_create_issue*.",
+            "thread_ts": "1716405000.000001",
+        }
+    ]
+    events = task_events(db_session, task)
+    assert any(
+        event.type is TaskEventType.message_posted
+        and event.payload.get("purpose") == TOOL_APPROVAL_REJECTED_PURPOSE
+        for event in events
+    )
 
 
 def test_reaction_from_non_owner_is_ignored(db_session: Session) -> None:

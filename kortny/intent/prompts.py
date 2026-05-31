@@ -28,6 +28,10 @@ Classification guidance:
 - ambient_observation: message may be useful background but is not a direct request.
 - ignore: not relevant to Kortny.
 
+Important memory-control distinction:
+- "forget/remove/delete/clear my memory/preference/fact/rule" is a task_request with likely_tools ["inspect_memory", "forget_fact"], not cancel_or_retry.
+- cancel_or_retry is only for stopping or retrying a current/prior task execution, not for deleting a stored memory.
+
 For app_mention and dm surfaces, messages are usually addressed to Kortny unless clearly third-person or irrelevant.
 For channel_message surfaces without @mention, be conservative: only mark addressed_to_kortny true when the user directly addresses Kortny.
 

@@ -11,6 +11,11 @@ from sqlalchemy import Select, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from kortny.approvals import (
+    TOOL_APPROVAL_DECISION_MESSAGE,
+    TOOL_APPROVAL_REQUIRED_MESSAGE,
+    TOOL_APPROVAL_WAITING_MESSAGE,
+)
 from kortny.db.models import LLMProvider, LLMUsage, Task, TaskEvent, TaskEventType
 from kortny.db.models import TaskStatus as DbTaskStatus
 from kortny.observability import sanitize_payload
@@ -24,6 +29,7 @@ TERMINAL_STATUSES = {
 CANCELLABLE_STATUSES = {
     DbTaskStatus.pending,
     DbTaskStatus.running,
+    DbTaskStatus.waiting_approval,
 }
 
 
@@ -338,6 +344,167 @@ class TaskRepository:
             },
         )
         return task_obj
+
+    def mark_waiting_for_tool_approval(
+        self,
+        task: Task | uuid.UUID,
+        *,
+        request: dict[str, Any],
+        prompt_message_ts: str,
+        by_worker_id: str | None = None,
+    ) -> Task:
+        """Move a running task into the human approval wait state."""
+
+        task_obj = self._resolve_task(task, for_update=True)
+        previous_status = DbTaskStatus(task_obj.status)
+        now = datetime.now(UTC)
+        task_obj.status = DbTaskStatus.waiting_approval
+        task_obj.result_summary = (
+            f"Waiting for approval to run {request.get('tool', 'a tool')}."
+        )
+        task_obj.updated_at = now
+        _clear_task_lease(task_obj)
+        self.session.flush()
+        self.append_event(
+            task_obj,
+            TaskEventType.status_changed,
+            {
+                "from": previous_status.value,
+                "to": DbTaskStatus.waiting_approval.value,
+                "reason": "tool_approval_required",
+                "by_worker_id": by_worker_id,
+                "approval_key": request.get("approval_key"),
+                "tool": request.get("tool"),
+                "prompt_message_ts": prompt_message_ts,
+            },
+        )
+        self.append_event(
+            task_obj,
+            TaskEventType.log,
+            {
+                "message": TOOL_APPROVAL_WAITING_MESSAGE,
+                "request": request,
+                "prompt_message_ts": prompt_message_ts,
+                "by_worker_id": by_worker_id,
+            },
+        )
+        return task_obj
+
+    def approve_tool_approval(
+        self,
+        task: Task | uuid.UUID,
+        *,
+        approval_key: str,
+        by_user_id: str,
+        available_at: datetime | None = None,
+    ) -> Task | None:
+        """Approve a pending tool approval and requeue the task."""
+
+        task_obj = self._resolve_task(task, for_update=True)
+        if DbTaskStatus(task_obj.status) is not DbTaskStatus.waiting_approval:
+            return None
+        pending = self.latest_pending_tool_approval(task_obj)
+        if pending is None or pending.get("approval_key") != approval_key:
+            return None
+
+        retry_at = available_at or datetime.now(UTC)
+        task_obj.status = DbTaskStatus.pending
+        task_obj.available_at = retry_at
+        task_obj.finished_at = None
+        task_obj.error = None
+        task_obj.updated_at = retry_at
+        _clear_task_lease(task_obj)
+        self.session.flush()
+        self.append_event(
+            task_obj,
+            TaskEventType.log,
+            {
+                "message": TOOL_APPROVAL_DECISION_MESSAGE,
+                "decision": "approved",
+                "approval_key": approval_key,
+                "tool": pending.get("tool"),
+                "by_user_id": by_user_id,
+            },
+        )
+        self.append_event(
+            task_obj,
+            TaskEventType.status_changed,
+            {
+                "from": DbTaskStatus.waiting_approval.value,
+                "to": DbTaskStatus.pending.value,
+                "reason": "tool_approval_approved",
+                "approval_key": approval_key,
+                "by_user_id": by_user_id,
+            },
+        )
+        return task_obj
+
+    def reject_tool_approval(
+        self,
+        task: Task | uuid.UUID,
+        *,
+        approval_key: str,
+        by_user_id: str,
+    ) -> Task | None:
+        """Reject a pending tool approval and cancel the task."""
+
+        task_obj = self._resolve_task(task, for_update=True)
+        if DbTaskStatus(task_obj.status) is not DbTaskStatus.waiting_approval:
+            return None
+        pending = self.latest_pending_tool_approval(task_obj)
+        if pending is None or pending.get("approval_key") != approval_key:
+            return None
+
+        self.append_event(
+            task_obj,
+            TaskEventType.log,
+            {
+                "message": TOOL_APPROVAL_DECISION_MESSAGE,
+                "decision": "rejected",
+                "approval_key": approval_key,
+                "tool": pending.get("tool"),
+                "by_user_id": by_user_id,
+            },
+        )
+        return self.cancel_task(
+            task_obj,
+            by_user_id=by_user_id,
+            reason="tool_approval_rejected",
+        )
+
+    def latest_pending_tool_approval(
+        self, task: Task | uuid.UUID
+    ) -> dict[str, Any] | None:
+        """Return the newest approval request without a decision."""
+
+        task_obj = self._resolve_task(task)
+        events = list(
+            self.session.scalars(
+                select(TaskEvent)
+                .where(
+                    TaskEvent.task_id == task_obj.id,
+                    TaskEvent.type == TaskEventType.log,
+                )
+                .order_by(TaskEvent.seq.desc())
+            )
+        )
+        decided_keys = {
+            event.payload.get("approval_key")
+            for event in events
+            if event.payload.get("message") == TOOL_APPROVAL_DECISION_MESSAGE
+            and isinstance(event.payload.get("approval_key"), str)
+        }
+        for event in events:
+            if event.payload.get("message") != TOOL_APPROVAL_REQUIRED_MESSAGE:
+                continue
+            request = event.payload.get("request")
+            if not isinstance(request, dict):
+                continue
+            approval_key = request.get("approval_key")
+            if not isinstance(approval_key, str) or approval_key in decided_keys:
+                continue
+            return dict(request)
+        return None
 
     def raise_if_cancelled(
         self,

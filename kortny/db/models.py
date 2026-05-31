@@ -40,6 +40,7 @@ class Base(DeclarativeBase):
 class TaskStatus(StrEnum):
     pending = "pending"
     running = "running"
+    waiting_approval = "waiting_approval"
     succeeded = "succeeded"
     failed = "failed"  # TERMINAL: agent error, or crashes exhausted attempts
     crashed = "crashed"  # TRANSIENT: reclaim sweep found an expired lease

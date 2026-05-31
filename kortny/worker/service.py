@@ -132,20 +132,23 @@ class TaskWorker:
 
             try:
                 task_service.raise_if_cancelled(task, phase="before_executor")
-                with start_span(
-                    "task.run",
-                    task=task,
-                    attributes={
-                        "openinference.span.kind": "AGENT",
-                        "worker.id": self.worker_id,
-                    },
-                    linked_traceparent=_task_traceparent(session, task),
-                ), _LeaseHeartbeat(
-                    session_factory=self.session_factory,
-                    task_id=task.id,
-                    worker_id=self.worker_id,
-                    lease_for=self.lease_for,
-                    interval_seconds=self.lease_heartbeat_interval_seconds,
+                with (
+                    start_span(
+                        "task.run",
+                        task=task,
+                        attributes={
+                            "openinference.span.kind": "AGENT",
+                            "worker.id": self.worker_id,
+                        },
+                        linked_traceparent=_task_traceparent(session, task),
+                    ),
+                    _LeaseHeartbeat(
+                        session_factory=self.session_factory,
+                        task_id=task.id,
+                        worker_id=self.worker_id,
+                        lease_for=self.lease_for,
+                        interval_seconds=self.lease_heartbeat_interval_seconds,
+                    ),
                 ):
                     execution_result = self.executor.execute(
                         session=session,
@@ -153,6 +156,31 @@ class TaskWorker:
                         task_service=task_service,
                     )
                 task_service.raise_if_cancelled(task, phase="after_executor")
+                if TaskStatus(task.status) is TaskStatus.waiting_approval:
+                    self._clear_lease(task)
+                    task.result_summary = execution_result.result_summary
+                    task.error = None
+                    task_service.append_event(
+                        task,
+                        TaskEventType.log,
+                        {
+                            "message": "task_executor_waiting_for_approval",
+                            "worker_id": self.worker_id,
+                        },
+                    )
+                    session.commit()
+                    logger.info(
+                        "worker waiting for approval task_id=%s worker_id=%s",
+                        task.id,
+                        self.worker_id,
+                    )
+                    return WorkerRunResult(
+                        worker_id=self.worker_id,
+                        status=TaskStatus.waiting_approval.value,
+                        task_id=task.id,
+                        reclaimed_task_ids=reclaimed_task_ids,
+                        recovered_side_effect_ids=recovered_side_effect_ids,
+                    )
                 task.result_summary = execution_result.result_summary
                 task.error = None
                 self._clear_lease(task)

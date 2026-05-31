@@ -126,6 +126,39 @@ def test_llm_intent_classifier_can_run_before_task_creation() -> None:
     assert provider.calls[0][2] == {"type": "json_object"}
 
 
+def test_intent_classifier_overrides_memory_forget_as_task_request() -> None:
+    provider = FakeIntentProvider(
+        """
+        {
+          "addressed_to_kortny": true,
+          "classification": "cancel_or_retry",
+          "confidence": 0.95,
+          "should_create_task": false,
+          "should_ack_with_reaction": true,
+          "suggested_reaction": "arrows_counterclockwise",
+          "needs_channel_context": false,
+          "needs_thread_context": false,
+          "needs_file_context": false,
+          "likely_tools": ["memory_management"],
+          "model_tier": "cheap",
+          "reason": "User asks to forget something."
+        }
+        """
+    )
+
+    decision = LLMIntentClassifier(provider=provider).classify(
+        request=IntentRequest(
+            text="forget my PDF branding preference",
+            surface=IntentSurface.app_mention,
+        )
+    )
+
+    assert decision.classification is IntentClassification.task_request
+    assert decision.should_create_task is True
+    assert decision.suggested_reaction == "memo"
+    assert decision.likely_tools == ["inspect_memory", "forget_fact"]
+
+
 def test_parse_intent_decision_rejects_invalid_content() -> None:
     with pytest.raises(IntentClassificationError):
         parse_intent_decision("not json")

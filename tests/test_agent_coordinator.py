@@ -25,6 +25,7 @@ from kortny.agent import (
     RecoveryAction,
     ToolApprovalRequired,
 )
+from kortny.agent.planner import ExecutionPlanner
 from kortny.agent.thread_context import ThreadTranscriptMessage
 from kortny.approvals import TOOL_APPROVAL_REQUIRED_MESSAGE
 from kortny.db.models import (
@@ -243,6 +244,34 @@ class RecordingSearchTool:
         return ToolResult(output={"results": []})
 
 
+class VerboseSearchTool:
+    name = "web_search"
+    description = "Returns many long web search results."
+    parameters: JsonSchema = {
+        "type": "object",
+        "properties": {"query": {"type": "string"}},
+        "required": ["query"],
+        "additionalProperties": False,
+    }
+
+    def invoke(self, args: JsonObject) -> ToolResult:
+        return ToolResult(
+            output={
+                "provider": "brave",
+                "query": args["query"],
+                "results": [
+                    {
+                        "title": f"Result {index}",
+                        "url": f"https://example.com/{index}",
+                        "snippet": "x" * 1000,
+                    }
+                    for index in range(12)
+                ],
+                "raw_payload": "y" * 20000,
+            }
+        )
+
+
 class RecoverableResultTool:
     name = "slack_file_read"
     description = "Returns a recoverable result error."
@@ -438,6 +467,94 @@ def test_coordinator_finishes_with_final_answer(db_session: Session) -> None:
     assert context_event.payload["context_engine_id"] == "kortny.default_context_engine"
     assert context_event.payload["context_engine_name"] == "Default Context Engine"
     assert context_event.payload["context_budget"]["thread_context_max_chars"] == 12000
+
+
+def test_coordinator_compacts_large_search_tool_result_for_next_turn(
+    db_session: Session,
+) -> None:
+    task = create_task(db_session, input_text="compare observability tools")
+    llm = FakeLLM(
+        [
+            Completion(
+                content=None,
+                tool_calls=(
+                    ToolCall(
+                        id="call-search",
+                        name="web_search",
+                        arguments={"query": "AI observability tools"},
+                    ),
+                ),
+                usage=TokenUsage(input_tokens=20, output_tokens=5),
+            ),
+            Completion(
+                content="Langfuse and Phoenix are the two to compare.",
+                tool_calls=(),
+                usage=TokenUsage(input_tokens=40, output_tokens=8),
+            ),
+        ]
+    )
+
+    AgentCoordinator(
+        session=db_session,
+        llm=llm,
+        registry=ToolRegistry([VerboseSearchTool()]),
+        execution_planner=NoopExecutionPlanner(),
+        tool_result_prompt_max_chars=4000,
+    ).run(task)
+
+    tool_message = llm.calls[1][1][-1]
+    prompt_payload = json.loads(tool_message.content or "{}")
+    prompt_output = prompt_payload["output"]
+    assert prompt_output["compacted"] is True
+    assert prompt_output["compaction_kind"] == "search_results"
+    assert 1 <= len(prompt_output["results"]) <= 8
+    assert prompt_output["omitted_result_count"] == 12 - len(prompt_output["results"])
+    assert "raw_payload" not in prompt_output
+    assert all(len(result["snippet"]) <= 263 for result in prompt_output["results"])
+
+    events = task_events(db_session, task)
+    raw_tool_result = next(
+        event for event in events if event.type is TaskEventType.tool_result
+    )
+    assert raw_tool_result.payload["output"]["raw_payload"] == "y" * 20000
+    compacted_event = next(
+        event
+        for event in events
+        if event.payload.get("message") == "tool_result_compacted"
+    )
+    assert (
+        compacted_event.payload["raw_chars"] > compacted_event.payload["prompt_chars"]
+    )
+    assert compacted_event.payload["reason"] == "search_result_compaction"
+
+
+def test_execution_planner_skips_single_hop_read_integration(
+    db_session: Session,
+) -> None:
+    task = create_task(db_session, input_text="search current AI observability tools")
+
+    decision = {
+        "classification": "task_request",
+        "likely_tools": ["composio_firecrawl_search"],
+        "needs_channel_context": False,
+        "needs_thread_context": False,
+        "needs_file_context": False,
+        "model_tier": "standard",
+    }
+    gate = ExecutionPlanner().should_plan(
+        task=task,
+        tool_schemas=(
+            {
+                "name": "composio_firecrawl_search",
+                "description": "Search the web.",
+                "parameters": {"type": "object"},
+            },
+        ),
+        intent_decision=decision,
+    )
+
+    assert gate.should_plan is False
+    assert gate.reason == "single_hop_read_tool"
 
 
 def test_coordinator_gates_sensitive_tool_before_invocation(

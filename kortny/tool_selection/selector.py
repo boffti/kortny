@@ -10,7 +10,12 @@ from typing import Protocol
 from pydantic import BaseModel, Field, ValidationError
 
 from kortny.llm import ChatMessage, Completion
-from kortny.tool_selection.models import ToolCard, ToolSelection, ToolSelectionResult
+from kortny.tool_selection.models import (
+    DEFAULT_PROMPT_DESCRIPTION_CHARS,
+    ToolCard,
+    ToolSelection,
+    ToolSelectionResult,
+)
 from kortny.tools.types import JsonObject, JsonSchema
 
 TOOL_SELECTOR_RESPONSE_FORMAT: JsonObject = {"type": "json_object"}
@@ -81,8 +86,18 @@ class LLMToolSelector:
 
         payload = {
             "task_input": task_input,
-            "native_tools": [card.prompt_payload() for card in native_cards],
-            "external_candidates": [card.prompt_payload() for card in external_cards],
+            "native_tools": [
+                card.prompt_payload(
+                    max_description_chars=DEFAULT_PROMPT_DESCRIPTION_CHARS
+                )
+                for card in native_cards
+            ],
+            "external_candidates": [
+                card.prompt_payload(
+                    max_description_chars=DEFAULT_PROMPT_DESCRIPTION_CHARS
+                )
+                for card in external_cards
+            ],
             "rules": {
                 "read_tools_can_run_automatically": True,
                 "write_or_destructive_tools_require_approval": True,

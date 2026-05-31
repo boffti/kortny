@@ -112,7 +112,9 @@ def test_composio_resolver_prefers_personal_scope(
 def test_composio_resolver_filters_to_matching_visibility(
     db_session: Session,
 ) -> None:
-    task = create_task(db_session, slack_channel_id="CAllowed", slack_user_id="UAllowed")
+    task = create_task(
+        db_session, slack_channel_id="CAllowed", slack_user_id="UAllowed"
+    )
     add_connection(
         db_session,
         task,
@@ -148,7 +150,9 @@ def test_composio_resolver_filters_to_matching_visibility(
 def test_composio_execute_tool_uses_scoped_connection(
     db_session: Session,
 ) -> None:
-    task = create_task(db_session, slack_channel_id="CResearch", slack_user_id="UAnalyst")
+    task = create_task(
+        db_session, slack_channel_id="CResearch", slack_user_id="UAnalyst"
+    )
     add_connection(
         db_session,
         task,
@@ -193,7 +197,9 @@ def test_composio_execute_tool_uses_scoped_connection(
 def test_composio_execute_tool_reports_missing_required_args_as_recoverable(
     db_session: Session,
 ) -> None:
-    task = create_task(db_session, slack_channel_id="CResearch", slack_user_id="UAnalyst")
+    task = create_task(
+        db_session, slack_channel_id="CResearch", slack_user_id="UAnalyst"
+    )
     add_connection(
         db_session,
         task,
@@ -232,7 +238,9 @@ def test_worker_registry_adds_composio_tool_for_scoped_connection(
     db_session: Session,
     tmp_path: Path,
 ) -> None:
-    task = create_task(db_session, slack_channel_id="CResearch", slack_user_id="UAnalyst")
+    task = create_task(
+        db_session, slack_channel_id="CResearch", slack_user_id="UAnalyst"
+    )
     add_connection(
         db_session,
         task,
@@ -286,7 +294,9 @@ def test_worker_registry_uses_dynamic_composio_toolkit_catalog(
     db_session: Session,
     tmp_path: Path,
 ) -> None:
-    task = create_task(db_session, slack_channel_id="CResearch", slack_user_id="UAnalyst")
+    task = create_task(
+        db_session, slack_channel_id="CResearch", slack_user_id="UAnalyst"
+    )
     task.input = "Find the relevant Notion docs for the launch plan"
     add_connection(
         db_session,
@@ -348,11 +358,67 @@ def test_worker_registry_uses_dynamic_composio_toolkit_catalog(
     assert composio_client.list_tool_calls[0]["query"] == task.input
 
 
+def test_worker_registry_compacts_external_tool_candidates_before_selection(
+    db_session: Session,
+    tmp_path: Path,
+) -> None:
+    task = create_task(
+        db_session, slack_channel_id="CResearch", slack_user_id="UAneesh"
+    )
+    task.input = "use alpha vantage to search market data"
+    add_connection(
+        db_session,
+        task,
+        connected_account_id="ca_alpha",
+        scope_type="user",
+        scope_id="UAneesh",
+        toolkit_slug="alpha_vantage",
+    )
+    task_service = TaskService(db_session)
+    db_session.commit()
+    settings = build_settings(
+        composio_api_key="composio-key",
+        tool_selector_max_external_candidates=3,
+    )
+    composio_client = FakeComposioClient(
+        tools_by_toolkit={"alpha_vantage": alpha_vantage_tools(count=8)}
+    )
+    selector = StaticToolSelector(
+        ToolSelectionResult(route_reason="test_no_external_selected")
+    )
+
+    AgentTaskExecutor(
+        settings=settings,
+        web_search_tool=StaticWebSearchTool(),
+        composio_client=composio_client,
+        tool_selector=selector,
+    )._build_registry(
+        settings=settings,
+        session=db_session,
+        task=task,
+        task_service=task_service,
+        working_dir=tmp_path,
+    )
+
+    assert len(selector.calls) == 1
+    assert len(selector.calls[0]["external_cards"]) == 3
+    compacted_event = next(
+        event
+        for event in task_events(db_session, task)
+        if event.payload.get("message") == "tool_catalog_compacted"
+    )
+    assert compacted_event.payload["original_candidate_count"] == 8
+    assert compacted_event.payload["selected_candidate_count"] == 3
+    assert compacted_event.payload["omitted_candidate_count"] == 5
+
+
 def test_worker_registry_exposes_required_fields_for_exact_composio_tool(
     db_session: Session,
     tmp_path: Path,
 ) -> None:
-    task = create_task(db_session, slack_channel_id="CResearch", slack_user_id="UAnalyst")
+    task = create_task(
+        db_session, slack_channel_id="CResearch", slack_user_id="UAnalyst"
+    )
     task.input = "Are there any actionable items in the connected docs?"
     add_connection(
         db_session,
@@ -404,7 +470,9 @@ def test_worker_registry_skips_composio_catalog_for_ignored_intent(
     db_session: Session,
     tmp_path: Path,
 ) -> None:
-    task = create_task(db_session, slack_channel_id="CGreeting", slack_user_id="UAneesh")
+    task = create_task(
+        db_session, slack_channel_id="CGreeting", slack_user_id="UAneesh"
+    )
     task.input = "hey whats up"
     add_connection(
         db_session,
@@ -519,6 +587,159 @@ def test_worker_registry_skips_composio_catalog_for_simple_no_tool_intent(
         event.payload.get("message") == "external_tool_selection_skipped"
         and event.payload.get("reason") == "intent_no_external_tools"
         and event.payload.get("classification") == "task_request"
+        for event in task_events(db_session, task)
+    )
+
+
+def test_worker_registry_skips_composio_catalog_for_native_web_search_only(
+    db_session: Session,
+    tmp_path: Path,
+) -> None:
+    task = create_task(
+        db_session, slack_channel_id="CResearch", slack_user_id="UAneesh"
+    )
+    task.input = (
+        "compare Langfuse and Arize Phoenix for Kortny using web search in 5 bullets"
+    )
+    add_connection(
+        db_session,
+        task,
+        connected_account_id="ca_firecrawl",
+        scope_type="user",
+        scope_id="UAneesh",
+    )
+    task_service = TaskService(db_session)
+    task_service.append_event(
+        task,
+        TaskEventType.log,
+        {
+            "message": "intent_classification_completed",
+            "source": "app_mention",
+            "decision": {
+                "addressed_to_kortny": True,
+                "classification": "task_request",
+                "confidence": 0.95,
+                "should_create_task": True,
+                "should_ack_with_reaction": True,
+                "needs_channel_context": False,
+                "needs_thread_context": False,
+                "needs_file_context": False,
+                "likely_tools": ["web_search"],
+                "model_tier": "standard",
+                "reason": "Simple public web comparison.",
+            },
+        },
+    )
+    db_session.commit()
+    settings = build_settings(composio_api_key="composio-key")
+    composio_client = FakeComposioClient()
+
+    registry = AgentTaskExecutor(
+        settings=settings,
+        web_search_tool=StaticWebSearchTool(),
+        composio_client=composio_client,
+    )._build_registry(
+        settings=settings,
+        session=db_session,
+        task=task,
+        task_service=task_service,
+        working_dir=tmp_path,
+    )
+
+    assert composio_client.list_tool_calls == []
+    assert "web_search" in registry.names()
+    assert all(not name.startswith("composio_") for name in registry.names())
+    assert any(
+        event.payload.get("message") == "external_tool_selection_skipped"
+        and event.payload.get("reason") == "intent_native_web_search_only"
+        and event.payload.get("classification") == "task_request"
+        for event in task_events(db_session, task)
+    )
+
+
+def test_worker_registry_falls_back_to_composio_search_when_brave_missing(
+    db_session: Session,
+    tmp_path: Path,
+) -> None:
+    task = create_task(
+        db_session, slack_channel_id="CResearch", slack_user_id="UAneesh"
+    )
+    task.input = (
+        "compare Langfuse and Arize Phoenix for Kortny using web search in 5 bullets"
+    )
+    add_connection(
+        db_session,
+        task,
+        connected_account_id="ca_firecrawl",
+        scope_type="user",
+        scope_id="UAneesh",
+    )
+    task_service = TaskService(db_session)
+    task_service.append_event(
+        task,
+        TaskEventType.log,
+        {
+            "message": "intent_classification_completed",
+            "source": "app_mention",
+            "decision": {
+                "addressed_to_kortny": True,
+                "classification": "task_request",
+                "confidence": 0.95,
+                "should_create_task": True,
+                "should_ack_with_reaction": True,
+                "needs_channel_context": False,
+                "needs_thread_context": False,
+                "needs_file_context": False,
+                "likely_tools": ["web_search"],
+                "model_tier": "standard",
+                "reason": "Simple public web comparison.",
+            },
+        },
+    )
+    db_session.commit()
+    settings = build_settings(
+        composio_api_key="composio-key",
+        brave_search_api_key=None,
+    )
+    composio_client = FakeComposioClient()
+    selector = StaticToolSelector(
+        ToolSelectionResult(
+            selected_tools=(
+                ToolSelection(
+                    registry_name="composio_firecrawl_search",
+                    confidence=0.9,
+                    reason="Brave search is unavailable; use connected Firecrawl.",
+                ),
+            ),
+            suppressed_native_tools=("web_search",),
+            route_reason="fallback_connected_search",
+        )
+    )
+
+    registry = AgentTaskExecutor(
+        settings=settings,
+        composio_client=composio_client,
+        tool_selector=selector,
+    )._build_registry(
+        settings=settings,
+        session=db_session,
+        task=task,
+        task_service=task_service,
+        working_dir=tmp_path,
+    )
+
+    assert composio_client.list_tool_calls
+    assert "web_search" not in registry.names()
+    assert "composio_firecrawl_search" in registry.names()
+    assert any(
+        event.payload.get("message") == "native_tool_unavailable"
+        and event.payload.get("tool") == "web_search"
+        and event.payload.get("reason") == "missing_brave_api_key"
+        for event in task_events(db_session, task)
+    )
+    assert not any(
+        event.payload.get("message") == "external_tool_selection_skipped"
+        and event.payload.get("reason") == "intent_native_web_search_only"
         for event in task_events(db_session, task)
     )
 
@@ -688,7 +909,9 @@ def task_events(session: Session, task: Task) -> list[TaskEvent]:
     session.flush()
     return list(
         session.scalars(
-            select(TaskEvent).where(TaskEvent.task_id == task.id).order_by(TaskEvent.seq)
+            select(TaskEvent)
+            .where(TaskEvent.task_id == task.id)
+            .order_by(TaskEvent.seq)
         )
     )
 
@@ -721,7 +944,12 @@ def add_connection(
     )
 
 
-def build_settings(*, composio_api_key: str | None = None) -> Settings:
+def build_settings(
+    *,
+    composio_api_key: str | None = None,
+    brave_search_api_key: str | None = "test-brave-key",
+    tool_selector_max_external_candidates: int | None = None,
+) -> Settings:
     assert TEST_POSTGRES_URL is not None
     return Settings(
         SLACK_BOT_TOKEN="xoxb-test-token",
@@ -731,7 +959,9 @@ def build_settings(*, composio_api_key: str | None = None) -> Settings:
         LLM_API_KEY="test-llm-key",
         LLM_MODEL="openai/gpt-5.4-mini",
         COMPOSIO_API_KEY=composio_api_key,
-        BRAVE_SEARCH_API_KEY="test-brave-key",
+        TOOL_SELECTOR_MAX_EXTERNAL_CANDIDATES=tool_selector_max_external_candidates
+        or 24,
+        BRAVE_SEARCH_API_KEY=brave_search_api_key,
         POSTGRES_URL=TEST_POSTGRES_URL,
     )
 
@@ -856,6 +1086,24 @@ def notion_tools() -> tuple[ComposioTool, ...]:
             tags=("readOnlyHint",),
             version=None,
         ),
+    )
+
+
+def alpha_vantage_tools(*, count: int) -> tuple[ComposioTool, ...]:
+    return tuple(
+        ComposioTool(
+            slug=f"ALPHA_VANTAGE_SEARCH_{index}",
+            name=f"Search market data {index}",
+            description=f"Read-only market data lookup tool {index}.",
+            toolkit_slug="alpha_vantage",
+            input_parameters={
+                "type": "object",
+                "properties": {"symbol": {"type": "string"}},
+            },
+            tags=("readOnlyHint",),
+            version=None,
+        )
+        for index in range(count)
     )
 
 

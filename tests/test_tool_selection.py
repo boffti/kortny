@@ -5,6 +5,7 @@ from kortny.tool_selection import (
     HeuristicToolSelector,
     LLMToolSelector,
     ToolCard,
+    compact_tool_cards,
 )
 
 
@@ -67,6 +68,32 @@ def test_llm_selector_filters_to_allowed_tools_and_native_suppressions() -> None
     assert result.suppressed_native_tools == ("web_search",)
     assert result.route_reason == "needs_current_web_research"
     assert provider.prompt_names == ["kortny.tool_selector"]
+
+
+def test_compact_tool_cards_keeps_relevant_candidates_under_budget() -> None:
+    cards = tuple(
+        ToolCard(
+            registry_name=f"composio_other_{index}",
+            provider="composio",
+            display_name=f"Other {index}",
+            description="Generic integration tool.",
+            capabilities=("external_tool",),
+            side_effect="read",
+            toolkit_slug="other",
+        )
+        for index in range(10)
+    ) + (firecrawl_card(),)
+
+    selected, compaction = compact_tool_cards(
+        task_input="Use Firecrawl to search recent AI observability tooling",
+        cards=cards,
+        max_candidates=3,
+    )
+
+    assert compaction.compacted is True
+    assert compaction.original_candidate_count == 11
+    assert compaction.selected_candidate_count == 3
+    assert "composio_firecrawl_search" in {card.registry_name for card in selected}
 
 
 def native_web_search_card() -> ToolCard:

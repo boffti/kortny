@@ -158,7 +158,9 @@ class RecoveryPlanPayload(BaseModel):
         normalized = " ".join(value.split())
         return normalized or None
 
-    @field_validator("suggested_tool_names", "argument_notes", "fallback_notes", "risk_notes")
+    @field_validator(
+        "suggested_tool_names", "argument_notes", "fallback_notes", "risk_notes"
+    )
     @classmethod
     def normalize_list(cls, value: list[str]) -> list[str]:
         return _clean_string_list(value)
@@ -195,6 +197,11 @@ class ExecutionPlanner:
 
         if _needs_rich_context(intent_decision) and likely_available_tools:
             return PlannerGateDecision(True, "intent_context_plus_tool")
+
+        if len(likely_available_tools) == 1 and _single_hop_read_tool(
+            likely_available_tools[0]
+        ):
+            return PlannerGateDecision(False, "single_hop_read_tool")
 
         if _likely_artifact_or_integration(likely_available_tools):
             return PlannerGateDecision(True, "intent_artifact_or_integration")
@@ -309,7 +316,9 @@ def parse_planned_execution_payload(content: str | None) -> PlannedExecutionPayl
     if content is None or not content.strip():
         raise ValueError("execution planner returned empty content")
     try:
-        return PlannedExecutionPayload.model_validate_json(_extract_json_object(content))
+        return PlannedExecutionPayload.model_validate_json(
+            _extract_json_object(content)
+        )
     except (ValidationError, ValueError) as exc:
         raise ValueError("execution planner returned invalid JSON") from exc
 
@@ -537,7 +546,11 @@ def _compact_json_object(payload: JsonObject, *, max_chars: int = 2000) -> JsonO
 def _needs_rich_context(intent_decision: Mapping[str, object]) -> bool:
     return any(
         intent_decision.get(field) is True
-        for field in ("needs_channel_context", "needs_thread_context", "needs_file_context")
+        for field in (
+            "needs_channel_context",
+            "needs_thread_context",
+            "needs_file_context",
+        )
     )
 
 
@@ -547,6 +560,16 @@ def _likely_artifact_or_integration(tool_names: Sequence[str]) -> bool:
         or tool_name.startswith("composio_")
         or "_execute" in tool_name
         for tool_name in tool_names
+    )
+
+
+def _single_hop_read_tool(tool_name: str) -> bool:
+    normalized = tool_name.casefold()
+    if normalized in {"web_search", "recall_fact", "inspect_memory"}:
+        return True
+    return normalized.startswith("composio_") and any(
+        token in normalized
+        for token in ("find", "get", "list", "query", "read", "retrieve", "search")
     )
 
 
@@ -582,7 +605,9 @@ def _tool_matches_recovery(tool_name: str, classification: ClassifiedToolError) 
     return False
 
 
-def _toolkit_name_mentioned(input_text: str, tool_schemas: Sequence[JsonSchema]) -> bool:
+def _toolkit_name_mentioned(
+    input_text: str, tool_schemas: Sequence[JsonSchema]
+) -> bool:
     input_tokens = set(_tokens(input_text))
     if not input_tokens:
         return False
@@ -637,7 +662,9 @@ def _tokens(value: str) -> list[str]:
     raw_tokens = normalized.replace("/", "_").replace(".", "_").split("_")
     tokens: list[str] = []
     for raw_token in raw_tokens:
-        tokens.extend("".join(char if char.isalnum() else " " for char in raw_token).split())
+        tokens.extend(
+            "".join(char if char.isalnum() else " " for char in raw_token).split()
+        )
     return tokens
 
 

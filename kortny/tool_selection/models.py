@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+DEFAULT_PROMPT_DESCRIPTION_CHARS = 280
+
 
 @dataclass(frozen=True, slots=True)
 class ToolCard:
@@ -23,14 +25,21 @@ class ToolCard:
     visibility_scope_id: str | None = None
     can_replace_native_tools: tuple[str, ...] = ()
 
-    def prompt_payload(self) -> dict[str, object]:
+    def prompt_payload(
+        self,
+        *,
+        max_description_chars: int | None = None,
+    ) -> dict[str, object]:
         """Return a compact JSON-safe payload for selector prompts."""
 
+        description = self.description
+        if max_description_chars is not None:
+            description = _shorten(description, max_chars=max_description_chars)
         return {
             "registry_name": self.registry_name,
             "provider": self.provider,
             "display_name": self.display_name,
-            "description": self.description,
+            "description": description,
             "capabilities": list(self.capabilities),
             "side_effect": self.side_effect,
             "toolkit_slug": self.toolkit_slug,
@@ -64,3 +73,11 @@ class ToolSelectionResult:
     @property
     def selected_names(self) -> tuple[str, ...]:
         return tuple(selection.registry_name for selection in self.selected_tools)
+
+
+def _shorten(value: str, *, max_chars: int) -> str:
+    if len(value) <= max_chars:
+        return value
+    if max_chars <= 3:
+        return value[:max_chars]
+    return value[: max_chars - 3].rstrip() + "..."

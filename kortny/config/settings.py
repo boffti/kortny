@@ -60,6 +60,12 @@ class Settings(BaseSettings):
     response_humanizer_min_chars: int = Field(
         default=120, validation_alias="RESPONSE_HUMANIZER_MIN_CHARS"
     )
+    tool_selector_max_external_candidates: int = Field(
+        default=24, validation_alias="TOOL_SELECTOR_MAX_EXTERNAL_CANDIDATES"
+    )
+    tool_result_prompt_max_chars: int = Field(
+        default=8000, validation_alias="TOOL_RESULT_PROMPT_MAX_CHARS"
+    )
 
     composio_api_key: str | None = Field(
         default=None, validation_alias="COMPOSIO_API_KEY"
@@ -190,6 +196,22 @@ class Settings(BaseSettings):
     def _valid_response_humanizer_min_chars(cls, value: int) -> int:
         if value < 0:
             raise ValueError("RESPONSE_HUMANIZER_MIN_CHARS cannot be negative")
+        return value
+
+    @field_validator("tool_selector_max_external_candidates")
+    @classmethod
+    def _valid_tool_selector_max_external_candidates(cls, value: int) -> int:
+        if value < 1 or value > 200:
+            raise ValueError(
+                "TOOL_SELECTOR_MAX_EXTERNAL_CANDIDATES must be between 1 and 200"
+            )
+        return value
+
+    @field_validator("tool_result_prompt_max_chars")
+    @classmethod
+    def _valid_tool_result_prompt_max_chars(cls, value: int) -> int:
+        if value < 1000:
+            raise ValueError("TOOL_RESULT_PROMPT_MAX_CHARS must be at least 1000")
         return value
 
     @field_validator("otel_trace_sampling_ratio")

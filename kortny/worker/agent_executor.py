@@ -66,6 +66,7 @@ from kortny.tool_selection import (
     ToolCatalogService,
     ToolSelectionResult,
     ToolSelector,
+    compact_tool_cards,
 )
 from kortny.tools import (
     ForgetFactTool,
@@ -177,6 +178,7 @@ class AgentTaskExecutor:
                     registry=registry,
                     task_service=task_service,
                     system_prompt=self.system_prompt,
+                    tool_result_prompt_max_chars=settings.tool_result_prompt_max_chars,
                     thread_transcript_provider=self._build_thread_transcript_provider(
                         settings
                     ),
@@ -347,7 +349,11 @@ class AgentTaskExecutor:
         task_service: TaskService,
         working_dir: Path,
     ) -> ToolRegistry:
-        web_search = self.web_search_tool or WebSearchTool.from_settings(settings)
+        web_search = self._build_web_search_tool(
+            settings=settings,
+            task=task,
+            task_service=task_service,
+        )
         pdf_generator = PdfGeneratorTool(
             working_dir=working_dir,
             session=session,
@@ -378,7 +384,6 @@ class AgentTaskExecutor:
         inspect_memory = InspectMemoryTool(service=memory_service, task=task)
         forget_fact = ForgetFactTool(service=memory_service, task=task)
         native_tools: list[Tool] = [
-            web_search,
             pdf_generator,
             slack_channel_history,
             slack_file_read,
@@ -387,6 +392,8 @@ class AgentTaskExecutor:
             inspect_memory,
             forget_fact,
         ]
+        if web_search is not None:
+            native_tools.insert(0, web_search)
         native_tools.append(
             ListIntegrationsTool(
                 session=session,
@@ -394,7 +401,11 @@ class AgentTaskExecutor:
                 native_tools=tuple(native_tools),
             )
         )
-        skip_external_reason = _external_tool_skip_reason(session, task)
+        skip_external_reason = _external_tool_skip_reason(
+            session,
+            task,
+            native_web_search_available=web_search is not None,
+        )
         if skip_external_reason is not None:
             task_service.append_event(
                 task,
@@ -433,6 +444,40 @@ class AgentTaskExecutor:
         )
         return ToolRegistry(tools)
 
+    def _build_web_search_tool(
+        self,
+        *,
+        settings: Settings,
+        task: Task,
+        task_service: TaskService,
+    ) -> Tool | None:
+        if self.web_search_tool is not None:
+            return self.web_search_tool
+        try:
+            return WebSearchTool.from_settings(settings)
+        except ValueError as exc:
+            if "BRAVE_SEARCH_API_KEY" not in str(exc):
+                raise
+            task_service.append_event(
+                task,
+                TaskEventType.log,
+                {
+                    "message": "native_tool_unavailable",
+                    "tool": "web_search",
+                    "reason": "missing_brave_api_key",
+                    "env_var": "BRAVE_SEARCH_API_KEY",
+                },
+            )
+            log_observation(
+                logger,
+                "native_tool_unavailable",
+                task=task,
+                tool="web_search",
+                reason="missing_brave_api_key",
+                env_var="BRAVE_SEARCH_API_KEY",
+            )
+            return None
+
     def _select_runtime_tools(
         self,
         *,
@@ -452,6 +497,31 @@ class AgentTaskExecutor:
         if not external_cards:
             return native_tools
 
+        selector_cards, compaction = compact_tool_cards(
+            task_input=task.input,
+            cards=external_cards,
+            max_candidates=settings.tool_selector_max_external_candidates,
+        )
+        if compaction.compacted:
+            task_service.append_event(
+                task,
+                TaskEventType.log,
+                {
+                    "message": "tool_catalog_compacted",
+                    **compaction.to_payload(),
+                },
+            )
+            log_observation(
+                logger,
+                "tool_catalog_compacted",
+                task=task,
+                original_candidate_count=compaction.original_candidate_count,
+                selected_candidate_count=compaction.selected_candidate_count,
+                omitted_candidate_count=compaction.omitted_candidate_count,
+                max_candidates=compaction.max_candidates,
+                reason=compaction.reason,
+            )
+
         selector = self.tool_selector or self._build_tool_selector(
             settings=settings,
             session=session,
@@ -462,7 +532,7 @@ class AgentTaskExecutor:
                 task_id=task.id,
                 task_input=task.input,
                 native_cards=native_cards,
-                external_cards=external_cards,
+                external_cards=selector_cards,
             )
         except Exception as exc:
             logger.exception("tool selector failed task_id=%s", task.id)
@@ -479,7 +549,7 @@ class AgentTaskExecutor:
                 task_id=task.id,
                 task_input=task.input,
                 native_cards=native_cards,
-                external_cards=external_cards,
+                external_cards=selector_cards,
             )
 
         self._record_tool_selection(
@@ -487,6 +557,7 @@ class AgentTaskExecutor:
             task_service=task_service,
             selection=selection,
             candidate_count=len(external_cards),
+            selector_candidate_count=len(selector_cards),
         )
         selected_external_names = set(selection.selected_names)
         suppressed_native_names = set(selection.suppressed_native_tools)
@@ -526,10 +597,12 @@ class AgentTaskExecutor:
         task_service: TaskService,
         selection: ToolSelectionResult,
         candidate_count: int,
+        selector_candidate_count: int,
     ) -> None:
         payload = {
             "message": "tool_selection_completed",
             "candidate_count": candidate_count,
+            "selector_candidate_count": selector_candidate_count,
             "selected_tools": [
                 {
                     "registry_name": item.registry_name,
@@ -556,6 +629,7 @@ class AgentTaskExecutor:
             "tool_selection_completed",
             task=task,
             candidate_count=candidate_count,
+            selector_candidate_count=selector_candidate_count,
             selected_tools=[item.registry_name for item in selection.selected_tools],
             suppressed_native_tools=list(selection.suppressed_native_tools),
             route_reason=selection.route_reason,
@@ -967,6 +1041,8 @@ def _task_events(session: Session, task: Task) -> tuple[TaskEvent, ...]:
 def _external_tool_skip_reason(
     session: Session,
     task: Task,
+    *,
+    native_web_search_available: bool = True,
 ) -> dict[str, Any] | None:
     if is_channel_assessment_task(session, task):
         return {
@@ -995,6 +1071,15 @@ def _external_tool_skip_reason(
     if _intent_needs_no_external_tools(decision):
         return {
             "reason": "intent_no_external_tools",
+            "classification": classification,
+        }
+
+    if native_web_search_available and _intent_prefers_native_web_search(
+        decision,
+        task.input,
+    ):
+        return {
+            "reason": "intent_native_web_search_only",
             "classification": classification,
         }
 
@@ -1039,6 +1124,22 @@ def _intent_needs_no_external_tools(decision: dict[str, Any]) -> bool:
     return not likely_tools or likely_tools <= NO_EXTERNAL_TOOL_HINTS
 
 
+def _intent_prefers_native_web_search(
+    decision: dict[str, Any],
+    input_text: str,
+) -> bool:
+    """Return whether native web search is the cheaper correct default."""
+
+    classification = _payload_str(decision, "classification")
+    if classification not in {"task_request", "follow_up"}:
+        return False
+    likely_tools = _likely_tools(decision)
+    if not likely_tools or not likely_tools <= NATIVE_WEB_SEARCH_HINTS:
+        return False
+    lowered = input_text.casefold()
+    return not any(trigger in lowered for trigger in EXTERNAL_WEB_TOOL_TRIGGERS)
+
+
 def _truthy_bool(value: object) -> bool:
     return isinstance(value, bool) and value
 
@@ -1076,5 +1177,23 @@ NO_EXTERNAL_TOOL_HINTS = frozenset(
         "native_tool_registry",
         "tool_metadata_lookup",
         "tool_registry",
+    }
+)
+
+NATIVE_WEB_SEARCH_HINTS = frozenset(
+    {
+        "current_research",
+        "web_search",
+    }
+)
+
+EXTERNAL_WEB_TOOL_TRIGGERS = frozenset(
+    {
+        "crawl",
+        "extract",
+        "firecrawl",
+        "scrape",
+        "url",
+        "website",
     }
 )

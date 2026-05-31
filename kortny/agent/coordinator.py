@@ -83,6 +83,9 @@ from kortny.tools.types import (
 )
 
 DEFAULT_MAX_TURNS = 6
+DEFAULT_TOOL_RESULT_PROMPT_MAX_CHARS = 8000
+MAX_COMPACT_SEARCH_RESULTS = 8
+MAX_COMPACT_RESULT_SNIPPET_CHARS = 260
 REQUESTED_PAGES_RE = re.compile(r"\b(\d{1,2})\s+pages?\b", re.I)
 MEMORY_FORGET_REQUEST_RE = re.compile(
     r"\b(forget|remove|delete|clear)\b.*\b(memory|memories|preference|preferences|fact|facts|rule|rules|remembered|stored)\b",
@@ -210,6 +213,7 @@ class AgentCoordinator:
         guardrail_limits: ExecutionGuardrailLimits | None = None,
         execution_planner: ExecutionPlanner | None = None,
         approval_policy: ToolApprovalPolicy | None = None,
+        tool_result_prompt_max_chars: int = DEFAULT_TOOL_RESULT_PROMPT_MAX_CHARS,
     ) -> None:
         if max_turns < 1:
             raise ValueError("max_turns must be at least 1")
@@ -221,6 +225,8 @@ class AgentCoordinator:
             raise ValueError("thread_transcript_limit cannot be negative")
         if known_facts_max_chars < 0:
             raise ValueError("known_facts_max_chars cannot be negative")
+        if tool_result_prompt_max_chars < 1000:
+            raise ValueError("tool_result_prompt_max_chars must be at least 1000")
         if context_assembler is not None and context_engine is not None:
             raise ValueError("Provide context_assembler or context_engine, not both")
 
@@ -234,6 +240,7 @@ class AgentCoordinator:
         self.max_turns = self.guardrail_limits.max_turns
         self.execution_planner = execution_planner or ExecutionPlanner()
         self.approval_policy = approval_policy or ToolApprovalPolicy()
+        self.tool_result_prompt_max_chars = tool_result_prompt_max_chars
         if context_engine is not None:
             self.context_engine = context_engine
         else:
@@ -593,6 +600,11 @@ class AgentCoordinator:
             latency_ms = _latency_ms(started)
             artifact_count += len(result.artifacts)
             result_payload = _tool_result_payload(tool_call.name, result)
+            prompt_result_payload, compaction_payload = _tool_result_prompt_payload(
+                tool_call.name,
+                result_payload,
+                max_chars=self.tool_result_prompt_max_chars,
+            )
             classification_payload = (
                 error_classification.to_payload()
                 if error_classification is not None
@@ -626,6 +638,17 @@ class AgentCoordinator:
                     **result_payload,
                 },
             )
+            if compaction_payload is not None:
+                self._append_log(
+                    task_obj,
+                    "tool_result_compacted",
+                    {
+                        "turn": turn,
+                        "tool_call_id": tool_call.id,
+                        "tool": tool_call.name,
+                        **compaction_payload,
+                    },
+                )
             log_observation(
                 logger,
                 "tool_call_completed",
@@ -652,7 +675,7 @@ class AgentCoordinator:
             messages.append(
                 ChatMessage(
                     role="tool",
-                    content=_json_dumps(result_payload),
+                    content=_json_dumps(prompt_result_payload),
                     tool_call_id=tool_call.id,
                 )
             )
@@ -1368,6 +1391,182 @@ def _tool_result_payload(tool_name: str, result: ToolResult) -> JsonObject:
         "cost_usd": str(result.cost_usd),
         "artifacts": [_artifact_payload(artifact) for artifact in result.artifacts],
     }
+
+
+def _tool_result_prompt_payload(
+    tool_name: str,
+    result_payload: JsonObject,
+    *,
+    max_chars: int,
+) -> tuple[JsonObject, JsonObject | None]:
+    raw_chars = len(_json_dumps(result_payload))
+    output = result_payload.get("output")
+    if not isinstance(output, dict):
+        return result_payload, None
+
+    search_results = _extract_search_results(output)
+    if search_results:
+        compact_results = search_results[:MAX_COMPACT_SEARCH_RESULTS]
+        compact_output = _compact_output_metadata(output)
+        payload = _search_result_prompt_payload(
+            result_payload=result_payload,
+            compact_output=compact_output,
+            search_results=search_results,
+            compact_results=compact_results,
+        )
+        prompt_chars = len(_json_dumps(payload))
+        while prompt_chars > max_chars and len(compact_results) > 1:
+            compact_results = compact_results[:-1]
+            payload = _search_result_prompt_payload(
+                result_payload=result_payload,
+                compact_output=compact_output,
+                search_results=search_results,
+                compact_results=compact_results,
+            )
+            prompt_chars = len(_json_dumps(payload))
+        omitted_count = max(0, len(search_results) - len(compact_results))
+        return payload, {
+            "raw_chars": raw_chars,
+            "prompt_chars": prompt_chars,
+            "max_chars": max_chars,
+            "reason": "search_result_compaction",
+            "result_count": len(search_results),
+            "omitted_result_count": omitted_count,
+        }
+
+    if raw_chars <= max_chars:
+        return result_payload, None
+
+    compact_output = _compact_output_metadata(output)
+    compact_output.update(
+        {
+            "compacted": True,
+            "compaction_kind": "json_preview",
+            "output_shape": _output_shape(output),
+            "preview": _shorten_text(
+                _json_dumps(output),
+                max_chars=max(400, max_chars // 2),
+            ),
+        }
+    )
+    payload = _result_payload_with_output(result_payload, compact_output)
+    prompt_chars = len(_json_dumps(payload))
+    return payload, {
+        "raw_chars": raw_chars,
+        "prompt_chars": prompt_chars,
+        "max_chars": max_chars,
+        "reason": "json_preview_compaction",
+        "result_count": None,
+        "omitted_result_count": None,
+    }
+
+
+def _search_result_prompt_payload(
+    *,
+    result_payload: JsonObject,
+    compact_output: JsonObject,
+    search_results: list[JsonObject],
+    compact_results: list[JsonObject],
+) -> JsonObject:
+    omitted_count = max(0, len(search_results) - len(compact_results))
+    output = dict(compact_output)
+    output.update(
+        {
+            "compacted": True,
+            "compaction_kind": "search_results",
+            "result_count": len(search_results),
+            "omitted_result_count": omitted_count,
+            "results": compact_results,
+        }
+    )
+    return _result_payload_with_output(result_payload, output)
+
+
+def _result_payload_with_output(
+    result_payload: JsonObject,
+    output: JsonObject,
+) -> JsonObject:
+    return {
+        "tool": result_payload.get("tool"),
+        "output": output,
+        "cost_usd": result_payload.get("cost_usd"),
+        "artifacts": result_payload.get("artifacts", []),
+    }
+
+
+def _compact_output_metadata(output: JsonObject) -> JsonObject:
+    compact: JsonObject = {}
+    for key in (
+        "provider",
+        "query",
+        "toolkit_slug",
+        "tool_slug",
+        "successful",
+        "error",
+        "log_id",
+        "scope",
+    ):
+        if key in output:
+            compact[key] = output[key]
+    data = output.get("data")
+    if isinstance(data, dict):
+        credits_used = data.get("creditsUsed") or data.get("credits_used")
+        if credits_used is not None:
+            compact["credits_used"] = credits_used
+        data_id = data.get("id")
+        if data_id is not None:
+            compact["data_id"] = data_id
+    return compact
+
+
+def _extract_search_results(value: object) -> list[JsonObject]:
+    results: list[JsonObject] = []
+    seen: set[tuple[str, str]] = set()
+
+    def walk(item: object) -> None:
+        if isinstance(item, dict):
+            title = _optional_string(item.get("title"))
+            url = _optional_string(item.get("url"))
+            if title is not None and url is not None:
+                key = (title, url)
+                if key not in seen:
+                    seen.add(key)
+                    results.append(
+                        {
+                            "title": title,
+                            "url": url,
+                            "snippet": _shorten_text(
+                                _optional_string(item.get("snippet"))
+                                or _optional_string(item.get("description"))
+                                or _optional_string(item.get("content"))
+                                or "",
+                                max_chars=MAX_COMPACT_RESULT_SNIPPET_CHARS,
+                            ),
+                        }
+                    )
+            for child in item.values():
+                walk(child)
+        elif isinstance(item, list):
+            for child in item:
+                walk(child)
+
+    walk(value)
+    return results
+
+
+def _optional_string(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
+def _shorten_text(value: str, *, max_chars: int) -> str:
+    if len(value) <= max_chars:
+        return value
+    if max_chars <= 3:
+        return value[:max_chars]
+    return value[: max_chars - 3].rstrip() + "..."
 
 
 def _recoverable_tool_error_result(

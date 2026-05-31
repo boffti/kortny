@@ -59,7 +59,6 @@ from kortny.worker import (
     TaskWorker,
     WalkingSkeletonExecutor,
 )
-from kortny.worker.agent_executor import GENERIC_FAILURE_TEXT
 
 TEST_POSTGRES_URL = os.environ.get("KORTNY_TEST_POSTGRES_URL")
 
@@ -1236,7 +1235,7 @@ def test_agent_executor_suppresses_final_message_after_memory_prompt(
     assert not any(event.payload.get("purpose") == "result" for event in posted_events)
 
 
-def test_agent_executor_posts_generic_failure_notice_for_setup_errors(
+def test_agent_executor_records_missing_brave_key_and_continues_without_web_search(
     db_session: Session,
     worker_session_factory: sessionmaker[Session],
     tmp_path: Path,
@@ -1257,6 +1256,15 @@ def test_agent_executor_posts_generic_failure_notice_for_setup_errors(
             "reaction_intent": "discovery",
         },
     )
+    db_session.add(
+        ModelPricing(
+            provider=LLMProvider.openrouter,
+            model="openai/gpt-4o-mini",
+            input_price_per_mtok=Decimal("1.000000"),
+            output_price_per_mtok=Decimal("2.000000"),
+            effective_from=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+    )
     db_session.commit()
 
     slack_client = FakeSlackClient()
@@ -1265,7 +1273,16 @@ def test_agent_executor_posts_generic_failure_notice_for_setup_errors(
         worker_id="agent-worker-test",
         executor=AgentTaskExecutor(
             settings=make_settings(brave_search_api_key=""),
-            llm_provider=FakeAgentProvider([]),
+            llm_provider=FakeAgentProvider(
+                [
+                    Completion(
+                        content="I don't have web search configured yet.",
+                        tool_calls=(),
+                        usage=TokenUsage(input_tokens=100, output_tokens=12),
+                        model="openai/gpt-4o-mini",
+                    )
+                ]
+            ),
             provider_name=LLMProvider.openrouter,
             slack_client=slack_client,
             workspace_base_dir=tmp_path,
@@ -1275,15 +1292,13 @@ def test_agent_executor_posts_generic_failure_notice_for_setup_errors(
     db_session.refresh(task)
     events = task_events(db_session, task)
 
-    assert result.status == TaskStatus.failed.value
-    assert task.status is TaskStatus.failed
-    assert task.error is not None
-    assert task.error["type"] == "ValueError"
-    assert task.error["message"] == "BRAVE_SEARCH_API_KEY is required for web_search"
+    assert result.status == TaskStatus.succeeded.value
+    assert task.status is TaskStatus.succeeded
+    assert task.error is None
     assert slack_client.messages == [
         {
             "channel": "C123",
-            "text": GENERIC_FAILURE_TEXT,
+            "text": "I don't have web search configured yet.",
             "thread_ts": "EvAgentWorkerMissingSearch",
         }
     ]
@@ -1295,13 +1310,20 @@ def test_agent_executor_posts_generic_failure_notice_for_setup_errors(
         }
     ]
     assert slack_client.reaction_adds == []
+    unavailable_event = next(
+        event
+        for event in events
+        if event.payload.get("message") == "native_tool_unavailable"
+    )
+    assert unavailable_event.payload["tool"] == "web_search"
+    assert unavailable_event.payload["reason"] == "missing_brave_api_key"
     posted_event = next(
         event
         for event in events
         if event.type is TaskEventType.message_posted
-        and event.payload.get("purpose") == "failure"
+        and event.payload.get("purpose") == "result"
     )
-    assert posted_event.payload["text"] == GENERIC_FAILURE_TEXT
+    assert posted_event.payload["text"] == "I don't have web search configured yet."
 
 
 def test_agent_executor_records_channel_profile_when_assessment_completes(

@@ -6,9 +6,14 @@
   <section class="page-heading">
     <div>
       <h1>Integrations</h1>
-      <p>What this Kortny instance can connect to and which tools the agent can call.</p>
+      <p>Runtime providers and native tools available to the agent loop.</p>
     </div>
-    <a class="btn-ghost" href="/system">View system config</a>
+    <div class="heading-actions">
+      {% if dashboard_is_admin %}
+        <a class="btn-ghost" href="/composio">Composio Catalog</a>
+        <a class="btn-ghost" href="/system">System Config</a>
+      {% endif %}
+    </div>
   </section>
 
   <section class="summary-grid integration-summary" aria-label="Integrations overview">
@@ -24,7 +29,7 @@
   </section>
 
   {% if integrations.runtime_error %}
-    <div class="notice notice-danger">
+    <div class="notice notice-danger" role="alert">
       Runtime settings could not be fully loaded. Secret values remain hidden; use System for the redacted setup error.
     </div>
   {% endif %}
@@ -33,7 +38,12 @@
     Secrets are never displayed. Missing optional providers are setup gaps, not outages.
   </p>
 
-  <section class="integration-stack" aria-label="Configured integrations">
+  <nav class="integration-tabs" aria-label="Integration sections">
+    <a href="#providers">Providers</a>
+    <a href="#native-tools">Native tools</a>
+  </nav>
+
+  <section id="providers" class="integration-stack" aria-label="Configured integrations">
     <article class="card integration-list-card">
       <header>
         <h2>Providers</h2>
@@ -80,127 +90,22 @@
         {% endfor %}
       </div>
     </article>
-  </section>
 
-  <section class="composio-catalog" aria-label="Composio catalog">
-    <div class="section-header-row">
+    <article class="card external-tool-card">
       <div>
-        <h2>Composio Catalog</h2>
-        <p>Supported external app integrations and scoped account state for this Kortny instance.</p>
+        <h2>Composio App Catalog</h2>
+        <p>Browse and connect external app integrations from the dedicated Tools page. Scoped connection visibility stays local to Kortny.</p>
       </div>
-      <span class="badge badge-{{ integrations.composio_catalog.tone }}">{{ integrations.composio_catalog.status }}</span>
-    </div>
-
-    <article class="card catalog-card">
-      <div class="catalog-toolbar">
-        <div class="catalog-stats">
-          <div>
-            <span>Supported</span>
-            <strong>
-              {% if integrations.composio_catalog.total_items is not none %}
-                {{ integrations.composio_catalog.total_items|number }}
-              {% else %}
-                -
-              {% endif %}
-            </strong>
-          </div>
-          <div>
-            <span>Shown</span>
-            <strong>{{ integrations.composio_catalog.visible_count|number }}</strong>
-          </div>
-          <div>
-            <span>Connections</span>
-            <strong>{{ integrations.composio_catalog.active_connection_count|number }} / {{ integrations.composio_catalog.connection_count|number }}</strong>
-          </div>
-        </div>
-
-        <form class="catalog-search" method="get" action="/integrations">
-          <label>
-            Search catalog
-            <input type="search" name="composio_q" value="{{ composio_q }}" placeholder="github, gmail, notion..." autocomplete="off">
-          </label>
-          <button class="btn-ghost" type="submit">Search</button>
-          {% if composio_q %}
-            <a class="btn-ghost" href="/integrations">Clear</a>
-          {% endif %}
-        </form>
+      <div class="external-tool-card-actions">
+        <span class="badge badge-{{ integrations.composio_catalog.tone }}">{{ integrations.composio_catalog.status }}</span>
+        {% if dashboard_is_admin %}
+          <a class="btn" href="/composio">Open Composio</a>
+        {% endif %}
       </div>
-
-      {% if integrations.composio_catalog.error %}
-        <div class="notice notice-warning catalog-notice">
-          {{ integrations.composio_catalog.error }}
-        </div>
-      {% endif %}
-
-      {% if integrations.composio_catalog.connections %}
-        <section class="catalog-connections" aria-label="Composio scoped connections">
-          <header>
-            <h3>Scoped Connections</h3>
-            <p>Local visibility policy. Composio stores the external OAuth credentials.</p>
-          </header>
-          <div class="connection-list">
-            {% for connection in integrations.composio_catalog.connections %}
-              <article class="connection-row">
-                <div>
-                  <strong>{{ connection.display_name }}</strong>
-                  <span>{{ connection.toolkit_slug }}</span>
-                </div>
-                <span class="badge badge-{{ connection.tone }}">{{ connection.status }}</span>
-                <div>
-                  <span class="detail-label">Scope</span>
-                  <p>{{ connection.scope_label }}</p>
-                </div>
-                <div>
-                  <span class="detail-label">Owner</span>
-                  <p>{{ connection.owner.name }}</p>
-                </div>
-              </article>
-            {% endfor %}
-          </div>
-        </section>
-      {% endif %}
-
-      {% if integrations.composio_catalog.toolkits %}
-        <div class="catalog-grid">
-          {% for toolkit in integrations.composio_catalog.toolkits %}
-            <a class="catalog-toolkit" href="{{ '/composio' if dashboard_is_admin else '/me/integrations' }}/{{ toolkit.slug }}">
-              <header>
-                <h3>{{ toolkit.name }}</h3>
-                {% if toolkit.connected %}
-                  <span class="badge badge-success">Connected</span>
-                {% endif %}
-              </header>
-              {% if toolkit.description %}
-                <p>{{ toolkit.description }}</p>
-              {% endif %}
-              <div class="catalog-meta">
-                <span class="catalog-pill catalog-pill-count">{{ toolkit.tools_count|number }} tools</span>
-                <span class="catalog-pill catalog-pill-trigger">{{ toolkit.triggers_count|number }} triggers</span>
-                {% if toolkit.no_auth %}
-                  <span class="catalog-pill catalog-pill-noauth">No auth</span>
-                {% elif toolkit.auth_schemes %}
-                  <span class="catalog-pill catalog-pill-auth">{{ toolkit.auth_schemes|join(", ") }}</span>
-                {% endif %}
-              </div>
-              {% if toolkit.categories %}
-                <div class="catalog-tags">
-                  {% for category in toolkit.categories[:3] %}
-                    <span class="catalog-pill catalog-pill-category">{{ category }}</span>
-                  {% endfor %}
-                </div>
-              {% endif %}
-            </a>
-          {% endfor %}
-        </div>
-      {% elif integrations.composio_catalog.configured and integrations.composio_catalog.enabled and not integrations.composio_catalog.error %}
-        <p class="empty-state">No Composio toolkits matched the current search.</p>
-      {% else %}
-        <p class="empty-state">Add `COMPOSIO_API_KEY` to enable the live integration catalog.</p>
-      {% endif %}
     </article>
   </section>
 
-  <section class="tool-registry" aria-label="Native tool registry">
+  <section id="native-tools" class="tool-registry" aria-label="Native tool registry">
     <div class="section-header-row">
       <div>
         <h2>Native Tool Registry</h2>
@@ -221,52 +126,52 @@
               <span class="badge badge-neutral">{{ group.tools|length }} tools</span>
             </header>
             <div class="tool-card-grid">
-            {% for tool in group.tools %}
-              <article class="tool-card">
-                <div class="tool-card-head">
-                  <code>{{ tool.name }}</code>
-                  <span class="badge badge-{{ tool.tone }}">{{ tool.status }}</span>
-                </div>
-                <p>{{ tool.description }}</p>
-                <div class="tool-card-inputs">
-                  <span>Required inputs</span>
-                  <div>
-                    {% if tool.required_args %}
-                      {% for arg in tool.required_args %}
-                        <code>{{ arg }}</code>
-                      {% endfor %}
-                    {% else %}
-                      <small>None</small>
-                    {% endif %}
+              {% for tool in group.tools %}
+                <article class="tool-card">
+                  <div class="tool-card-head">
+                    <code>{{ tool.name }}</code>
+                    <span class="badge badge-{{ tool.tone }}">{{ tool.status }}</span>
                   </div>
-                </div>
-                <details class="row-details tool-details">
-                  <summary>Inputs and notes</summary>
-                  <div class="details-panel tool-details-panel">
+                  <p>{{ tool.description }}</p>
+                  <div class="tool-card-inputs">
+                    <span>Required inputs</span>
                     <div>
-                      <span class="detail-label">Optional inputs</span>
-                      <div class="tool-optional">
-                        {% if tool.optional_args %}
-                          {% for arg in tool.optional_args %}
-                            <code>{{ arg }}</code>
+                      {% if tool.required_args %}
+                        {% for arg in tool.required_args %}
+                          <code>{{ arg }}</code>
+                        {% endfor %}
+                      {% else %}
+                        <small>None</small>
+                      {% endif %}
+                    </div>
+                  </div>
+                  <details class="row-details tool-details">
+                    <summary>Inputs and notes</summary>
+                    <div class="details-panel tool-details-panel">
+                      <div>
+                        <span class="detail-label">Optional inputs</span>
+                        <div class="tool-optional">
+                          {% if tool.optional_args %}
+                            {% for arg in tool.optional_args %}
+                              <code>{{ arg }}</code>
+                            {% endfor %}
+                          {% else %}
+                            <small>None</small>
+                          {% endif %}
+                        </div>
+                      </div>
+                      <div>
+                        <span class="detail-label">Notes</span>
+                        <ul class="compact-list tool-notes">
+                          {% for note in tool.notes %}
+                            <li>{{ note }}</li>
                           {% endfor %}
-                        {% else %}
-                          <small>None</small>
-                        {% endif %}
+                        </ul>
                       </div>
                     </div>
-                    <div>
-                      <span class="detail-label">Notes</span>
-                      <ul class="compact-list tool-notes">
-                        {% for note in tool.notes %}
-                          <li>{{ note }}</li>
-                        {% endfor %}
-                      </ul>
-                    </div>
-                  </div>
-                </details>
-              </article>
-            {% endfor %}
+                  </details>
+                </article>
+              {% endfor %}
             </div>
           </section>
         {% endfor %}

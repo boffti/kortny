@@ -11,23 +11,8 @@
     <a class="btn-ghost" href="/users{% if from_date or to_date %}?from={{ from_date }}&to={{ to_date }}{% endif %}">Back to Users</a>
   </section>
 
-  <section class="card detail-section">
-    <header>
-      <h2>Filter</h2>
-      <p>Use the same date bounds as Usage for user-level inspection.</p>
-    </header>
-    <form class="filters panel-filters" method="get" action="/users/{{ detail.user.slack_id }}">
-      <label>
-        From
-        <input class="input" type="date" name="from" value="{{ from_date }}">
-      </label>
-      <label>
-        To
-        <input class="input" type="date" name="to" value="{{ to_date }}">
-      </label>
-      <button class="btn" type="submit">Apply</button>
-    </form>
-  </section>
+	  {% set toolbar = user_toolbar %}
+	  {% include "_data_toolbar.html" with context %}
 
   <section class="summary-grid detail-section user-metrics">
     <div class="card metric-card">
@@ -100,7 +85,7 @@
               <td class="num">{{ row.usage_count|number }}</td>
               <td class="num">{{ row.artifact_count|number }}</td>
               <td class="num">{{ row.task.total_cost_usd|money }}</td>
-              <td><a href="/tasks/{{ row.task.id }}">Open</a></td>
+	              <td><a href="/tasks/{{ row.task.id }}" aria-label="Open task {{ row.task.id }}">Trace</a></td>
             </tr>
           {% else %}
             <tr><td colspan="8" class="empty">No tasks in this range.</td></tr>
@@ -127,7 +112,7 @@
             <th class="num">Input</th>
             <th class="num">Output</th>
             <th class="num">Cost</th>
-            <th>Task</th>
+	            <th>Trace</th>
           </tr>
         </thead>
         <tbody>
@@ -140,7 +125,7 @@
               <td class="num">{{ usage.input_tokens|number }}</td>
               <td class="num">{{ usage.output_tokens|number }}</td>
               <td class="num">{{ usage.cost_usd|money }}</td>
-              <td><a href="/tasks/{{ usage.task_id }}">Open</a></td>
+	              <td><a href="/tasks/{{ usage.task_id }}" aria-label="Open task {{ usage.task_id }}">Trace</a></td>
             </tr>
           {% else %}
             <tr><td colspan="8" class="empty">No LLM calls in this range.</td></tr>
@@ -165,7 +150,7 @@
             <th>MIME</th>
             <th class="num">Bytes</th>
             <th>Slack File</th>
-            <th>Task</th>
+	            <th>Trace</th>
           </tr>
         </thead>
         <tbody>
@@ -176,7 +161,7 @@
               <td>{{ row.artifact.mime_type or "-" }}</td>
               <td class="num">{{ row.artifact.size_bytes|number }}</td>
               <td>{{ row.artifact.slack_file_id or "-" }}</td>
-              <td><a href="/tasks/{{ row.task.id }}">Open</a></td>
+	              <td><a href="/tasks/{{ row.task.id }}" aria-label="Open task {{ row.task.id }}">Trace</a></td>
             </tr>
           {% else %}
             <tr><td colspan="6" class="empty">No artifacts in this range.</td></tr>

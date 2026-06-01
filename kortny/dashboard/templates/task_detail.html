@@ -8,13 +8,42 @@
       <h1>Task Detail</h1>
       <p>{{ detail.task.id }}</p>
     </div>
-    <a class="btn-ghost" href="/">Back to Tasks</a>
+    <div class="heading-actions">
+      <span class="badge status-{{ detail.task.status.value }}">{{ detail.task.status.value }}</span>
+      <a class="btn-ghost" href="{{ '/tasks' if dashboard_is_admin else '/me/tasks' }}">Back to Tasks</a>
+    </div>
   </section>
 
-  <section class="summary-grid">
-    <div class="card metric-card">
-      <span>Status</span>
-      <strong>{{ detail.task.status.value }}</strong>
+  <section class="card task-detail-hero">
+    <div>
+      <span class="detail-label">Slack request</span>
+      <p class="task-detail-request">{{ detail.task.input }}</p>
+    </div>
+    <dl class="task-detail-facts">
+	      <div>
+	        <dt>Created</dt>
+	        <dd>{{ detail.task.created_at|datetime }}</dd>
+	      </div>
+	      <div>
+	        <dt>Finished</dt>
+	        <dd>{{ detail.task.finished_at|datetime }}</dd>
+	      </div>
+	      <div>
+	        <dt>Cost</dt>
+	        <dd>{{ detail.task.total_cost_usd|money }}</dd>
+	      </div>
+	    </dl>
+	    {% if detail.task.error %}
+	      <div class="notice notice-danger task-error-summary" role="alert">
+	        Failure details are recorded in the task payload and timeline.
+	      </div>
+	    {% endif %}
+	  </section>
+
+	  <section class="summary-grid">
+	    <div class="card metric-card">
+	      <span>Status</span>
+	      <strong>{{ detail.task.status.value }}</strong>
     </div>
     <div class="card metric-card">
       <span>Cost</span>

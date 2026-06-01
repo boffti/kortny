@@ -3,56 +3,53 @@
 {% block title %}{{ detail.slug }} - Composio - Kortny Dashboard{% endblock %}
 
 {% block content %}
-  <section class="page-heading">
-    <div>
-      <h1>
-        {% if detail.toolkit %}
-          {{ detail.toolkit.name }}
-        {% else %}
-          {{ detail.slug }}
-        {% endif %}
-      </h1>
-      <p>Integration details, connection state, and Slack visibility options.</p>
-    </div>
-    <a class="btn-ghost" href="{{ '/composio' if dashboard_is_admin else '/me/integrations' }}">Back to Catalog</a>
-  </section>
-
-  {% if runtime_error %}
-    <div class="notice notice-danger">
-      Runtime settings could not be fully loaded. Fix System configuration before connecting apps.
-    </div>
-  {% endif %}
-
-  {% if notice %}
-    <div class="notice notice-{{ notice_tone }}">
-      {{ notice }}
-    </div>
-  {% endif %}
-
-  {% if detail.error %}
-    <div class="notice notice-warning">
-      {{ detail.error }}
-    </div>
-  {% endif %}
-
   {% set integration_name = detail.toolkit.name if detail.toolkit else detail.slug %}
   {% set default_owner = detail.user_options[0] if detail.user_options else none %}
   {% set active_connection = detail.active_connection %}
   {% set detail_base_path = '/me/integrations' if member_scope else '/composio' %}
 
+  <section class="page-heading">
+    <div>
+      <h1>{{ integration_name }}</h1>
+      <p>Manage the connected account, available tools, and who can use this integration.</p>
+    </div>
+    <a class="btn-ghost" href="{{ '/composio' if dashboard_is_admin else '/me/integrations' }}">Back to Catalog</a>
+  </section>
+
+  {% if runtime_error %}
+    <div class="notice notice-danger" role="alert">
+      Runtime settings could not be fully loaded. Fix System configuration before connecting apps.
+    </div>
+  {% endif %}
+
+  {% if notice %}
+    <div class="notice notice-{{ notice_tone }}" role="status">
+      {{ notice }}
+    </div>
+  {% endif %}
+
+  {% if detail.error %}
+    <div class="notice notice-warning" role="status">
+      {{ detail.error }}
+    </div>
+  {% endif %}
+
   <section class="composio-detail-grid">
     <article class="card composio-detail-main">
       <div class="composio-detail-head">
-        <div>
-          <span class="composio-kicker">Toolkit</span>
-          <h2>
-            {% if detail.toolkit %}
-              {{ detail.toolkit.name }}
+        <div class="composio-detail-title-row">
+          <span class="integration-logo integration-logo-large" aria-hidden="true">
+            {% if detail.toolkit and detail.toolkit.logo_url %}
+              <img src="{{ detail.toolkit.logo_url }}" alt="" loading="lazy" referrerpolicy="no-referrer">
             {% else %}
-              {{ detail.slug }}
+              <span>{{ integration_name[:1] }}</span>
             {% endif %}
-          </h2>
-          <code>{{ detail.slug }}</code>
+          </span>
+          <div>
+            <span class="composio-kicker">Integration</span>
+            <h2>{{ integration_name }}</h2>
+            <code>{{ detail.slug }}</code>
+          </div>
         </div>
         <span class="badge badge-{{ detail.tone }}">{{ detail.status }}</span>
       </div>
@@ -65,9 +62,9 @@
           <span class="catalog-pill catalog-pill-count">{{ detail.toolkit.tools_count|number }} tools</span>
           <span class="catalog-pill catalog-pill-trigger">{{ detail.toolkit.triggers_count|number }} triggers</span>
           {% if detail.toolkit.no_auth %}
-            <span class="catalog-pill catalog-pill-noauth">No auth required</span>
+            <span class="catalog-pill catalog-pill-noauth">No sign-in required</span>
           {% elif detail.toolkit.auth_schemes %}
-            <span class="catalog-pill catalog-pill-auth">{{ detail.toolkit.auth_schemes|join(", ") }}</span>
+            <span class="catalog-pill catalog-pill-auth">{{ detail.toolkit.auth_schemes|join(" / ")|replace("_", " ")|title }}</span>
           {% endif %}
         </div>
         {% if detail.toolkit.categories %}
@@ -78,69 +75,63 @@
           </div>
         {% endif %}
       {% else %}
-        <p>Toolkit metadata is not loaded yet.</p>
+        <p>Catalog details are not loaded yet. You can still manage any local connection records below.</p>
       {% endif %}
     </article>
 
-    <aside class="card composio-setup-card">
-      {% if member_scope %}
-        <h2>Personal Access</h2>
-        <ul class="setup-list">
-          <li class="{{ 'complete' if detail.configured else '' }}">
-            <strong>Connect flow</strong>
-            <span>{{ "Ready" if detail.configured else "Unavailable" }}</span>
-          </li>
-          <li class="complete">
-            <strong>Owner</strong>
-            <span>You</span>
-          </li>
-          <li class="complete">
-            <strong>Scope</strong>
-            <span>Personal</span>
-          </li>
-          <li>
-            <strong>Runtime tools</strong>
-            <span>Waiting on scope gate</span>
-          </li>
-        </ul>
-      {% else %}
-        <h2>Setup State</h2>
-        <ul class="setup-list">
-          <li class="{{ 'complete' if detail.configured else '' }}">
-            <strong>Composio API key</strong>
-            <span>{{ "Configured" if detail.configured else "Missing" }}</span>
-          </li>
-          <li class="{{ 'complete' if detail.auth_configs else '' }}">
-            <strong>Auth Config</strong>
-            <span>
-              {% if detail.auth_configs %}
-                {{ detail.auth_configs|length|number }} available
-              {% else %}
-                Auto-create
-              {% endif %}
-            </span>
-          </li>
-          <li class="{{ 'complete' if detail.configured else '' }}">
-            <strong>Connect Link</strong>
-            <span>{{ "Ready" if detail.configured else "Needs API key" }}</span>
-          </li>
-          <li>
-            <strong>Runtime tools</strong>
-            <span>Waiting on scope gate</span>
-          </li>
-        </ul>
-      {% endif %}
+    <aside class="card composio-status-card">
+      <h2>Status</h2>
+      <dl class="integration-status-list">
+        <div>
+          <dt>Connection</dt>
+          <dd>
+            {% if active_connection %}
+              Connected
+            {% elif detail.configured %}
+              Ready to connect
+            {% else %}
+              Needs API key
+            {% endif %}
+          </dd>
+        </div>
+        <div>
+          <dt>Who can use it</dt>
+          <dd>{{ active_connection.scope_label if active_connection else "Personal by default" }}</dd>
+        </div>
+        <div>
+          <dt>Available tools</dt>
+          <dd>
+            {% if detail.toolkit %}
+              {{ detail.toolkit.tools_count|number }}
+            {% else %}
+              Unknown
+            {% endif %}
+          </dd>
+        </div>
+        <div>
+          <dt>Sign-in type</dt>
+          <dd>
+            {% if detail.toolkit and detail.toolkit.no_auth %}
+              No account needed
+            {% elif detail.toolkit and detail.toolkit.auth_schemes %}
+              {{ detail.toolkit.auth_schemes|join(" / ")|replace("_", " ")|title }}
+            {% else %}
+              Composio account
+            {% endif %}
+          </dd>
+        </div>
+      </dl>
     </aside>
   </section>
 
   <section class="composio-connect-section">
-    <article class="card composio-action-card composio-connect-card {{ 'connected' if active_connection else '' }}">
+    <article class="card composio-action-card composio-account-card {{ 'connected' if active_connection else '' }}">
       <header class="connect-card-header">
         <div>
-          <span class="composio-kicker">{{ "Account" if active_connection else "Connection" }}</span>
+          <span class="composio-kicker">{{ "Connected Account" if active_connection else "Connection" }}</span>
           <h2>
             {% if active_connection %}
-              {{ integration_name }} is connected
+              {{ active_connection.display_name }}
             {% elif member_scope %}
               Connect Your Account
             {% else %}
@@ -149,11 +140,11 @@
           </h2>
           <p>
             {% if active_connection %}
-              Kortny can use this {{ integration_name }} account when a request matches its visibility scope.
+              Kortny can use this account for tasks allowed by the visibility setting below.
             {% elif member_scope %}
-              Kortny will send you to Composio to authenticate {{ integration_name }}. The connection stays personal to your Slack account.
+              Connect {{ integration_name }} so Kortny can use it for your Slack tasks.
             {% else %}
-              Credentials stay in Composio. Kortny stores owner, scope, and connected-account metadata.
+              Connect an account and choose whether it is personal, channel-only, or workspace-wide.
             {% endif %}
           </p>
         </div>
@@ -166,46 +157,40 @@
 
       {% if active_connection %}
         <div class="connected-account-panel">
-          <div class="connected-account-summary">
-            <div class="connected-account-title">
-              <strong>{{ active_connection.display_name }}</strong>
-              <span class="badge badge-success">Active</span>
+          <dl class="connected-account-meta connected-account-meta-grid">
+            <div>
+              <dt>Owner</dt>
+              <dd>{{ active_connection.owner.name }}</dd>
             </div>
-            <dl class="connected-account-meta">
+            <div>
+              <dt>Visibility</dt>
+              <dd>{{ active_connection.scope_label }}</dd>
+            </div>
+            <div>
+              <dt>Status</dt>
+              <dd>{{ active_connection.status|title }}</dd>
+            </div>
+            {% if active_connection.connected_account_id %}
               <div>
-                <dt>Owner</dt>
-                <dd>{{ active_connection.owner.name }}</dd>
+                <dt>Account ID</dt>
+                <dd><code>{{ active_connection.connected_account_id }}</code></dd>
               </div>
-              <div>
-                <dt>Visibility</dt>
-                <dd>{{ active_connection.scope_label }}</dd>
-              </div>
-              {% if active_connection.connected_account_id %}
-                <div>
-                  <dt>Composio Account</dt>
-                  <dd><code>{{ active_connection.connected_account_id }}</code></dd>
-                </div>
-              {% endif %}
-            </dl>
-          </div>
-
-          <div class="connected-account-actions-card">
-            <span class="form-label">Account Actions</span>
-            <p>Disconnecting disables the Composio account for Kortny while preserving local history.</p>
-            <form method="post" action="/composio/connections/{{ active_connection.id }}/disconnect">
-              <input type="hidden" name="next" value="{{ detail_base_path }}/{{ detail.slug }}">
-              <button class="btn-ghost btn-danger" type="submit">Disconnect</button>
-            </form>
-          </div>
+            {% endif %}
+          </dl>
+          <form class="account-action-row" method="post" action="/composio/connections/{{ active_connection.id }}/disconnect">
+            <input type="hidden" name="next" value="{{ detail_base_path }}/{{ detail.slug }}">
+            <span>Disconnect this account from Kortny.</span>
+            <button class="btn-ghost btn-danger" type="submit">Disconnect</button>
+          </form>
         </div>
       {% elif not detail.configured %}
-        <p>Add `COMPOSIO_API_KEY` before creating auth configs or Connect Links.</p>
+        <p>Add `COMPOSIO_API_KEY` before connecting {{ integration_name }}.</p>
       {% else %}
         <div class="connect-card-body">
           <form class="connect-quick-form" method="post" action="/composio/{{ detail.slug }}/connect">
             <div class="connect-hero">
               <div>
-                <strong>Hosted Composio authorization</strong>
+                <strong>Start connection</strong>
                 <p>
                   {% if member_scope %}
                     Continue to Composio to finish connecting {{ integration_name }} for your own Kortny tasks.
@@ -373,56 +358,49 @@
     </section>
   {% endif %}
 
-  <section class="card composio-connections-card">
-    <header>
-      <h2>{% if member_scope %}Your Connections{% else %}Scoped Connections{% endif %}</h2>
-      <p>
-        {% if member_scope %}
-          Personal connections available to Kortny when you ask it to use this integration.
-        {% else %}
-          OAuth credentials stay in Composio. Kortny stores only local visibility and connected-account metadata.
+  {% if detail.toolkit or detail.tools_error %}
+    <section class="card composio-tools-card">
+      <header>
+        <div>
+          <h2>Capabilities</h2>
+          <p>Tools this integration makes available to Kortny.</p>
+        </div>
+        {% if detail.toolkit %}
+          <span class="badge badge-neutral">{{ detail.toolkit.tools_count|number }} total</span>
         {% endif %}
-      </p>
-    </header>
-    {% if detail.connections %}
-      <div class="connection-list">
-        {% for connection in detail.connections %}
-          <article class="connection-row with-actions">
-            <div>
-              <strong>{{ connection.display_name }}</strong>
-              <span>{{ connection.toolkit_slug }}</span>
-            </div>
-            <span class="badge badge-{{ connection.tone }}">{{ connection.status }}</span>
-            <div>
-              <span class="detail-label">Scope</span>
-              <p>{{ connection.scope_label }}</p>
-            </div>
-            <div>
-              <span class="detail-label">Owner</span>
-              <p>{{ connection.owner.name }}</p>
-            </div>
-            <div class="connection-actions">
-              {% if connection.status == "active" %}
-                <form method="post" action="/composio/connections/{{ connection.id }}/disconnect">
-                  <input type="hidden" name="next" value="{{ detail_base_path }}/{{ detail.slug }}">
-                  <button class="btn-ghost btn-danger compact-action" type="submit">Disconnect</button>
-                </form>
-              {% else %}
-                <span class="detail-label">Updated</span>
-                <p>{{ connection.updated_at|datetime }}</p>
+      </header>
+
+      {% if detail.tools_error %}
+        <div class="notice notice-warning" role="status">{{ detail.tools_error }}</div>
+      {% endif %}
+
+      {% if detail.tools %}
+        <div class="composio-tool-list">
+          {% for tool in detail.tools %}
+            <article class="composio-tool-row">
+              <div>
+                <h3>{{ tool.name }}</h3>
+                {% if tool.description %}
+                  <p>{{ tool.description }}</p>
+                {% endif %}
+                <code>{{ tool.slug }}</code>
+              </div>
+              {% if tool.tags %}
+                <div class="catalog-tags composio-tool-tags">
+                  {% for tag in tool.tags[:3] %}
+                    <span class="catalog-pill catalog-pill-category">{{ tag }}</span>
+                  {% endfor %}
+                </div>
               {% endif %}
-            </div>
-          </article>
-        {% endfor %}
-      </div>
-    {% else %}
-      <p class="empty-state">
-        {% if member_scope %}
-          You have not connected this integration yet.
-        {% else %}
-          No local scoped connections have been recorded for this toolkit yet.
+            </article>
+          {% endfor %}
+        </div>
+        {% if detail.toolkit and detail.toolkit.tools_count > detail.tools|length %}
+          <p class="tool-count-note">Showing the first {{ detail.tools|length|number }} tools returned by Composio.</p>
         {% endif %}
-      </p>
-    {% endif %}
-  </section>
+      {% elif not detail.tools_error %}
+        <p class="empty-state">Composio did not return tool details for this integration.</p>
+      {% endif %}
+    </section>
+  {% endif %}
 {% endblock %}

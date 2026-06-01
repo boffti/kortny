@@ -1,0 +1,52 @@
+<div class="task-list">
+  {% for item in task_items %}
+    {% set task_detail_url = (tasks_base_path|default('/tasks')) ~ '/' ~ item.task.id %}
+    <a class="task-list-item" href="{{ task_detail_url }}" aria-label="Open task: {{ item.task.input }}">
+      <span class="task-list-main">
+        <span class="task-list-copy">
+          <span class="task-list-title">{{ item.task.input }}</span>
+          {% if item.task.error %}
+            <span class="task-list-summary task-list-summary-danger">Failure details recorded</span>
+          {% elif item.task.result_summary %}
+            <span class="task-list-summary">{{ item.task.result_summary }}</span>
+          {% endif %}
+        </span>
+        <span class="task-list-highlights">
+          <span class="badge status-{{ item.task.status.value }}">{{ item.task.status.value.replace("_", " ").title() }}</span>
+          <span class="task-list-cost">{{ item.task.total_cost_usd|money }}</span>
+        </span>
+      </span>
+
+      <span class="task-list-meta" aria-label="Task metadata">
+        <span class="task-meta-field">
+          <span class="task-meta-label">Created</span>
+          <time class="task-meta-value" datetime="{{ item.task.created_at.isoformat() }}" title="{{ item.task.created_at|datetime }}">
+            {{ item.task.created_at.strftime("%Y-%m-%d %H:%M") }}
+          </time>
+        </span>
+        <span class="task-meta-field">
+          <span class="task-meta-label">User</span>
+          <span class="task-meta-value" title="{{ item.user.name }}">{{ item.user.name }}</span>
+          {% if item.user.secondary %}<span class="task-meta-id" title="{{ item.user.secondary }}">{{ item.user.secondary }}</span>{% endif %}
+        </span>
+        <span class="task-meta-field">
+          <span class="task-meta-label">Channel</span>
+          <span class="task-meta-value" title="{{ item.channel.name }}">{{ item.channel.name }}</span>
+          {% if item.channel.secondary %}<span class="task-meta-id" title="{{ item.channel.secondary }}">{{ item.channel.secondary }}</span>{% endif %}
+        </span>
+        <span class="task-meta-field task-meta-models">
+          <span class="task-meta-label">Models</span>
+          <span class="task-meta-value" title="{{ item.models|join(', ') if item.models else '-' }}">
+            {{ item.models|join(", ") if item.models else "-" }}
+          </span>
+        </span>
+        <span class="task-meta-field task-meta-compact">
+          <span class="task-meta-label">Turns</span>
+          <span class="task-meta-value">{{ item.turn_count|number }}</span>
+        </span>
+      </span>
+    </a>
+  {% else %}
+    <p class="empty task-list-empty">{{ task_empty_message }}</p>
+  {% endfor %}
+</div>

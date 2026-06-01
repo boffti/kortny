@@ -8,20 +8,12 @@
       <h1>Users</h1>
       <p>User-level task volume, spend, failures, and latest activity.</p>
     </div>
-    <form class="filters" method="get" action="/users">
-      <label>
-        From
-        <input class="input" type="date" name="from" value="{{ from_date }}">
-      </label>
-      <label>
-        To
-        <input class="input" type="date" name="to" value="{{ to_date }}">
-      </label>
-      <button class="btn" type="submit">Apply</button>
-    </form>
   </section>
 
-  <section class="card">
+  {% set toolbar = users_toolbar %}
+  {% include "_data_toolbar.html" with context %}
+
+	  <section class="card">
     <header>
       <h2>User Activity</h2>
       <p>Click a user to inspect tasks, traces, artifacts, and LLM usage.</p>

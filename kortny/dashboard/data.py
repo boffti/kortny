@@ -23,6 +23,7 @@ from kortny.composio import (
     ComposioCatalogError,
     ComposioClient,
     ComposioConnectionError,
+    ComposioTool,
     ComposioToolkit,
 )
 from kortny.config import Settings
@@ -51,6 +52,7 @@ from kortny.tools.workspace_memory import (
 
 DEFAULT_PAGE_SIZE = 25
 MAX_PAGE_SIZE = 100
+COMPOSIO_DETAIL_TOOL_LIMIT = 12
 
 
 @dataclass(frozen=True)
@@ -86,6 +88,16 @@ class TaskListPage:
         if self.page >= self.total_pages:
             return None
         return self.page + 1
+
+    @property
+    def first_item(self) -> int:
+        if self.total_count == 0:
+            return 0
+        return ((self.page - 1) * self.page_size) + 1
+
+    @property
+    def last_item(self) -> int:
+        return min(self.page * self.page_size, self.total_count)
 
 
 @dataclass(frozen=True)
@@ -362,6 +374,7 @@ class DashboardOverview:
     recent_tasks: tuple[TaskListItem, ...]
     system_health: SystemHealth
     window_label: str
+    refreshed_at: datetime
 
 
 @dataclass(frozen=True)
@@ -462,6 +475,7 @@ class ComposioToolkitRow:
     slug: str
     name: str
     description: str
+    logo_url: str | None
     categories: tuple[str, ...]
     auth_schemes: tuple[str, ...]
     managed_auth_schemes: tuple[str, ...]
@@ -512,16 +526,30 @@ class ComposioAuthConfigRow:
 
 
 @dataclass(frozen=True)
+class ComposioToolRow:
+    slug: str
+    name: str
+    description: str
+    tags: tuple[str, ...]
+    version: str | None
+
+
+@dataclass(frozen=True)
 class ComposioCatalogView:
     enabled: bool
     configured: bool
     status: str
     tone: str
     query: str
+    cursor: str
+    page_size: int
     total_items: int | None
     visible_count: int
+    next_cursor: str | None
     connection_count: int
     active_connection_count: int
+    connected_toolkit_count: int
+    pinned_connected_count: int
     error: str | None
     toolkits: tuple[ComposioToolkitRow, ...]
     connections: tuple[ComposioConnectionRow, ...]
@@ -545,6 +573,8 @@ class ComposioToolkitDetail:
     toolkit: ComposioToolkitRow | None
     raw_toolkit: ComposioToolkit | None
     auth_configs: tuple[ComposioAuthConfigRow, ...]
+    tools: tuple[ComposioToolRow, ...]
+    tools_error: str | None
     connections: tuple[ComposioConnectionRow, ...]
     scope_options: tuple[ComposioScopeOption, ...]
     user_options: tuple[IdentityLabel, ...]
@@ -554,7 +584,11 @@ class ComposioToolkitDetail:
     @property
     def active_connection(self) -> ComposioConnectionRow | None:
         return next(
-            (connection for connection in self.connections if connection.status == "active"),
+            (
+                connection
+                for connection in self.connections
+                if connection.status == "active"
+            ),
             None,
         )
 
@@ -594,16 +628,33 @@ def list_tasks(
     page_size: int = DEFAULT_PAGE_SIZE,
     installation_id: uuid.UUID | None = None,
     slack_user_id: str | None = None,
+    start: datetime | None = None,
+    end: datetime | None = None,
+    query: str | None = None,
+    status: str | None = None,
+    channel: str | None = None,
+    user: str | None = None,
+    model: str | None = None,
 ) -> TaskListPage:
     """Return a paginated dashboard task list."""
 
     normalized_page = max(page, 1)
     normalized_size = min(max(page_size, 1), MAX_PAGE_SIZE)
     offset = (normalized_page - 1) * normalized_size
-    task_filter = _task_scope_filter(
-        installation_id=installation_id,
-        slack_user_id=slack_user_id,
-    )
+    task_filter = [
+        *_task_scope_filter(
+            installation_id=installation_id,
+            slack_user_id=slack_user_id,
+        ),
+        *_task_filter(start=start, end=end),
+        *_task_list_filters(
+            query=query,
+            status=status,
+            channel=channel,
+            user=user,
+            model=model,
+        ),
+    ]
 
     total_count = (
         session.scalar(select(func.count()).select_from(Task).where(*task_filter)) or 0
@@ -756,7 +807,9 @@ def get_usage_aggregate(
             func.coalesce(func.sum(LLMUsage.cost_usd), 0),
         )
         .join(Task, Task.id == LLMUsage.task_id)
-        .where(*usage_filter, *scoped_task_filter, ~Task.slack_channel_id.startswith("D"))
+        .where(
+            *usage_filter, *scoped_task_filter, ~Task.slack_channel_id.startswith("D")
+        )
         .group_by(Task.installation_id, Task.slack_channel_id)
         .order_by(func.sum(LLMUsage.cost_usd).desc())
     ).all()
@@ -1051,7 +1104,13 @@ def get_dashboard_overview(
         ),
     )
 
-    attention_items = _overview_attention_items(session, system_health=system_health)
+    attention_items = _overview_attention_items(
+        session,
+        system_health=system_health,
+        current=current,
+        today_cost=Decimal(today_cost),
+        week_cost=Decimal(week_stats[2]),
+    )
     recent_tasks = list_tasks(session, page=1, page_size=10)
 
     return DashboardOverview(
@@ -1064,6 +1123,7 @@ def get_dashboard_overview(
         recent_tasks=recent_tasks.items,
         system_health=system_health,
         window_label="Last 7 days",
+        refreshed_at=current,
     )
 
 
@@ -1118,7 +1178,9 @@ def get_memory_dashboard(
         or 0
     )
     episode_count = (
-        session.scalar(select(func.count()).select_from(Episode).where(*memory_episode_scope))
+        session.scalar(
+            select(func.count()).select_from(Episode).where(*memory_episode_scope)
+        )
         or 0
     )
     failed_episode_count = (
@@ -1311,19 +1373,15 @@ def get_integration_dashboard(
     session: Session | None = None,
     runtime_settings: Settings | None = None,
     runtime_error: str | None = None,
-    composio_query: str | None = None,
-    composio_client: ComposioClient | None = None,
     installation_id: uuid.UUID | None = None,
     owner_slack_user_id: str | None = None,
 ) -> IntegrationDashboard:
     """Return configured integration and tool-registry state."""
 
     integrations = _integration_cards(runtime_settings, runtime_error)
-    composio_catalog = _composio_catalog_view(
+    composio_catalog = _composio_catalog_summary_view(
         session=session,
         settings=runtime_settings,
-        query=composio_query,
-        client=composio_client,
         installation_id=installation_id,
         owner_slack_user_id=owner_slack_user_id,
     )
@@ -1354,14 +1412,8 @@ def get_integration_dashboard(
         ),
         SystemMetric(
             label="External Adapters",
-            value=(
-                f"{composio_catalog.total_items:,}"
-                if composio_catalog.total_items is not None
-                else "1 planned"
-            ),
-            detail="Composio supported toolkits"
-            if composio_catalog.total_items is not None
-            else "Composio is tracked separately in HIG-35",
+            value=f"{composio_catalog.active_connection_count:,} active",
+            detail="Composio app catalog lives under Tools",
             tone=composio_catalog.tone,
         ),
     )
@@ -1379,6 +1431,8 @@ def get_composio_catalog_dashboard(
     *,
     runtime_settings: Settings | None = None,
     query: str | None = None,
+    cursor: str | None = None,
+    limit: int | None = None,
     composio_client: ComposioClient | None = None,
     installation_id: uuid.UUID | None = None,
     owner_slack_user_id: str | None = None,
@@ -1389,6 +1443,8 @@ def get_composio_catalog_dashboard(
         session=session,
         settings=runtime_settings,
         query=query,
+        cursor=cursor,
+        limit=limit,
         client=composio_client,
         installation_id=installation_id,
         owner_slack_user_id=owner_slack_user_id,
@@ -1427,6 +1483,8 @@ def get_composio_toolkit_detail(
             toolkit=None,
             raw_toolkit=None,
             auth_configs=(),
+            tools=(),
+            tools_error=None,
             connections=connections,
             scope_options=_composio_scope_options(),
             user_options=user_options,
@@ -1442,6 +1500,8 @@ def get_composio_toolkit_detail(
             toolkit=None,
             raw_toolkit=None,
             auth_configs=(),
+            tools=(),
+            tools_error=None,
             connections=connections,
             scope_options=_composio_scope_options(),
             user_options=user_options,
@@ -1464,6 +1524,8 @@ def get_composio_toolkit_detail(
             toolkit=None,
             raw_toolkit=None,
             auth_configs=(),
+            tools=(),
+            tools_error=None,
             connections=connections,
             scope_options=_composio_scope_options(),
             user_options=user_options,
@@ -1479,6 +1541,18 @@ def get_composio_toolkit_detail(
         )
     except (ComposioCatalogError, ComposioConnectionError) as exc:
         auth_config_error = f"Auth configs unavailable: {_short_error(str(exc))}"
+    tools: tuple[ComposioToolRow, ...] = ()
+    tools_error: str | None = None
+    try:
+        tools = tuple(
+            _composio_tool_row(tool)
+            for tool in client.list_tools(
+                toolkit_slug=normalized_slug,
+                limit=COMPOSIO_DETAIL_TOOL_LIMIT,
+            )
+        )
+    except ComposioCatalogError as exc:
+        tools_error = f"Tools unavailable: {_short_error(str(exc))}"
 
     status_map = _composio_status_by_toolkit(connections)
     return ComposioToolkitDetail(
@@ -1489,6 +1563,8 @@ def get_composio_toolkit_detail(
         toolkit=_composio_toolkit_row(toolkit, status_map),
         raw_toolkit=toolkit,
         auth_configs=auth_configs,
+        tools=tools,
+        tools_error=tools_error,
         connections=connections,
         scope_options=_composio_scope_options(),
         user_options=user_options,
@@ -2015,17 +2091,24 @@ def _composio_catalog_view(
     session: Session | None,
     settings: Settings | None,
     query: str | None,
-    client: ComposioClient | None,
+    cursor: str | None = None,
+    limit: int | None = None,
+    client: ComposioClient | None = None,
     installation_id: uuid.UUID | None = None,
     owner_slack_user_id: str | None = None,
 ) -> ComposioCatalogView:
     normalized_query = (query or "").strip()
+    normalized_cursor = (cursor or "").strip()
+    default_limit = settings.composio_catalog_limit if settings is not None else 60
+    page_size = max(1, min(limit or default_limit, 100))
     connections = _composio_connection_rows(
         session,
         installation_id=installation_id,
         owner_slack_user_id=owner_slack_user_id,
     )
     active_count = sum(1 for connection in connections if connection.status == "active")
+    active_toolkit_slugs = _active_composio_toolkit_slugs(connections)
+    connected_toolkit_count = len(active_toolkit_slugs)
     if settings is None or not settings.composio_api_key:
         return ComposioCatalogView(
             enabled=False,
@@ -2033,10 +2116,15 @@ def _composio_catalog_view(
             status="Not configured",
             tone="neutral",
             query=normalized_query,
+            cursor=normalized_cursor,
+            page_size=page_size,
             total_items=None,
             visible_count=0,
+            next_cursor=None,
             connection_count=len(connections),
             active_connection_count=active_count,
+            connected_toolkit_count=connected_toolkit_count,
+            pinned_connected_count=0,
             error=None,
             toolkits=(),
             connections=connections,
@@ -2048,10 +2136,15 @@ def _composio_catalog_view(
             status="Catalog disabled",
             tone="warning",
             query=normalized_query,
+            cursor=normalized_cursor,
+            page_size=page_size,
             total_items=None,
             visible_count=0,
+            next_cursor=None,
             connection_count=len(connections),
             active_connection_count=active_count,
+            connected_toolkit_count=connected_toolkit_count,
+            pinned_connected_count=0,
             error="COMPOSIO_CATALOG_ENABLED is false.",
             toolkits=(),
             connections=connections,
@@ -2064,7 +2157,8 @@ def _composio_catalog_view(
     try:
         catalog = resolved_client.list_toolkits(
             search=normalized_query or None,
-            limit=settings.composio_catalog_limit,
+            limit=page_size,
+            cursor=normalized_cursor or None,
         )
     except ComposioCatalogError as exc:
         return ComposioCatalogView(
@@ -2073,25 +2167,39 @@ def _composio_catalog_view(
             status="Catalog unavailable",
             tone="danger",
             query=normalized_query,
+            cursor=normalized_cursor,
+            page_size=page_size,
             total_items=None,
             visible_count=0,
+            next_cursor=None,
             connection_count=len(connections),
             active_connection_count=active_count,
+            connected_toolkit_count=connected_toolkit_count,
+            pinned_connected_count=0,
             error=_short_error(str(exc)),
             toolkits=(),
             connections=connections,
         )
 
     connection_statuses = _composio_status_by_toolkit(connections)
+    catalog_items, pinned_connected_count = _composio_catalog_items_with_connected(
+        catalog_items=tuple(
+            item[1]
+            for item in sorted(
+                enumerate(catalog.items),
+                key=lambda item: (
+                    connection_statuses.get(item[1].slug.lower()) != "active",
+                    item[0],
+                ),
+            )
+        ),
+        active_toolkit_slugs=active_toolkit_slugs,
+        connections=connections,
+        client=resolved_client,
+        query=normalized_query,
+    )
     toolkits = tuple(
-        _composio_toolkit_row(toolkit, connection_statuses)
-        for _index, toolkit in sorted(
-            enumerate(catalog.items),
-            key=lambda item: (
-                connection_statuses.get(item[1].slug) != "active",
-                item[0],
-            ),
-        )
+        _composio_toolkit_row(toolkit, connection_statuses) for toolkit in catalog_items
     )
     return ComposioCatalogView(
         enabled=True,
@@ -2099,12 +2207,60 @@ def _composio_catalog_view(
         status="Catalog synced",
         tone="success",
         query=normalized_query,
+        cursor=normalized_cursor,
+        page_size=page_size,
         total_items=catalog.total_items,
         visible_count=len(toolkits),
+        next_cursor=catalog.next_cursor,
         connection_count=len(connections),
         active_connection_count=active_count,
+        connected_toolkit_count=connected_toolkit_count,
+        pinned_connected_count=pinned_connected_count,
         error=None,
         toolkits=toolkits,
+        connections=connections,
+    )
+
+
+def _composio_catalog_summary_view(
+    *,
+    session: Session | None,
+    settings: Settings | None,
+    installation_id: uuid.UUID | None = None,
+    owner_slack_user_id: str | None = None,
+) -> ComposioCatalogView:
+    connections = _composio_connection_rows(
+        session,
+        installation_id=installation_id,
+        owner_slack_user_id=owner_slack_user_id,
+    )
+    active_count = sum(1 for connection in connections if connection.status == "active")
+    active_toolkit_slugs = _active_composio_toolkit_slugs(connections)
+    configured = settings is not None and bool(settings.composio_api_key)
+    enabled = configured and settings is not None and settings.composio_catalog_enabled
+    if enabled:
+        status = "Open catalog"
+    elif configured:
+        status = "Catalog disabled"
+    else:
+        status = "Not configured"
+    return ComposioCatalogView(
+        enabled=enabled,
+        configured=configured,
+        status=status,
+        tone="success" if active_count else ("neutral" if enabled else "warning"),
+        query="",
+        cursor="",
+        page_size=0,
+        total_items=None,
+        visible_count=0,
+        next_cursor=None,
+        connection_count=len(connections),
+        active_connection_count=active_count,
+        connected_toolkit_count=len(active_toolkit_slugs),
+        pinned_connected_count=0,
+        error=None,
+        toolkits=(),
         connections=connections,
     )
 
@@ -2136,7 +2292,9 @@ def _composio_connection_rows(
     for row in rows:
         identity_keys.append((row.installation_id, "user", row.owner_slack_user_id))
         if row.visibility_scope_type == "channel" and row.visibility_scope_id:
-            identity_keys.append((row.installation_id, "channel", row.visibility_scope_id))
+            identity_keys.append(
+                (row.installation_id, "channel", row.visibility_scope_id)
+            )
         elif row.visibility_scope_type == "user" and row.visibility_scope_id:
             identity_keys.append((row.installation_id, "user", row.visibility_scope_id))
     identities = _identity_map_from_keys(session, identity_keys)
@@ -2236,17 +2394,103 @@ def _composio_status_by_toolkit(
     statuses: dict[str, str] = {}
     priority = {"active": 4, "pending": 3, "expired": 2, "failed": 1, "disabled": 0}
     for connection in connections:
-        current = statuses.get(connection.toolkit_slug)
-        if current is None or priority.get(connection.status, -1) > priority.get(current, -1):
-            statuses[connection.toolkit_slug] = connection.status
+        slug = connection.toolkit_slug.strip().lower()
+        current = statuses.get(slug)
+        if current is None or priority.get(connection.status, -1) > priority.get(
+            current, -1
+        ):
+            statuses[slug] = connection.status
     return statuses
+
+
+def _active_composio_toolkit_slugs(
+    connections: tuple[ComposioConnectionRow, ...],
+) -> tuple[str, ...]:
+    slugs: dict[str, None] = {}
+    for connection in connections:
+        slug = connection.toolkit_slug.strip().lower()
+        if connection.status == "active" and slug:
+            slugs.setdefault(slug, None)
+    return tuple(slugs)
+
+
+def _composio_catalog_items_with_connected(
+    *,
+    catalog_items: tuple[ComposioToolkit, ...],
+    active_toolkit_slugs: tuple[str, ...],
+    connections: tuple[ComposioConnectionRow, ...],
+    client: ComposioClient,
+    query: str,
+) -> tuple[tuple[ComposioToolkit, ...], int]:
+    page_slugs = {toolkit.slug.lower() for toolkit in catalog_items}
+    connection_by_slug = {
+        connection.toolkit_slug.lower(): connection
+        for connection in connections
+        if connection.status == "active"
+    }
+    pinned: list[ComposioToolkit] = []
+    for slug in active_toolkit_slugs:
+        if slug in page_slugs:
+            continue
+        try:
+            toolkit = client.get_toolkit(slug)
+        except ComposioCatalogError:
+            toolkit = _composio_toolkit_placeholder(
+                slug,
+                connection_by_slug.get(slug),
+            )
+        if not _composio_toolkit_matches_query(toolkit, query):
+            continue
+        pinned.append(toolkit)
+        page_slugs.add(slug)
+    return (*pinned, *catalog_items), len(pinned)
+
+
+def _composio_toolkit_placeholder(
+    slug: str,
+    connection: ComposioConnectionRow | None,
+) -> ComposioToolkit:
+    name = connection.display_name if connection is not None else _humanize_slug(slug)
+    return ComposioToolkit(
+        slug=slug,
+        name=name,
+        description="Connected account. Catalog details were not available from Composio.",
+        categories=(),
+        auth_schemes=(),
+        managed_auth_schemes=(),
+        tools_count=0,
+        triggers_count=0,
+        logo_url=None,
+        app_url=None,
+        auth_guide_url=None,
+        base_url=None,
+        enabled=True,
+        no_auth=False,
+        is_local_toolkit=False,
+    )
+
+
+def _composio_toolkit_matches_query(toolkit: ComposioToolkit, query: str) -> bool:
+    if not query:
+        return True
+    normalized = query.casefold()
+    haystack = " ".join(
+        (
+            toolkit.slug,
+            toolkit.name,
+            toolkit.description,
+            " ".join(toolkit.categories),
+            " ".join(toolkit.auth_schemes),
+        )
+    ).casefold()
+    return normalized in haystack
 
 
 def _composio_toolkit_row(
     toolkit: ComposioToolkit,
     connection_statuses: dict[str, str],
 ) -> ComposioToolkitRow:
-    status = connection_statuses.get(toolkit.slug)
+    status = connection_statuses.get(toolkit.slug.lower())
     if status is None:
         connection_status = "Available"
         connection_tone = "neutral"
@@ -2257,6 +2501,7 @@ def _composio_toolkit_row(
         slug=toolkit.slug,
         name=toolkit.name,
         description=toolkit.description,
+        logo_url=toolkit.logo_url,
         categories=toolkit.categories,
         auth_schemes=toolkit.auth_schemes,
         managed_auth_schemes=toolkit.managed_auth_schemes,
@@ -2267,6 +2512,31 @@ def _composio_toolkit_row(
         connection_tone=connection_tone,
         connected=status == "active",
     )
+
+
+def _composio_tool_row(tool: ComposioTool) -> ComposioToolRow:
+    name = tool.name.strip()
+    if not name or name.upper() == tool.slug.upper():
+        name = _humanize_composio_tool_slug(tool.slug, tool.toolkit_slug)
+    return ComposioToolRow(
+        slug=tool.slug,
+        name=name,
+        description=tool.description,
+        tags=tool.tags,
+        version=tool.version,
+    )
+
+
+def _humanize_composio_tool_slug(slug: str, toolkit_slug: str) -> str:
+    normalized_slug = slug.upper()
+    toolkit_prefix = f"{toolkit_slug.upper()}_"
+    if normalized_slug.startswith(toolkit_prefix):
+        normalized_slug = normalized_slug[len(toolkit_prefix) :]
+    return _humanize_slug(normalized_slug)
+
+
+def _humanize_slug(slug: str) -> str:
+    return slug.replace("_", " ").replace("-", " ").title()
 
 
 def _composio_scope_options() -> tuple[ComposioScopeOption, ...]:
@@ -2531,6 +2801,9 @@ def _overview_attention_items(
     session: Session,
     *,
     system_health: SystemHealth,
+    current: datetime,
+    today_cost: Decimal,
+    week_cost: Decimal,
 ) -> tuple[OverviewAttentionItem, ...]:
     items: list[OverviewAttentionItem] = []
     for check in system_health.checks:
@@ -2546,6 +2819,81 @@ def _overview_attention_items(
             )
         )
 
+    proposed_fact_count = (
+        session.scalar(
+            select(func.count())
+            .select_from(WorkspaceState)
+            .where(WorkspaceState.status == "proposed")
+        )
+        or 0
+    )
+    if proposed_fact_count:
+        items.append(
+            OverviewAttentionItem(
+                title="Memory: proposed facts",
+                detail=(
+                    f"{int(proposed_fact_count):,} memory "
+                    f"{'fact needs' if proposed_fact_count == 1 else 'facts need'} review."
+                ),
+                tone="warning",
+                badge="review",
+                href="/memory?status=proposed",
+            )
+        )
+
+    stale_threshold = current - timedelta(minutes=30)
+    stale_active_count = (
+        session.scalar(
+            select(func.count())
+            .select_from(Task)
+            .where(
+                Task.status.in_(
+                    (
+                        TaskStatus.pending,
+                        TaskStatus.running,
+                        TaskStatus.waiting_approval,
+                    )
+                ),
+                Task.created_at < stale_threshold,
+            )
+        )
+        or 0
+    )
+    if stale_active_count:
+        items.append(
+            OverviewAttentionItem(
+                title="Tasks: active work is stale",
+                detail=(
+                    f"{int(stale_active_count):,} pending, running, or approval "
+                    f"{'task is' if stale_active_count == 1 else 'tasks are'} older than 30 minutes."
+                ),
+                tone="warning",
+                badge="stale",
+                href="/tasks?status=running",
+            )
+        )
+
+    baseline_daily_cost = (
+        (week_cost - today_cost) / Decimal("6") if week_cost else Decimal("0")
+    )
+    if (
+        today_cost > Decimal("0")
+        and baseline_daily_cost > Decimal("0")
+        and today_cost >= baseline_daily_cost * Decimal("2")
+    ):
+        items.append(
+            OverviewAttentionItem(
+                title="Usage: cost spike today",
+                detail=(
+                    f"Today is {_format_money(today_cost)} versus "
+                    f"{_format_money(baseline_daily_cost)} daily baseline."
+                ),
+                tone="warning",
+                badge="spend",
+                href="/usage",
+            )
+        )
+
     tasks = tuple(
         session.scalars(
             select(Task)
@@ -2554,6 +2902,7 @@ def _overview_attention_items(
                     (
                         TaskStatus.failed,
                         TaskStatus.crashed,
+                        TaskStatus.waiting_approval,
                         TaskStatus.pending,
                         TaskStatus.running,
                     )
@@ -2562,6 +2911,7 @@ def _overview_attention_items(
             .order_by(
                 case(
                     (Task.status.in_((TaskStatus.failed, TaskStatus.crashed)), 0),
+                    (Task.status == TaskStatus.waiting_approval, 1),
                     else_=1,
                 ),
                 Task.created_at.desc(),
@@ -3495,6 +3845,91 @@ def _task_filter(
     if end is not None:
         filters.append(Task.created_at < end)
     return filters
+
+
+def _task_list_filters(
+    *,
+    query: str | None,
+    status: str | None,
+    channel: str | None,
+    user: str | None,
+    model: str | None,
+) -> list[ColumnElement[bool]]:
+    filters: list[ColumnElement[bool]] = []
+    normalized_status = _normalize_task_status(status)
+    if normalized_status is not None:
+        filters.append(Task.status == normalized_status)
+    normalized_query = _like_query(query)
+    if normalized_query is not None:
+        filters.append(
+            or_(
+                Task.input.ilike(normalized_query),
+                Task.result_summary.ilike(normalized_query),
+                Task.slack_channel_id.ilike(normalized_query),
+                Task.slack_channel_id.in_(
+                    _identity_match_ids("channel", normalized_query)
+                ),
+                Task.slack_user_id.ilike(normalized_query),
+                Task.slack_user_id.in_(_identity_match_ids("user", normalized_query)),
+            )
+        )
+    normalized_channel = _like_query(channel)
+    if normalized_channel is not None:
+        filters.append(
+            or_(
+                Task.slack_channel_id.ilike(normalized_channel),
+                Task.slack_channel_id.in_(
+                    _identity_match_ids("channel", normalized_channel)
+                ),
+            )
+        )
+    normalized_user = _like_query(user)
+    if normalized_user is not None:
+        filters.append(
+            or_(
+                Task.slack_user_id.ilike(normalized_user),
+                Task.slack_user_id.in_(_identity_match_ids("user", normalized_user)),
+            )
+        )
+    normalized_model = _like_query(model)
+    if normalized_model is not None:
+        filters.append(
+            Task.id.in_(
+                select(LLMUsage.task_id).where(LLMUsage.model.ilike(normalized_model))
+            )
+        )
+    return filters
+
+
+def _identity_match_ids(kind: str, pattern: str) -> Select[tuple[str]]:
+    return select(SlackIdentity.slack_id).where(
+        SlackIdentity.kind == kind,
+        SlackIdentity.installation_id == Task.installation_id,
+        or_(
+            SlackIdentity.slack_id.ilike(pattern),
+            SlackIdentity.display_name.ilike(pattern),
+            SlackIdentity.raw_name.ilike(pattern),
+        ),
+    )
+
+
+def _normalize_task_status(value: str | None) -> TaskStatus | None:
+    if value is None or value.strip() in {"", "all"}:
+        return None
+    normalized = value.strip().lower()
+    for status in TaskStatus:
+        if status.value == normalized:
+            return status
+    return None
+
+
+def _like_query(value: str | None) -> str | None:
+    if value is None:
+        return None
+    stripped = value.strip()
+    if not stripped:
+        return None
+    return f"%{stripped}%"
 
 
 def _task_scope_filter(

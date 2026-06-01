@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import secrets
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -35,6 +35,7 @@ from kortny.dashboard.auth import (
 from kortny.dashboard.data import (
     DEFAULT_PAGE_SIZE,
     MAX_PAGE_SIZE,
+    TaskListPage,
     get_composio_catalog_dashboard,
     get_composio_toolkit_detail,
     get_dashboard_overview,
@@ -60,6 +61,7 @@ from kortny.db.models import (
     DashboardUser,
     Installation,
     SlackIdentity,
+    TaskStatus,
 )
 from kortny.db.session import make_session_factory
 
@@ -301,10 +303,40 @@ def register_routes(app: FastAPI) -> None:
         request: Request,
         principal: Annotated[DashboardPrincipal, Depends(require_admin)],
         session: Annotated[Session, Depends(get_session)],
+        q: Annotated[str | None, Query()] = None,
+        status_filter: Annotated[str | None, Query(alias="status")] = None,
+        channel: Annotated[str | None, Query()] = None,
+        user: Annotated[str | None, Query()] = None,
+        model: Annotated[str | None, Query()] = None,
+        from_date: Annotated[str | None, Query(alias="from")] = None,
+        to_date: Annotated[str | None, Query(alias="to")] = None,
         page: Annotated[int, Query(ge=1)] = 1,
         page_size: Annotated[int, Query(ge=1, le=MAX_PAGE_SIZE)] = DEFAULT_PAGE_SIZE,
     ) -> Response:
-        task_page = list_tasks(session, page=page, page_size=page_size)
+        start = parse_date_bound(from_date)
+        end = parse_date_bound(to_date, inclusive_end=True)
+        task_filters = _task_filter_values(
+            q=q,
+            status=status_filter,
+            channel=channel,
+            user=user,
+            model=model,
+            from_date=from_date,
+            to_date=to_date,
+        )
+        task_page = list_tasks(
+            session,
+            page=page,
+            page_size=page_size,
+            start=start,
+            end=end,
+            query=q,
+            status=status_filter,
+            channel=channel,
+            user=user,
+            model=model,
+        )
+        task_query_params = _task_query_params(task_filters, page_size=page_size)
         return templates.TemplateResponse(
             request=request,
             name="tasks.html",
@@ -312,6 +344,19 @@ def register_routes(app: FastAPI) -> None:
                 **_dashboard_context(principal, active_page="tasks"),
                 "task_page": task_page,
                 "page_size": page_size,
+                "task_filters": task_filters,
+                "task_toolbar": _task_toolbar(
+                    action="/tasks",
+                    task_page=task_page,
+                    task_filters=task_filters,
+                    reset_url="/tasks",
+                ),
+                "task_previous_url": _page_url(
+                    "/tasks", task_query_params, task_page.previous_page
+                ),
+                "task_next_url": _page_url(
+                    "/tasks", task_query_params, task_page.next_page
+                ),
             },
         )
 
@@ -353,6 +398,14 @@ def register_routes(app: FastAPI) -> None:
                 "aggregate": aggregate,
                 "from_date": from_date or "",
                 "to_date": to_date or "",
+                "usage_toolbar": _date_toolbar(
+                    action="/usage",
+                    title="Usage Window",
+                    count_label=_usage_count_label(aggregate.total_calls),
+                    from_date=from_date,
+                    to_date=to_date,
+                    reset_url="/usage",
+                ),
             },
         )
 
@@ -375,6 +428,14 @@ def register_routes(app: FastAPI) -> None:
                 "directory": directory,
                 "from_date": from_date or "",
                 "to_date": to_date or "",
+                "users_toolbar": _date_toolbar(
+                    action="/users",
+                    title="User Activity Window",
+                    count_label=_row_count_label(len(directory.users), "user"),
+                    from_date=from_date,
+                    to_date=to_date,
+                    reset_url="/users",
+                ),
             },
         )
 
@@ -424,14 +485,12 @@ def register_routes(app: FastAPI) -> None:
         request: Request,
         principal: Annotated[DashboardPrincipal, Depends(require_admin)],
         session: Annotated[Session, Depends(get_session)],
-        composio_q: Annotated[str | None, Query(alias="composio_q")] = None,
     ) -> Response:
         runtime_settings, runtime_error = _load_runtime_settings()
         integration_dashboard = get_integration_dashboard(
             session=session,
             runtime_settings=runtime_settings,
             runtime_error=runtime_error,
-            composio_query=composio_q,
         )
         return templates.TemplateResponse(
             request=request,
@@ -439,7 +498,6 @@ def register_routes(app: FastAPI) -> None:
             context={
                 **_dashboard_context(principal, active_page="integrations"),
                 "integrations": integration_dashboard,
-                "composio_q": composio_q or "",
             },
         )
 
@@ -449,12 +507,19 @@ def register_routes(app: FastAPI) -> None:
         principal: Annotated[DashboardPrincipal, Depends(require_admin)],
         session: Annotated[Session, Depends(get_session)],
         q: Annotated[str | None, Query()] = None,
+        cursor: Annotated[str | None, Query()] = None,
+        page_size: Annotated[int, Query(ge=1, le=100)] = 60,
     ) -> Response:
         runtime_settings, runtime_error = _load_runtime_settings()
         catalog = get_composio_catalog_dashboard(
             session,
             runtime_settings=runtime_settings,
             query=q,
+            cursor=cursor,
+            limit=page_size,
+        )
+        catalog_query = _clean_query_params(
+            {"q": q, "page_size": catalog.page_size or page_size}
         )
         return templates.TemplateResponse(
             request=request,
@@ -464,6 +529,19 @@ def register_routes(app: FastAPI) -> None:
                 "catalog": catalog,
                 "runtime_error": runtime_error,
                 "q": q or "",
+                "cursor": cursor or "",
+                "page_size": catalog.page_size or page_size,
+                "page_size_options": (24, 60, 100),
+                "catalog_next_url": _url_with_query(
+                    "/composio",
+                    {
+                        **catalog_query,
+                        "cursor": catalog.next_cursor,
+                    },
+                )
+                if catalog.next_cursor
+                else None,
+                "catalog_restart_url": _url_with_query("/composio", catalog_query),
             },
         )
 
@@ -520,11 +598,7 @@ def register_routes(app: FastAPI) -> None:
         connection.metadata_json = metadata
         session.commit()
 
-        base_path = (
-            "/composio"
-            if principal.role == "admin"
-            else "/me/integrations"
-        )
+        base_path = "/composio" if principal.role == "admin" else "/me/integrations"
         return _redirect_with_notice(
             f"{base_path}/{quote(connection.toolkit_slug, safe='')}",
             notice,
@@ -539,7 +613,9 @@ def register_routes(app: FastAPI) -> None:
         session: Annotated[Session, Depends(get_session)],
     ) -> RedirectResponse:
         form = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
-        default_next_path = "/composio" if principal.role == "admin" else "/me/integrations"
+        default_next_path = (
+            "/composio" if principal.role == "admin" else "/me/integrations"
+        )
         next_path = _safe_next_path(form.get("next", [default_next_path])[0])
         connection = session.get(ComposioConnection, connection_id)
         if connection is None:
@@ -599,7 +675,9 @@ def register_routes(app: FastAPI) -> None:
         session: Annotated[Session, Depends(get_session)],
     ) -> RedirectResponse:
         form = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
-        default_next_path = "/composio" if principal.role == "admin" else "/me/integrations"
+        default_next_path = (
+            "/composio" if principal.role == "admin" else "/me/integrations"
+        )
         next_path = _safe_next_path(form.get("next", [default_next_path])[0])
         connection = session.get(ComposioConnection, connection_id)
         if connection is None:
@@ -783,14 +861,11 @@ def register_routes(app: FastAPI) -> None:
         session.flush()
 
         callback_token = secrets.token_urlsafe(24)
-        callback_url = (
-            f"{request.url_for('composio_callback')}?"
-            + urlencode(
-                {
-                    "connection_id": str(connection.id),
-                    "connection_token": callback_token,
-                }
-            )
+        callback_url = f"{request.url_for('composio_callback')}?" + urlencode(
+            {
+                "connection_id": str(connection.id),
+                "connection_token": callback_token,
+            }
         )
         connection.metadata_json = {
             **dict(connection.metadata_json or {}),
@@ -897,6 +972,12 @@ def register_routes(app: FastAPI) -> None:
             context={
                 **_dashboard_context(principal, active_page="admin_users"),
                 "users": users,
+                "access_toolbar": {
+                    "label": "Dashboard access controls",
+                    "title": "Access Roster",
+                    "count": _row_count_label(len(users), "dashboard user"),
+                    "fields": (),
+                },
                 "notice": notice,
                 "notice_tone": _notice_tone(notice_tone),
             },
@@ -1013,18 +1094,42 @@ def register_routes(app: FastAPI) -> None:
         request: Request,
         principal: Annotated[DashboardPrincipal, Depends(require_principal)],
         session: Annotated[Session, Depends(get_session)],
+        q: Annotated[str | None, Query()] = None,
+        status_filter: Annotated[str | None, Query(alias="status")] = None,
+        channel: Annotated[str | None, Query()] = None,
+        model: Annotated[str | None, Query()] = None,
+        from_date: Annotated[str | None, Query(alias="from")] = None,
+        to_date: Annotated[str | None, Query(alias="to")] = None,
         page: Annotated[int, Query(ge=1)] = 1,
         page_size: Annotated[int, Query(ge=1, le=MAX_PAGE_SIZE)] = DEFAULT_PAGE_SIZE,
     ) -> Response:
         if principal.installation_id is None or principal.slack_user_id is None:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN)
+        start = parse_date_bound(from_date)
+        end = parse_date_bound(to_date, inclusive_end=True)
+        task_filters = _task_filter_values(
+            q=q,
+            status=status_filter,
+            channel=channel,
+            user=None,
+            model=model,
+            from_date=from_date,
+            to_date=to_date,
+        )
         task_page = list_tasks(
             session,
             page=page,
             page_size=page_size,
             installation_id=principal.installation_id,
             slack_user_id=principal.slack_user_id,
+            start=start,
+            end=end,
+            query=q,
+            status=status_filter,
+            channel=channel,
+            model=model,
         )
+        task_query_params = _task_query_params(task_filters, page_size=page_size)
         return templates.TemplateResponse(
             request=request,
             name="tasks.html",
@@ -1032,6 +1137,20 @@ def register_routes(app: FastAPI) -> None:
                 **_dashboard_context(principal, active_page="me_tasks"),
                 "task_page": task_page,
                 "page_size": page_size,
+                "task_filters": task_filters,
+                "task_toolbar": _task_toolbar(
+                    action="/me/tasks",
+                    task_page=task_page,
+                    task_filters=task_filters,
+                    reset_url="/me/tasks",
+                    member_scope=True,
+                ),
+                "task_previous_url": _page_url(
+                    "/me/tasks", task_query_params, task_page.previous_page
+                ),
+                "task_next_url": _page_url(
+                    "/me/tasks", task_query_params, task_page.next_page
+                ),
             },
         )
 
@@ -1088,6 +1207,14 @@ def register_routes(app: FastAPI) -> None:
                 "aggregate": aggregate,
                 "from_date": from_date or "",
                 "to_date": to_date or "",
+                "usage_toolbar": _date_toolbar(
+                    action="/me/usage",
+                    title="Usage Window",
+                    count_label=_usage_count_label(aggregate.total_calls),
+                    from_date=from_date,
+                    to_date=to_date,
+                    reset_url="/me/usage",
+                ),
             },
         )
 
@@ -1139,7 +1266,6 @@ def register_routes(app: FastAPI) -> None:
         request: Request,
         principal: Annotated[DashboardPrincipal, Depends(require_principal)],
         session: Annotated[Session, Depends(get_session)],
-        composio_q: Annotated[str | None, Query(alias="composio_q")] = None,
     ) -> Response:
         if principal.installation_id is None or principal.slack_user_id is None:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN)
@@ -1148,7 +1274,6 @@ def register_routes(app: FastAPI) -> None:
             session=session,
             runtime_settings=runtime_settings,
             runtime_error=runtime_error,
-            composio_query=composio_q,
             installation_id=principal.installation_id,
             owner_slack_user_id=principal.slack_user_id,
         )
@@ -1158,7 +1283,6 @@ def register_routes(app: FastAPI) -> None:
             context={
                 **_dashboard_context(principal, active_page="me_integrations"),
                 "integrations": integration_dashboard,
-                "composio_q": composio_q or "",
             },
         )
 
@@ -1273,6 +1397,14 @@ def register_routes(app: FastAPI) -> None:
                 "detail": detail,
                 "from_date": from_date or "",
                 "to_date": to_date or "",
+                "user_toolbar": _date_toolbar(
+                    action=f"/users/{quote(slack_user_id, safe='')}",
+                    title="User Inspection Window",
+                    count_label=_row_count_label(detail.task_count, "task"),
+                    from_date=from_date,
+                    to_date=to_date,
+                    reset_url=f"/users/{quote(slack_user_id, safe='')}",
+                ),
             },
         )
 
@@ -1338,6 +1470,229 @@ def get_session(request: Request) -> Iterator[Session]:
         yield session
 
 
+def _task_filter_values(
+    *,
+    q: str | None,
+    status: str | None,
+    channel: str | None,
+    user: str | None,
+    model: str | None,
+    from_date: str | None,
+    to_date: str | None,
+) -> dict[str, str]:
+    return {
+        "q": (q or "").strip(),
+        "status": (status or "").strip(),
+        "channel": (channel or "").strip(),
+        "user": (user or "").strip(),
+        "model": (model or "").strip(),
+        "from": (from_date or "").strip(),
+        "to": (to_date or "").strip(),
+    }
+
+
+def _task_query_params(
+    task_filters: dict[str, str],
+    *,
+    page_size: int,
+) -> dict[str, str]:
+    return _clean_query_params(
+        {
+            **task_filters,
+            "page_size": page_size,
+        }
+    )
+
+
+def _task_toolbar(
+    *,
+    action: str,
+    task_page: TaskListPage,
+    task_filters: dict[str, str],
+    reset_url: str,
+    member_scope: bool = False,
+) -> dict[str, object]:
+    fields: list[dict[str, object]] = [
+        {
+            "type": "search",
+            "name": "q",
+            "label": "Search",
+            "value": task_filters["q"],
+            "placeholder": "request, result, user, channel",
+        },
+        {
+            "type": "select",
+            "name": "status",
+            "label": "Status",
+            "value": task_filters["status"],
+            "options": (
+                {"value": "", "label": "All statuses"},
+                *(
+                    {
+                        "value": task_status.value,
+                        "label": task_status.value.replace("_", " ").title(),
+                    }
+                    for task_status in TaskStatus
+                ),
+            ),
+        },
+        {
+            "type": "search",
+            "name": "channel",
+            "label": "Channel",
+            "value": task_filters["channel"],
+            "placeholder": "C123 or #ops",
+        },
+        {
+            "type": "search",
+            "name": "model",
+            "label": "Model",
+            "value": task_filters["model"],
+            "placeholder": "gpt, claude, router",
+        },
+        {
+            "type": "date",
+            "name": "from",
+            "label": "From",
+            "value": task_filters["from"],
+        },
+        {
+            "type": "date",
+            "name": "to",
+            "label": "To",
+            "value": task_filters["to"],
+        },
+    ]
+    if not member_scope:
+        fields.insert(
+            3,
+            {
+                "type": "search",
+                "name": "user",
+                "label": "User",
+                "value": task_filters["user"],
+                "placeholder": "U123 or name",
+            },
+        )
+    return {
+        "label": "Task filters",
+        "title": "Task Search",
+        "count": (
+            f"Showing {task_page.first_item:,}-{task_page.last_item:,} "
+            f"of {task_page.total_count:,} tasks"
+        ),
+        "action": action,
+        "reset_url": reset_url,
+        "submit_label": "Apply",
+        "fields": tuple(fields),
+    }
+
+
+def _date_toolbar(
+    *,
+    action: str,
+    title: str,
+    count_label: str,
+    from_date: str | None,
+    to_date: str | None,
+    reset_url: str,
+) -> dict[str, object]:
+    return {
+        "label": title,
+        "title": title,
+        "count": count_label,
+        "action": action,
+        "reset_url": reset_url,
+        "submit_label": "Apply",
+        "fields": (
+            {
+                "type": "date",
+                "name": "from",
+                "label": "From",
+                "value": (from_date or "").strip(),
+            },
+            {
+                "type": "date",
+                "name": "to",
+                "label": "To",
+                "value": (to_date or "").strip(),
+            },
+        ),
+    }
+
+
+def _search_toolbar(
+    *,
+    action: str,
+    name: str,
+    value: str | None,
+    title: str,
+    count_label: str,
+    placeholder: str,
+    reset_url: str,
+) -> dict[str, object]:
+    return {
+        "label": title,
+        "title": title,
+        "count": count_label,
+        "action": action,
+        "reset_url": reset_url,
+        "submit_label": "Search",
+        "fields": (
+            {
+                "type": "search",
+                "name": name,
+                "label": "Search",
+                "value": (value or "").strip(),
+                "placeholder": placeholder,
+            },
+        ),
+    }
+
+
+def _page_url(
+    path: str,
+    params: Mapping[str, object],
+    page: int | None,
+) -> str | None:
+    if page is None:
+        return None
+    return _url_with_query(path, {**params, "page": page})
+
+
+def _url_with_query(path: str, params: Mapping[str, object]) -> str:
+    cleaned = _clean_query_params(params)
+    if not cleaned:
+        return path
+    return f"{path}?{urlencode(cleaned)}"
+
+
+def _clean_query_params(params: Mapping[str, object]) -> dict[str, str]:
+    cleaned: dict[str, str] = {}
+    for key, value in params.items():
+        if value is None:
+            continue
+        string_value = str(value).strip()
+        if not string_value or string_value == "None":
+            continue
+        cleaned[key] = string_value
+    return cleaned
+
+
+def _row_count_label(count: int, noun: str) -> str:
+    return f"{count:,} {noun}{'' if count == 1 else 's'}"
+
+
+def _usage_count_label(count: int) -> str:
+    return f"{count:,} LLM call{'' if count == 1 else 's'}"
+
+
+def _catalog_count_label(visible_count: int, total_items: int | None) -> str:
+    if total_items is None:
+        return f"{visible_count:,} shown"
+    return f"{visible_count:,} shown of {total_items:,}"
+
+
 def _form_value(form: dict[str, list[str]], name: str) -> str:
     value = form.get(name, [""])[0]
     return value.strip()
@@ -1358,7 +1713,9 @@ def _resolve_composio_auth_config_id(
             return auth_config.id, "existing"
 
     toolkit = client.get_toolkit(toolkit_slug)
-    managed_schemes = {_normalize_auth_scheme(scheme) for scheme in toolkit.managed_auth_schemes}
+    managed_schemes = {
+        _normalize_auth_scheme(scheme) for scheme in toolkit.managed_auth_schemes
+    }
     if "oauth2" in managed_schemes:
         auth_config = client.create_managed_auth_config(toolkit_slug=toolkit_slug)
         return auth_config.id, "created_managed"
@@ -1373,7 +1730,9 @@ def _resolve_composio_auth_config_id(
         toolkit_slug=toolkit_slug,
         auth_scheme=custom_scheme,
     )
-    source = f"created_{_normalize_auth_scheme(auth_config.auth_scheme or custom_scheme)}"
+    source = (
+        f"created_{_normalize_auth_scheme(auth_config.auth_scheme or custom_scheme)}"
+    )
     return auth_config.id, source
 
 
@@ -1514,6 +1873,7 @@ def _dashboard_context(
         "dashboard_role": principal.role,
         "dashboard_is_admin": principal.role == "admin",
         "dashboard_slack_user_id": principal.slack_user_id or "",
+        "dashboard_user_id": principal.dashboard_user_id,
     }
 
 

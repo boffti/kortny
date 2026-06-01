@@ -151,7 +151,7 @@ class ComposioClient:
         if tool_slugs:
             params["tool_slugs"] = ",".join(tool_slugs)
         if query:
-            params["search"] = query
+            params["query"] = query
 
         response = self._get("/api/v3.1/tools", params=params)
         payload = response.json()
@@ -159,7 +159,12 @@ class ComposioClient:
         if isinstance(payload, list):
             items = payload
         elif isinstance(payload, dict):
-            items = payload.get("items") or payload.get("tools") or payload.get("data") or ()
+            items = (
+                payload.get("items")
+                or payload.get("tools")
+                or payload.get("data")
+                or ()
+            )
             if isinstance(items, dict):
                 items = (
                     items.get("items")
@@ -170,9 +175,7 @@ class ComposioClient:
         else:
             items = ()
         return tuple(
-            _tool_from_payload(item)
-            for item in items
-            if isinstance(item, dict)
+            _tool_from_payload(item) for item in items if isinstance(item, dict)
         )
 
     def list_auth_configs(
@@ -391,7 +394,9 @@ def _toolkit_from_payload(payload: dict[str, Any]) -> ComposioToolkit:
         description=str(meta.get("description") or payload.get("description") or ""),
         categories=_category_names(meta.get("categories")),
         auth_schemes=_auth_schemes_from_payload(payload),
-        managed_auth_schemes=_string_tuple(payload.get("composio_managed_auth_schemes")),
+        managed_auth_schemes=_string_tuple(
+            payload.get("composio_managed_auth_schemes")
+        ),
         tools_count=_optional_int(meta.get("tools_count")) or 0,
         triggers_count=_optional_int(meta.get("triggers_count")) or 0,
         logo_url=_optional_str(meta.get("logo")),
@@ -448,7 +453,9 @@ def _auth_config_from_payload(payload: dict[str, Any]) -> ComposioAuthConfig:
         id=config_id,
         name=str(payload.get("name") or config_id),
         toolkit_slug=toolkit_slug or "",
-        auth_scheme=_optional_str(payload.get("auth_scheme") or payload.get("authScheme")),
+        auth_scheme=_optional_str(
+            payload.get("auth_scheme") or payload.get("authScheme")
+        ),
         is_composio_managed=bool(
             payload.get("is_composio_managed")
             if "is_composio_managed" in payload

@@ -4,10 +4,10 @@
 
 {% block content %}
   <section class="page-heading">
-    <div>
-      <h1>Overview</h1>
-      <p>Operator snapshot for Kortny activity, health, and cost drivers.</p>
-    </div>
+	    <div>
+	      <h1>Overview</h1>
+	      <p>Operator snapshot for exceptions, health, and cost drivers. Refreshed {{ overview.refreshed_at|datetime }}.</p>
+	    </div>
     <div class="heading-actions">
       <span class="status-chip badge-{{ overview.system_health.overall_tone }}">{{ overview.system_health.overall_label }}</span>
       <a class="btn-ghost" href="/system">System</a>
@@ -29,10 +29,10 @@
 
   <section class="overview-main-grid" aria-label="Overview panels">
     <article class="card attention-card">
-      <header>
-        <h2>Needs Review</h2>
-        <p>Setup checks and task states worth checking before they become noisy.</p>
-      </header>
+	      <header>
+	        <h2>Needs Review</h2>
+	        <p>Exception queue for setup gaps, stale work, waiting approvals, proposed memory, failures, and spend spikes.</p>
+	      </header>
       <div class="attention-list">
         {% for item in overview.attention_items %}
           <a class="attention-row attention-{{ item.tone }}" href="{{ item.href }}">
@@ -104,8 +104,9 @@
       </div>
       <a class="btn-ghost" href="/tasks">View all tasks</a>
     </header>
-    {% set task_items = overview.recent_tasks %}
-    {% set task_empty_message = "No tasks yet." %}
-    {% include "_task_table.html" with context %}
-  </section>
+      {% set task_items = overview.recent_tasks %}
+      {% set task_empty_message = "No tasks yet." %}
+      {% set tasks_base_path = "/tasks" %}
+      {% include "_task_list.html" with context %}
+		  </section>
 {% endblock %}

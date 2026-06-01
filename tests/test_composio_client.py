@@ -145,7 +145,7 @@ def test_composio_client_lists_tools_from_dynamic_catalog() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/api/v3.1/tools"
         assert request.url.params["toolkit_slug"] == "firecrawl"
-        assert request.url.params["search"] == "recent AI tooling"
+        assert request.url.params["query"] == "recent AI tooling"
         assert request.url.params["limit"] == "8"
         return httpx.Response(
             200,

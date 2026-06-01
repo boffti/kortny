@@ -18,6 +18,7 @@ from kortny.composio import (
     ComposioAuthConfig,
     ComposioCatalog,
     ComposioConnectionRequest,
+    ComposioTool,
     ComposioToolkit,
 )
 from kortny.dashboard.app import create_app
@@ -619,9 +620,11 @@ def test_dashboard_composio_page_sorts_connected_toolkits_first(
             *,
             search: str | None = None,
             limit: int = 60,
+            cursor: str | None = None,
         ) -> ComposioCatalog:
             assert search is None
             assert limit == 60
+            assert cursor is None
             return ComposioCatalog(
                 items=(
                     _composio_toolkit(slug="github", name="GitHub"),
@@ -637,7 +640,121 @@ def test_dashboard_composio_page_sorts_connected_toolkits_first(
     response = test_client.get("/composio")
 
     assert response.status_code == 200
-    assert response.text.index("<h3>Notion</h3>") < response.text.index("<h3>GitHub</h3>")
+    assert response.text.index("<h3>Notion</h3>") < response.text.index(
+        "<h3>GitHub</h3>"
+    )
+
+
+def test_dashboard_composio_page_pins_connected_toolkits_missing_from_page(
+    client: tuple[TestClient, Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    test_client, session = client
+    task = create_dashboard_task(session)
+    session.add(
+        ComposioConnection(
+            installation_id=task.installation_id,
+            toolkit_slug="alpha_vantage",
+            auth_config_id="ac_alpha",
+            connection_request_id="ln_alpha",
+            connected_account_id="ca_alpha",
+            composio_user_id=f"slack:{task.installation_id}:UCost",
+            owner_slack_user_id="UCost",
+            visibility_scope_type="user",
+            visibility_scope_id="UCost",
+            status="active",
+            display_name="Alpha Vantage connection",
+            metadata_json={},
+        )
+    )
+    session.commit()
+    set_runtime_settings_env(monkeypatch)
+    monkeypatch.setenv("COMPOSIO_API_KEY", "composio-dashboard-secret")
+    monkeypatch.setenv("COMPOSIO_CATALOG_ENABLED", "true")
+
+    class FakeComposioClient:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def list_toolkits(
+            self,
+            *,
+            search: str | None = None,
+            limit: int = 60,
+            cursor: str | None = None,
+        ) -> ComposioCatalog:
+            assert search is None
+            assert limit == 60
+            assert cursor is None
+            return ComposioCatalog(
+                items=(_composio_toolkit(slug="github", name="GitHub"),),
+                total_items=1043,
+                next_cursor="cursor_2",
+            )
+
+        def get_toolkit(self, slug: str) -> ComposioToolkit:
+            assert slug == "alpha_vantage"
+            return _composio_toolkit(slug="alpha_vantage", name="Alpha Vantage")
+
+    monkeypatch.setattr("kortny.dashboard.data.ComposioClient", FakeComposioClient)
+    login(test_client)
+
+    response = test_client.get("/composio")
+
+    assert response.status_code == 200
+    assert response.text.index("<h3>Alpha Vantage</h3>") < response.text.index(
+        "<h3>GitHub</h3>"
+    )
+    assert "Connected Apps" in response.text
+    assert "Includes 1 connected app" in response.text
+
+
+def test_dashboard_composio_page_exposes_cursor_pagination(
+    client: tuple[TestClient, Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    test_client, _session = client
+    set_runtime_settings_env(monkeypatch)
+    monkeypatch.setenv("COMPOSIO_API_KEY", "composio-dashboard-secret")
+    monkeypatch.setenv("COMPOSIO_CATALOG_ENABLED", "true")
+
+    class FakeComposioClient:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def list_toolkits(
+            self,
+            *,
+            search: str | None = None,
+            limit: int = 60,
+            cursor: str | None = None,
+        ) -> ComposioCatalog:
+            assert search == "git"
+            assert limit == 24
+            assert cursor == "cursor_1"
+            return ComposioCatalog(
+                items=(
+                    _composio_toolkit(
+                        slug="github",
+                        name="GitHub",
+                        logo_url="https://assets.composio.dev/logos/github.png",
+                    ),
+                ),
+                total_items=120,
+                next_cursor="cursor_2",
+            )
+
+    monkeypatch.setattr("kortny.dashboard.data.ComposioClient", FakeComposioClient)
+    login(test_client)
+
+    response = test_client.get("/composio?q=git&page_size=24&cursor=cursor_1")
+
+    assert response.status_code == 200
+    assert "Load next page" in response.text
+    assert "cursor_2" in response.text
+    assert "Back to first page" in response.text
+    assert "page_size=24" in response.text
+    assert 'src="https://assets.composio.dev/logos/github.png"' in response.text
 
 
 def test_dashboard_composio_detail_renders_scope_preview(
@@ -658,9 +775,78 @@ def test_dashboard_composio_detail_renders_scope_preview(
     assert "Channel" in response.text
     assert "Workspace" in response.text
     assert "Connect Account" in response.text
-    assert "Hosted Composio authorization" in response.text
+    assert "Start connection" in response.text
     assert "Connect github" in response.text
     assert "composio-dashboard-secret" not in response.text
+
+
+def test_dashboard_composio_detail_lists_tool_capabilities(
+    client: tuple[TestClient, Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    test_client, _session = client
+    set_runtime_settings_env(monkeypatch)
+    monkeypatch.setenv("COMPOSIO_API_KEY", "composio-dashboard-secret")
+    monkeypatch.setenv("COMPOSIO_CATALOG_ENABLED", "true")
+
+    class FakeComposioClient:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def get_toolkit(self, slug: str) -> ComposioToolkit:
+            assert slug == "github"
+            return _composio_toolkit(
+                slug="github",
+                name="GitHub",
+                logo_url="https://assets.composio.dev/logos/github.png",
+            )
+
+        def list_auth_configs(
+            self,
+            *,
+            toolkit_slug: str,
+            limit: int = 20,
+        ) -> tuple[ComposioAuthConfig, ...]:
+            assert toolkit_slug == "github"
+            assert limit == 20
+            return ()
+
+        def list_tools(
+            self,
+            *,
+            toolkit_slug: str | None = None,
+            tool_slugs: tuple[str, ...] = (),
+            query: str | None = None,
+            limit: int = 20,
+        ) -> tuple[ComposioTool, ...]:
+            assert toolkit_slug == "github"
+            assert tool_slugs == ()
+            assert query is None
+            assert limit == 12
+            return (
+                ComposioTool(
+                    slug="GITHUB_SEARCH_REPOSITORIES",
+                    name="Search repositories",
+                    description="Find repositories by keyword.",
+                    toolkit_slug="github",
+                    input_parameters={},
+                    tags=("read", "repository"),
+                    version="latest",
+                ),
+            )
+
+    monkeypatch.setattr("kortny.dashboard.data.ComposioClient", FakeComposioClient)
+    login(test_client)
+
+    response = test_client.get("/composio/github")
+
+    assert response.status_code == 200
+    assert "Capabilities" in response.text
+    assert "Search repositories" in response.text
+    assert "Find repositories by keyword." in response.text
+    assert 'src="https://assets.composio.dev/logos/github.png"' in response.text
+    assert "Setup State" not in response.text
+    assert "Waiting on scope gate" not in response.text
 
 
 def test_dashboard_composio_detail_shows_disconnect_for_active_connection(
@@ -692,7 +878,7 @@ def test_dashboard_composio_detail_shows_disconnect_for_active_connection(
     response = test_client.get("/composio/notion")
 
     assert response.status_code == 200
-    assert "notion is connected" in response.text
+    assert "Connected Account" in response.text
     assert "Notion personal" in response.text
     assert f'action="/composio/connections/{connection.id}/scope"' in response.text
     assert "Visibility Scope" in response.text
@@ -704,6 +890,7 @@ def test_dashboard_composio_detail_shows_disconnect_for_active_connection(
     assert "Save Visibility" not in response.text
     assert f'action="/composio/connections/{connection.id}/disconnect"' in response.text
     assert "Connect notion" not in response.text
+    assert "Scoped Connections" not in response.text
 
 
 def test_dashboard_composio_scope_update_changes_visibility(
@@ -1038,7 +1225,9 @@ def test_dashboard_member_composio_connect_uses_logged_in_user_scope(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     assert TEST_POSTGRES_URL is not None
-    installation = Installation(slack_team_id="TComposioMember", team_name="Member Team")
+    installation = Installation(
+        slack_team_id="TComposioMember", team_name="Member Team"
+    )
     db_session.add(installation)
     db_session.flush()
     db_session.add(
@@ -1192,9 +1381,7 @@ def test_dashboard_member_composio_connect_uses_logged_in_user_scope(
     assert response.status_code == 303
     assert response.headers["location"] == "https://connect.composio.dev/link/ln_member"
     connection = db_session.scalar(
-        select(ComposioConnection).where(
-            ComposioConnection.toolkit_slug == "notion"
-        )
+        select(ComposioConnection).where(ComposioConnection.toolkit_slug == "notion")
     )
     assert connection is not None
     assert connection.installation_id == installation.id
@@ -1215,7 +1402,9 @@ def test_dashboard_member_composio_callback_returns_to_me_scope(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     assert TEST_POSTGRES_URL is not None
-    installation = Installation(slack_team_id="TComposioCallback", team_name="Member Team")
+    installation = Installation(
+        slack_team_id="TComposioCallback", team_name="Member Team"
+    )
     db_session.add(installation)
     db_session.flush()
     db_session.add(
@@ -1818,6 +2007,7 @@ def _composio_toolkit(
     name: str,
     auth_schemes: tuple[str, ...] = ("oauth2",),
     managed_auth_schemes: tuple[str, ...] = ("oauth2",),
+    logo_url: str | None = None,
 ) -> ComposioToolkit:
     return ComposioToolkit(
         slug=slug,
@@ -1828,7 +2018,7 @@ def _composio_toolkit(
         managed_auth_schemes=managed_auth_schemes,
         tools_count=4,
         triggers_count=1,
-        logo_url=None,
+        logo_url=logo_url,
         app_url=None,
         auth_guide_url=None,
         base_url=None,

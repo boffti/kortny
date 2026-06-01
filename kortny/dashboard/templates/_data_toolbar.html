@@ -1,0 +1,34 @@
+<section class="data-toolbar" aria-label="{{ toolbar.label }}">
+  <div class="data-toolbar-meta">
+    <strong>{{ toolbar.title }}</strong>
+    {% if toolbar.count %}<span>{{ toolbar.count }}</span>{% endif %}
+  </div>
+  {% if toolbar.fields %}
+    <form class="filters data-toolbar-form" method="get" action="{{ toolbar.action }}">
+      {% for field in toolbar.fields %}
+        <label>
+          {{ field.label }}
+          {% if field.type == "select" %}
+            <select class="input" name="{{ field.name }}">
+              {% for option in field.options %}
+                <option value="{{ option.value }}" {{ "selected" if option.value == field.value else "" }}>{{ option.label }}</option>
+              {% endfor %}
+            </select>
+          {% else %}
+            <input
+              class="input"
+              type="{{ field.type }}"
+              name="{{ field.name }}"
+              value="{{ field.value }}"
+              {% if field.placeholder %}placeholder="{{ field.placeholder }}"{% endif %}
+            >
+          {% endif %}
+        </label>
+      {% endfor %}
+      <button class="btn" type="submit">{{ toolbar.submit_label|default("Apply") }}</button>
+      {% if toolbar.reset_url %}
+        <a class="btn-ghost" href="{{ toolbar.reset_url }}">Reset</a>
+      {% endif %}
+    </form>
+  {% endif %}
+</section>

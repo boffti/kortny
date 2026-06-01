@@ -14,15 +14,19 @@
     <div class="notice notice-{{ notice_tone }}" role="status">{{ notice }}</div>
   {% endif %}
 
-  <section class="card detail-section">
+  {% set toolbar = access_toolbar %}
+  {% include "_data_toolbar.html" with context %}
+
+	  <section class="card detail-section">
     <header>
       <h2>Dashboard Users</h2>
       <p>Admins can view workspace-wide data. Members can only view their own data and manage their own integrations.</p>
     </header>
 
-    <div class="table-wrap">
-      <table class="table access-table">
-        <thead>
+	    <div class="table-wrap">
+	      <table class="table access-table">
+	        <caption>Dashboard users, roles, status, and access controls.</caption>
+	        <thead>
           <tr>
             <th>User</th>
             <th>Slack ID</th>
@@ -47,22 +51,25 @@
               <td>{{ user.last_login_at|datetime }}</td>
               <td>
                 <div class="access-controls">
-                  <form method="post" action="/admin/users/{{ user.id }}/role">
-                    <select class="input compact-input" name="role" aria-label="Role for {{ user.display_name }}">
-                      <option value="admin" {{ "selected" if user.role == "admin" else "" }}>Admin</option>
-                      <option value="member" {{ "selected" if user.role == "member" else "" }}>Member</option>
-                    </select>
-                    <button class="btn-ghost" type="submit">Update Role</button>
-                  </form>
-                  <form method="post" action="/admin/users/{{ user.id }}/status">
-                    <select class="input compact-input" name="status" aria-label="Status for {{ user.display_name }}">
-                      <option value="active" {{ "selected" if user.status == "active" else "" }}>Active</option>
-                      <option value="disabled" {{ "selected" if user.status == "disabled" else "" }}>Disabled</option>
-                    </select>
-                    <button class="btn-ghost" type="submit">Update Status</button>
-                  </form>
-                </div>
-              </td>
+	                  <form method="post" action="/admin/users/{{ user.id }}/role" onsubmit="return confirm('Update the dashboard role for {{ user.display_name }}?')">
+	                    <select class="input compact-input" name="role" aria-label="Role for {{ user.display_name }}">
+	                      <option value="admin" {{ "selected" if user.role == "admin" else "" }}>Admin</option>
+	                      <option value="member" {{ "selected" if user.role == "member" else "" }}>Member</option>
+	                    </select>
+	                    <button class="btn-ghost" type="submit">Update Role</button>
+	                  </form>
+	                  <form method="post" action="/admin/users/{{ user.id }}/status" onsubmit="return confirm('Update dashboard access status for {{ user.display_name }}?')">
+	                    <select class="input compact-input" name="status" aria-label="Status for {{ user.display_name }}">
+	                      <option value="active" {{ "selected" if user.status == "active" else "" }}>Active</option>
+	                      <option value="disabled" {{ "selected" if user.status == "disabled" else "" }}>Disabled</option>
+	                    </select>
+	                    <button class="btn-ghost" type="submit" {{ "disabled" if user.id == dashboard_user_id else "" }}>Update Status</button>
+	                  </form>
+	                  {% if user.id == dashboard_user_id %}
+	                    <span class="identity-id">Current session user cannot be disabled here.</span>
+	                  {% endif %}
+	                </div>
+	              </td>
             </tr>
           {% else %}
             <tr>

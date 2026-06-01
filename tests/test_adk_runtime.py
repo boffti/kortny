@@ -49,6 +49,21 @@ def test_adk_model_mapping_preserves_direct_provider_models(
     assert adk_litellm_model_name(settings) == "openai/gpt-test"
 
 
+def test_adk_model_mapping_uses_routed_model_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    set_required_settings_env(monkeypatch)
+    monkeypatch.setenv("LLM_PROVIDER", "openrouter")
+    monkeypatch.setenv("LLM_MODEL", "anthropic/sonnet-default")
+
+    settings = load_settings(env_file=None)
+
+    assert (
+        adk_litellm_model_name(settings, model="deepseek/deepseek-v4-flash")
+        == "openrouter/deepseek/deepseek-v4-flash"
+    )
+
+
 def test_adk_runtime_builds_root_agent_in_chat_mode(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -63,7 +78,15 @@ def test_adk_runtime_builds_root_agent_in_chat_mode(
 
     agent = runtime._build_agent()
 
+    assert agent.name == "kortny_root_orchestrator"
     assert agent.mode == "chat"
+    assert [getattr(tool, "name", None) for tool in agent.tools] == [
+        "intent_triage_agent",
+        "quick_response_agent",
+        "clarification_agent",
+        "eval_agent",
+        "humanizer_agent",
+    ]
 
 
 def test_adk_runtime_default_prompt_is_text_only_and_not_tool_claiming(
@@ -101,11 +124,12 @@ def test_adk_runtime_prompt_switches_when_tools_are_available(
 
     instruction = runtime._instruction()
 
-    assert "ADK tool-enabled migration" in instruction
+    assert "ADK agentic orchestration" in instruction
+    assert "tool_worker_agent" in instruction
     assert "no tools are connected yet" not in instruction
 
 
-def test_adk_runtime_builds_agent_with_registry_tools(
+def test_adk_runtime_builds_orchestrator_with_registry_worker(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     set_required_settings_env(monkeypatch)
@@ -127,7 +151,62 @@ def test_adk_runtime_builds_agent_with_registry_tools(
 
     agent = runtime._build_agent(task=task)
 
-    assert [getattr(tool, "name", None) for tool in agent.tools] == ["echo_tool"]
+    assert [getattr(tool, "name", None) for tool in agent.tools] == [
+        "intent_triage_agent",
+        "quick_response_agent",
+        "clarification_agent",
+        "tool_worker_agent",
+        "eval_agent",
+        "humanizer_agent",
+    ]
+    worker_tool = next(
+        tool
+        for tool in agent.tools
+        if getattr(tool, "name", None) == "tool_worker_agent"
+    )
+    worker_agent = worker_tool.agent
+    assert [getattr(tool, "name", None) for tool in worker_agent.tools] == ["echo_tool"]
+
+
+def test_adk_runtime_registry_factory_is_lazy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    set_required_settings_env(monkeypatch)
+    settings = load_settings(env_file=None)
+    task = Task(
+        id=uuid.UUID("3c53f4e1-9d72-468d-ab18-5021d9e15dad"),
+        installation_id=uuid.UUID("1c53f4e1-9d72-468d-ab18-5021d9e15dad"),
+        slack_channel_id="C123",
+        slack_thread_ts="123.456",
+        slack_user_id="U123",
+        input="are you up?",
+    )
+    factory_called = False
+
+    def registry_factory() -> ToolRegistry:
+        nonlocal factory_called
+        factory_called = True
+        return ToolRegistry([_EchoTool()])
+
+    runtime = AdkAgentRuntime(
+        settings=settings,
+        session=cast(Any, None),
+        task_service=cast(Any, None),
+        registry_factory=registry_factory,
+    )
+
+    agent = runtime._build_agent(task=task)
+
+    assert not factory_called
+    worker_tool = next(
+        tool
+        for tool in agent.tools
+        if getattr(tool, "name", None) == "tool_worker_agent"
+    )
+    worker_agent = worker_tool.agent
+    assert [type(tool).__name__ for tool in worker_agent.tools] == [
+        "KortnyRegistryToolset"
+    ]
 
 
 class _EchoTool:

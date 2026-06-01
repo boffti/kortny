@@ -6,6 +6,7 @@ import asyncio
 import logging
 import os
 import uuid
+from collections.abc import Callable
 from contextlib import contextmanager
 from typing import Any
 
@@ -13,10 +14,11 @@ from google.adk.agents import Agent
 from google.adk.models.lite_llm import LiteLlm
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
+from google.adk.tools import AgentTool
 from google.genai import types as genai_types
 from sqlalchemy.orm import Session
 
-from kortny.agent.adk_tools import adk_tools_from_registry
+from kortny.agent.adk_tools import KortnyRegistryToolset, adk_tools_from_registry
 from kortny.agent.context import ContextAssembler, ContextPackage
 from kortny.agent.coordinator import AgentLoopError, AgentRunResult
 from kortny.agent.thread_context import ThreadTranscriptProvider
@@ -31,6 +33,7 @@ from kortny.tools import ToolRegistry
 ADK_APP_NAME = "kortny"
 ADK_TEXT_ONLY_RUNTIME_MODE = "text_only"
 ADK_TOOL_RUNTIME_MODE = "tool_enabled"
+ADK_ORCHESTRATED_RUNTIME_MODE = "orchestrated"
 ADK_TEXT_ONLY_SYSTEM_PROMPT = """You are Kortny, a Slack-native AI coworker answering inside Slack.
 
 Current runtime mode: ADK text-only migration.
@@ -54,18 +57,41 @@ Behavior:
 - Format for Slack mrkdwn. Keep responses concise unless the user asks for
   detail.
 """
-ADK_TOOL_SYSTEM_PROMPT = """You are Kortny, a Slack-native AI coworker answering inside Slack.
+ADK_ROOT_ORCHESTRATOR_PROMPT = """You are Kortny's ADK root orchestrator for a Slack-native AI coworker.
 
-Current runtime mode: ADK tool-enabled migration.
+Current runtime mode: ADK agentic orchestration.
 
-You have access only to the selected tools ADK exposes for this run. Those tools
-have already been scoped by Kortny for this Slack user, channel, workspace,
-tenant, connected integrations, and approval policy.
+Your job is to pick the smallest useful specialist path, not to do every step.
+Never mention internal agent names, routes, or orchestration details to the user.
 
-Behavior:
-- Answer naturally and directly. Do not introduce yourself unless the user asks
-  who you are.
-- Use Slack mrkdwn. Keep responses concise unless the user asks for detail.
+Available specialists:
+- intent_triage_agent: classify unclear or nontrivial requests before choosing a path.
+- quick_response_agent: greetings, availability checks, capability questions, short explanations, lightweight writing, and other requests that do not need tools.
+- clarification_agent: missing inputs, ambiguous references, or requests where a safe answer requires a short follow-up question.
+- tool_worker_agent: Slack history, files, memory reads/writes, web/current data, document generation, integrations, or multi-step work.
+- eval_agent: review risky, high-stakes, destructive/write, or uncertain outputs before finalizing.
+- humanizer_agent: polish a completed answer for Slack while preserving facts.
+
+Routing rules:
+- For simple conversational requests, use quick_response_agent. Do not call the tool worker.
+- For requests needing channel context, files, memory, live data, artifacts, or connected integrations, use tool_worker_agent.
+- For ambiguous requests, use clarification_agent instead of guessing.
+- For risky or high-stakes answers, call eval_agent after the work is drafted.
+- Use humanizer_agent only when the specialist output is awkward, too long, or not Slack-native enough.
+- If a tool approval, authentication, or visibility boundary blocks the task, state the blocker plainly. Do not bypass it.
+
+Final response rules:
+- Answer naturally and directly in Slack mrkdwn.
+- Do not introduce yourself unless the user asks who you are.
+- Do not claim a source was checked unless a specialist actually used it or it appears in the provided context.
+- Keep the response concise unless the user asked for detail.
+"""
+ADK_TOOL_WORKER_PROMPT = """You are Kortny's tool worker specialist.
+
+Use the selected tools only when they are needed. The tools have already been
+scoped by Kortny for this Slack user, channel, workspace, tenant, connected
+integrations, and approval policy.
+
 - Use tools when the answer depends on Slack history, files, memory,
   integrations, live data, or generated artifacts.
 - Do not claim you checked a source unless you actually used the matching tool
@@ -76,6 +102,37 @@ Behavior:
   arguments. If the fix is not obvious, explain the blocker without exposing
   raw stack traces.
 - Never bypass Kortny's approval, visibility, or tenant-isolation boundaries.
+- Format the final answer for Slack mrkdwn. Keep it direct and useful.
+"""
+ADK_QUICK_RESPONSE_PROMPT = """You are Kortny's quick response specialist.
+
+Handle lightweight Slack replies that do not require tools. Be natural,
+concise, and useful. Do not introduce yourself unless asked. Do not claim to
+check Slack history, memory, files, integrations, web, or documents.
+"""
+ADK_CLARIFICATION_PROMPT = """You are Kortny's clarification specialist.
+
+Ask the minimum useful follow-up question when the request is ambiguous, missing
+required inputs, or references context that is not available. Keep it short and
+Slack-native.
+"""
+ADK_INTENT_TRIAGE_PROMPT = """You are Kortny's intent triage specialist.
+
+Classify the request and recommend one route: quick_response, clarification,
+tool_worker, or risky_review. Explain the route in one short sentence for the
+root orchestrator. Do not answer the user directly.
+"""
+ADK_EVAL_PROMPT = """You are Kortny's self-review specialist.
+
+Review a drafted answer for factual support, tool/source claims, safety,
+overreach, missing caveats, and Slack suitability. Return either PASS with one
+short reason or FIX with concrete changes. Do not add new facts.
+"""
+ADK_HUMANIZER_PROMPT = """You are Kortny's Slack response synthesis specialist.
+
+Rewrite the provided draft so it sounds like a capable human coworker in Slack.
+Preserve facts, caveats, numbers, tool/source provenance, and user-facing
+commitments. Do not add new claims. Keep it concise unless detail was requested.
 """
 logger = logging.getLogger(__name__)
 
@@ -90,6 +147,8 @@ class AdkAgentRuntime:
         session: Session,
         task_service: TaskService,
         registry: ToolRegistry | None = None,
+        registry_factory: Callable[[], ToolRegistry] | None = None,
+        model: str | None = None,
         system_prompt: str | None = None,
         thread_transcript_provider: ThreadTranscriptProvider | None = None,
         context_assembler: ContextAssembler | None = None,
@@ -100,6 +159,8 @@ class AdkAgentRuntime:
         self.session = session
         self.task_service = task_service
         self.registry = registry
+        self.registry_factory = registry_factory
+        self.model = model
         self.system_prompt = system_prompt
         self.thread_transcript_provider = thread_transcript_provider
         self.context_assembler = context_assembler
@@ -184,6 +245,7 @@ class AdkAgentRuntime:
                 "slack_user_id": task.slack_user_id,
                 "runtime": "adk",
                 "runtime_mode": self._runtime_mode(),
+                "toolset_lazy": self.registry_factory is not None,
                 "tool_names": list(self._tool_names()),
                 "selected_fact_ids": [
                     str(fact.fact_id) for fact in context_package.selected_facts
@@ -234,35 +296,139 @@ class AdkAgentRuntime:
         task: Task | None = None,
         context_package: ContextPackage | None = None,
     ) -> Agent:
-        tools: list[Any] = []
-        if self.registry is not None and task is not None:
-            tools = adk_tools_from_registry(
-                self.registry,
-                task=task,
-                session=self.session,
-                task_service=self.task_service,
-                approval_policy=self.approval_policy,
-                tool_result_prompt_max_chars=self.tool_result_prompt_max_chars,
-            )
+        specialist_agents = self._build_specialist_agents(
+            task=task,
+            context_package=context_package,
+        )
         return Agent(
-            name="kortny_adk_runtime",
+            name="kortny_root_orchestrator",
             model=LiteLlm(model=self._adk_model_name()),
             instruction=self._instruction(context_package=context_package),
-            description="Kortny runtime used during the ADK migration.",
-            tools=tools,
+            description="Routes Slack requests to Kortny specialist agents.",
+            tools=[AgentTool(agent=agent) for agent in specialist_agents],
             mode="chat",
         )
 
     def _instruction(self, *, context_package: ContextPackage | None = None) -> str:
-        prompt = self.system_prompt or (
-            ADK_TOOL_SYSTEM_PROMPT
-            if self._tool_names()
-            else ADK_TEXT_ONLY_SYSTEM_PROMPT
-        )
+        if self.system_prompt is not None:
+            prompt = self.system_prompt
+        elif self._runtime_mode() == ADK_TEXT_ONLY_RUNTIME_MODE:
+            prompt = ADK_TEXT_ONLY_SYSTEM_PROMPT
+        else:
+            prompt = ADK_ROOT_ORCHESTRATOR_PROMPT
         context = _render_context_for_instruction(context_package)
         if not context:
             return prompt
         return f"{prompt}\n\n{context}"
+
+    def _build_specialist_agents(
+        self,
+        *,
+        task: Task | None,
+        context_package: ContextPackage | None,
+    ) -> tuple[Agent, ...]:
+        context = _render_context_for_instruction(context_package)
+        agents = [
+            self._specialist_agent(
+                name="intent_triage_agent",
+                description="Classifies nontrivial Slack requests and recommends a route.",
+                prompt=ADK_INTENT_TRIAGE_PROMPT,
+                context=context,
+            ),
+            self._specialist_agent(
+                name="quick_response_agent",
+                description="Handles lightweight replies that do not require tools.",
+                prompt=ADK_QUICK_RESPONSE_PROMPT,
+                context=context,
+            ),
+            self._specialist_agent(
+                name="clarification_agent",
+                description="Asks a concise follow-up question when required context is missing.",
+                prompt=ADK_CLARIFICATION_PROMPT,
+                context=context,
+            ),
+        ]
+        if task is not None and (
+            self.registry_factory is not None or self.registry is not None
+        ):
+            agents.append(self._worker_agent(task=task, context=context))
+        agents.extend(
+            [
+                self._specialist_agent(
+                    name="eval_agent",
+                    description=(
+                        "Reviews risky, high-stakes, destructive, or uncertain drafts."
+                    ),
+                    prompt=ADK_EVAL_PROMPT,
+                    context=context,
+                ),
+                self._specialist_agent(
+                    name="humanizer_agent",
+                    description=(
+                        "Polishes a completed draft into concise Slack-native prose."
+                    ),
+                    prompt=ADK_HUMANIZER_PROMPT,
+                    context=context,
+                ),
+            ]
+        )
+        return tuple(agents)
+
+    def _specialist_agent(
+        self,
+        *,
+        name: str,
+        description: str,
+        prompt: str,
+        context: str | None,
+    ) -> Agent:
+        return Agent(
+            name=name,
+            model=LiteLlm(model=self._adk_model_name()),
+            instruction=_instruction_with_optional_context(prompt, context),
+            description=description,
+            mode="chat",
+        )
+
+    def _worker_agent(self, *, task: Task | None, context: str | None) -> Agent:
+        tools: list[Any] = []
+        if task is not None:
+            if self.registry_factory is not None:
+                tools = [
+                    KortnyRegistryToolset(
+                        registry_factory=self.registry_factory,
+                        task=task,
+                        session=self.session,
+                        task_service=self.task_service,
+                        approval_policy=self.approval_policy,
+                        tool_result_prompt_max_chars=(
+                            self.tool_result_prompt_max_chars
+                        ),
+                    )
+                ]
+            elif self.registry is not None:
+                tools = adk_tools_from_registry(
+                    self.registry,
+                    task=task,
+                    session=self.session,
+                    task_service=self.task_service,
+                    approval_policy=self.approval_policy,
+                    tool_result_prompt_max_chars=self.tool_result_prompt_max_chars,
+                )
+        return Agent(
+            name="tool_worker_agent",
+            model=LiteLlm(model=self._adk_model_name()),
+            instruction=_instruction_with_optional_context(
+                ADK_TOOL_WORKER_PROMPT,
+                context,
+            ),
+            description=(
+                "Uses scoped Kortny tools for Slack context, memory, files, "
+                "web/current data, documents, integrations, and multi-step work."
+            ),
+            tools=tools,
+            mode="chat",
+        )
 
     def _assemble_context(self, task: Task) -> ContextPackage:
         assembler = self.context_assembler or ContextAssembler(
@@ -276,11 +442,11 @@ class AdkAgentRuntime:
         return assembler.build_for_task(task)
 
     def _adk_model_name(self) -> str:
-        return adk_litellm_model_name(self.settings)
+        return adk_litellm_model_name(self.settings, model=self.model)
 
     def _runtime_mode(self) -> str:
-        if self._tool_names():
-            return ADK_TOOL_RUNTIME_MODE
+        if self.registry_factory is not None or self.registry is not None:
+            return ADK_ORCHESTRATED_RUNTIME_MODE
         return ADK_TEXT_ONLY_RUNTIME_MODE
 
     def _tool_names(self) -> tuple[str, ...]:
@@ -310,10 +476,10 @@ class AdkAgentRuntime:
         self.task_service.append_event(task, TaskEventType.log, payload)
 
 
-def adk_litellm_model_name(settings: Settings) -> str:
+def adk_litellm_model_name(settings: Settings, *, model: str | None = None) -> str:
     """Return the LiteLLM model string ADK should use for current settings."""
 
-    model = settings.llm_model.strip()
+    model = (model or settings.llm_model).strip()
     if settings.llm_provider is LLMProvider.openrouter:
         if model.startswith("openrouter/"):
             return model
@@ -356,6 +522,12 @@ def _event_text(event: Any) -> str:
         if isinstance(text, str) and text:
             texts.append(text)
     return "\n".join(texts)
+
+
+def _instruction_with_optional_context(prompt: str, context: str | None) -> str:
+    if not context:
+        return prompt
+    return f"{prompt}\n\n{context}"
 
 
 def _render_context_for_instruction(package: ContextPackage | None) -> str | None:

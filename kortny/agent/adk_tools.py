@@ -5,9 +5,11 @@ from __future__ import annotations
 import logging
 import time
 import uuid
+from collections.abc import Callable
 from typing import Any
 
 from google.adk.tools.base_tool import BaseTool
+from google.adk.tools.base_toolset import BaseToolset
 from google.adk.tools.tool_context import ToolContext
 from google.genai import types as genai_types
 from sqlalchemy import select
@@ -294,6 +296,62 @@ class KortnyAdkTool(BaseTool):
             .limit(1)
         )
         return event is not None and event.payload.get("decision") == "approved"
+
+
+class KortnyRegistryToolset(BaseToolset):
+    """Lazy ADK toolset backed by Kortny's scoped tool registry."""
+
+    def __init__(
+        self,
+        *,
+        registry_factory: Callable[[], ToolRegistry],
+        task: Task,
+        session: Session,
+        task_service: TaskService,
+        approval_policy: ToolApprovalPolicy | None = None,
+        tool_result_prompt_max_chars: int = 8000,
+    ) -> None:
+        super().__init__()
+        self.registry_factory = registry_factory
+        self.task = task
+        self.session = session
+        self.task_service = task_service
+        self.approval_policy = approval_policy
+        self.tool_result_prompt_max_chars = tool_result_prompt_max_chars
+        self._registry: ToolRegistry | None = None
+
+    async def get_tools(self, readonly_context: Any | None = None) -> list[BaseTool]:
+        del readonly_context
+        registry = self._registry
+        if registry is None:
+            registry = self.registry_factory()
+            self._registry = registry
+            self.task_service.append_event(
+                self.task,
+                TaskEventType.log,
+                {
+                    "message": "adk_lazy_toolset_loaded",
+                    "runtime": "adk",
+                    "tool_count": len(registry.names()),
+                    "tool_names": list(registry.names()),
+                },
+            )
+            log_observation(
+                logger,
+                "adk_lazy_toolset_loaded",
+                task=self.task,
+                tool_count=len(registry.names()),
+                tool_names=list(registry.names()),
+            )
+
+        return adk_tools_from_registry(
+            registry,
+            task=self.task,
+            session=self.session,
+            task_service=self.task_service,
+            approval_policy=self.approval_policy,
+            tool_result_prompt_max_chars=self.tool_result_prompt_max_chars,
+        )
 
 
 def adk_tools_from_registry(

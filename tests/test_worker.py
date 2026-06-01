@@ -13,6 +13,7 @@ from alembic.config import Config
 from sqlalchemy import Engine, delete, select
 from sqlalchemy.orm import Session, sessionmaker
 
+from kortny.agent.coordinator import AgentRunResult
 from kortny.approvals import (
     TOOL_APPROVAL_PROMPT_PURPOSE,
     TOOL_APPROVAL_REQUIRED_MESSAGE,
@@ -617,6 +618,84 @@ def test_agent_executor_builds_routed_llm_from_task_input(
         event.payload.get("message") == "model_route_selected"
         and event.payload.get("tier") == "document"
         and event.payload.get("model") == "anthropic/document-model"
+        for event in events
+    )
+
+
+def test_agent_executor_passes_routed_model_to_adk_runtime(
+    db_session: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = create_task(db_session, event_id="EvAdkRouteCheap")
+    task.input = "are you up?"
+    task_service = TaskService(db_session)
+    task_service.append_event(
+        task,
+        TaskEventType.log,
+        {
+            "message": "intent_classification_completed",
+            "decision": {
+                "classification": "task_request",
+                "model_tier": "cheap",
+                "likely_tools": [],
+                "needs_channel_context": False,
+                "needs_thread_context": False,
+                "needs_file_context": False,
+            },
+        },
+    )
+    settings = Settings.model_validate(
+        {
+            "SLACK_BOT_TOKEN": "xoxb-test",
+            "SLACK_APP_TOKEN": "xapp-test",
+            "SLACK_SIGNING_SECRET": "signing-secret",
+            "LLM_PROVIDER": SettingsLLMProvider.openrouter,
+            "LLM_API_KEY": "openrouter-key",
+            "LLM_MODEL": "anthropic/sonnet-default",
+            "LLM_CHEAP_MODEL": "deepseek/deepseek-v4-flash",
+            "LLM_STANDARD_MODEL": "openai/gpt-5.4-mini",
+            "POSTGRES_URL": "postgresql://kortny:kortny@localhost/kortny",
+            "AGENT_RUNTIME": "adk",
+        }
+    )
+    captured: dict[str, Any] = {}
+
+    class FakeAdkRuntime:
+        def __init__(self, **kwargs: Any) -> None:
+            captured.update(kwargs)
+
+        def run(self, task_arg: Task) -> AgentRunResult:
+            return AgentRunResult(
+                task_id=task_arg.id,
+                result_summary="Yep, up.",
+                turns=1,
+                artifact_count=0,
+            )
+
+    monkeypatch.setattr(
+        "kortny.agent.adk_runtime.AdkAgentRuntime",
+        FakeAdkRuntime,
+    )
+
+    result = AgentTaskExecutor(settings=settings)._run_agent_runtime(
+        settings=settings,
+        session=db_session,
+        task=task,
+        task_service=task_service,
+        working_dir=tmp_path,
+    )
+
+    events = task_events(db_session, task)
+
+    assert result.result_summary == "Yep, up."
+    assert captured["model"] == "deepseek/deepseek-v4-flash"
+    assert captured["registry_factory"] is not None
+    assert any(
+        event.payload.get("message") == "model_route_selected"
+        and event.payload.get("runtime") == "adk"
+        and event.payload.get("tier") == "cheap_fast"
+        and event.payload.get("model") == "deepseek/deepseek-v4-flash"
         for event in events
     )
 

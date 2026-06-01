@@ -324,23 +324,50 @@ class AgentTaskExecutor:
         if settings.agent_runtime == "adk":
             from kortny.agent.adk_runtime import AdkAgentRuntime
 
-            registry = self._build_registry(
-                settings=settings,
-                session=session,
-                task=task,
-                task_service=task_service,
-                working_dir=working_dir,
+            model_route = ModelRouter(settings).route_for_task(
+                task,
+                events=_task_events(session, task),
+            )
+            task_service.append_event(
+                task,
+                TaskEventType.log,
+                {
+                    "message": "model_route_selected",
+                    "tier": model_route.tier.value,
+                    "model": model_route.model,
+                    "reason": model_route.reason,
+                    "runtime": "adk",
+                },
             )
             logger.info(
-                "agent executor registry ready task_id=%s runtime=adk tools=%s",
+                "agent executor model route selected task_id=%s runtime=adk tier=%s model=%s reason=%s",
                 task.id,
-                ",".join(registry.names()),
+                model_route.tier.value,
+                model_route.model,
+                model_route.reason,
             )
+
+            def registry_factory() -> ToolRegistry:
+                registry = self._build_registry(
+                    settings=settings,
+                    session=session,
+                    task=task,
+                    task_service=task_service,
+                    working_dir=working_dir,
+                )
+                logger.info(
+                    "agent executor registry ready task_id=%s runtime=adk_lazy tools=%s",
+                    task.id,
+                    ",".join(registry.names()),
+                )
+                return registry
+
             return AdkAgentRuntime(
                 settings=settings,
                 session=session,
                 task_service=task_service,
-                registry=registry,
+                registry_factory=registry_factory,
+                model=model_route.model,
                 thread_transcript_provider=self._build_thread_transcript_provider(
                     settings
                 ),

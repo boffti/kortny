@@ -194,6 +194,48 @@ def test_composio_execute_tool_uses_scoped_connection(
     }
 
 
+def test_composio_execute_tool_strips_blank_optional_arguments(
+    db_session: Session,
+) -> None:
+    task = create_task(
+        db_session, slack_channel_id="CResearch", slack_user_id="UAnalyst"
+    )
+    add_connection(
+        db_session,
+        task,
+        connected_account_id="ca_linear",
+        scope_type="user",
+        scope_id="UAnalyst",
+        toolkit_slug="linear",
+    )
+    db_session.commit()
+    client = FakeComposioClient()
+    tool = ComposioExecuteTool(
+        session=db_session,
+        task=task,
+        client=client,
+        tool=ComposioTool(
+            slug="LINEAR_LIST_LINEAR_PROJECTS",
+            name="List Linear projects",
+            description="List Linear projects.",
+            toolkit_slug="linear",
+            input_parameters={
+                "type": "object",
+                "properties": {
+                    "after": {"type": "string"},
+                    "first": {"type": "integer"},
+                },
+            },
+            tags=("readOnlyHint",),
+            version=None,
+        ),
+    )
+
+    tool.invoke({"after": "", "first": 250})
+
+    assert client.calls[0]["arguments"] == {"first": 250}
+
+
 def test_composio_execute_tool_reports_missing_required_args_as_recoverable(
     db_session: Session,
 ) -> None:
@@ -356,6 +398,99 @@ def test_worker_registry_uses_dynamic_composio_toolkit_catalog(
     assert tool.parameters["properties"]["query"]["type"] == "string"
     assert composio_client.list_tool_calls[0]["toolkit_slug"] == "notion"
     assert composio_client.list_tool_calls[0]["query"] == task.input
+
+
+def test_worker_registry_expands_linear_project_selection_to_issue_lookup(
+    db_session: Session,
+    tmp_path: Path,
+) -> None:
+    task = create_task(db_session, slack_channel_id="CRag", slack_user_id="UAnalyst")
+    task.input = "Give me a summary of my open tasks in Linear kortny project"
+    add_connection(
+        db_session,
+        task,
+        connected_account_id="ca_linear",
+        scope_type="user",
+        scope_id="UAnalyst",
+        toolkit_slug="linear",
+    )
+    db_session.commit()
+    settings = build_settings(composio_api_key="composio-key")
+    composio_client = FakeComposioClient(
+        tools_by_toolkit={
+            "linear": (
+                ComposioTool(
+                    slug="LINEAR_LIST_LINEAR_PROJECTS",
+                    name="List Linear projects",
+                    description="List Linear projects.",
+                    toolkit_slug="linear",
+                    input_parameters={
+                        "type": "object",
+                        "properties": {},
+                    },
+                    tags=("readOnlyHint",),
+                    version=None,
+                ),
+                ComposioTool(
+                    slug="LINEAR_LIST_LINEAR_ISSUES",
+                    name="List Linear issues",
+                    description="List Linear issues and tasks.",
+                    toolkit_slug="linear",
+                    input_parameters={
+                        "type": "object",
+                        "properties": {},
+                    },
+                    tags=("readOnlyHint",),
+                    version=None,
+                ),
+            )
+        }
+    )
+
+    registry = AgentTaskExecutor(
+        settings=settings,
+        web_search_tool=StaticWebSearchTool(),
+        composio_client=composio_client,
+        tool_selector=StaticToolSelector(
+            ToolSelectionResult(
+                selected_tools=(
+                    ToolSelection(
+                        registry_name="composio_linear_list_linear_projects",
+                        confidence=0.9,
+                        reason="Find the project first.",
+                    ),
+                ),
+                rejected_tools=(
+                    ToolSelection(
+                        registry_name="composio_linear_list_linear_issues",
+                        confidence=0.8,
+                        reason="Useful after project discovery.",
+                    ),
+                ),
+                route_reason="test_selection",
+            )
+        ),
+    )._build_registry(
+        settings=settings,
+        session=db_session,
+        task=task,
+        task_service=TaskService(db_session),
+        working_dir=tmp_path,
+    )
+
+    assert "composio_linear_list_linear_projects" in registry.names()
+    assert "composio_linear_list_linear_issues" in registry.names()
+    event = next(
+        event
+        for event in task_events(db_session, task)
+        if event.payload.get("message") == "tool_selection_completed"
+    )
+    selected_names = [item["registry_name"] for item in event.payload["selected_tools"]]
+    assert selected_names == [
+        "composio_linear_list_linear_projects",
+        "composio_linear_list_linear_issues",
+    ]
+    assert event.payload["route_reason"] == "test_selection+related_tool_expansion"
 
 
 def test_worker_registry_compacts_external_tool_candidates_before_selection(

@@ -71,6 +71,125 @@ class FakeSlackHistoryClient:
         return self.reply_pages_by_ts[ts].pop(0)
 
 
+class FakeChannelHistoryCache:
+    def __init__(self, messages: list[dict[str, Any]]) -> None:
+        self.messages = messages
+        self.calls: list[dict[str, Any]] = []
+
+    def fetch_messages(
+        self,
+        *,
+        channel_id: str,
+        oldest_ts: str | None,
+        latest_ts: str | None,
+        limit: int,
+        include_threads: bool,
+    ) -> list[dict[str, Any]]:
+        self.calls.append(
+            {
+                "channel_id": channel_id,
+                "oldest_ts": oldest_ts,
+                "latest_ts": latest_ts,
+                "limit": limit,
+                "include_threads": include_threads,
+            }
+        )
+        return self.messages
+
+
+def test_slack_channel_history_uses_cache_before_slack_api() -> None:
+    client = FakeSlackHistoryClient(history_pages=[])
+    cache = FakeChannelHistoryCache(
+        [
+            {
+                "user": "U1",
+                "ts": "1.000000",
+                "text": "cached context",
+                "thread_ts": None,
+                "reply_count": 0,
+                "source": "observation_cache",
+            }
+        ]
+    )
+
+    result = SlackChannelHistoryTool(
+        client,
+        default_channel_id="C123",
+        cache=cache,
+    ).invoke({"limit": 10})
+
+    assert result.output["context_source"] == "observation_cache"
+    assert result.output["cache_hit"] is True
+    assert result.output["slack_api_called"] is False
+    assert result.output["message_count"] == 1
+    assert result.output["messages"][0]["text"] == "cached context"
+    assert client.history_calls == []
+    assert cache.calls == [
+        {
+            "channel_id": "C123",
+            "oldest_ts": None,
+            "latest_ts": None,
+            "limit": 10,
+            "include_threads": False,
+        }
+    ]
+
+
+def test_slack_channel_history_can_force_live_slack_api() -> None:
+    client = FakeSlackHistoryClient(
+        history_pages=[
+            {
+                "ok": True,
+                "messages": [{"ts": "2.000000", "user": "U2", "text": "live"}],
+                "response_metadata": {"next_cursor": ""},
+            }
+        ]
+    )
+    cache = FakeChannelHistoryCache(
+        [
+            {
+                "user": "U1",
+                "ts": "1.000000",
+                "text": "cached context",
+                "thread_ts": None,
+                "reply_count": 0,
+            }
+        ]
+    )
+
+    result = SlackChannelHistoryTool(
+        client,
+        default_channel_id="C123",
+        cache=cache,
+    ).invoke({"limit": 1, "source": "slack_api"})
+
+    assert result.output["context_source"] == "slack_api"
+    assert result.output["cache_hit"] is False
+    assert result.output["slack_api_called"] is True
+    assert result.output["messages"][0]["text"] == "live"
+    assert cache.calls == []
+    assert len(client.history_calls) == 1
+
+
+def test_slack_channel_history_reports_rate_limit_retry_after() -> None:
+    client = FakeSlackHistoryClient(
+        history_pages=[],
+        history_error=SlackApiError(
+            "The request to the Slack API failed.",
+            {
+                "ok": False,
+                "status_code": 429,
+                "headers": {"Retry-After": "60"},
+            },
+        ),
+    )
+
+    result = SlackChannelHistoryTool(client, default_channel_id="C123").invoke({})
+
+    assert result.output["error"]["code"] == "rate_limited"
+    assert result.output["error"]["details"] == {"retry_after_seconds": 60}
+
+
 def test_slack_channel_history_paginates_with_cursor() -> None:
     client = FakeSlackHistoryClient(
         history_pages=[

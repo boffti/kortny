@@ -41,7 +41,8 @@ class ComposioExecuteTool:
     @property
     def has_available_connection(self) -> bool:
         return (
-            self.resolver.best_connection(toolkit_slug=self.tool.toolkit_slug) is not None
+            self.resolver.best_connection(toolkit_slug=self.tool.toolkit_slug)
+            is not None
         )
 
     def invoke(self, args: JsonObject) -> ToolResult:
@@ -50,6 +51,10 @@ class ComposioExecuteTool:
             arguments,
             parameters=self.parameters,
             tool_name=self.name,
+        )
+        arguments = _strip_blank_optional_arguments(
+            arguments,
+            parameters=self.parameters,
         )
 
         connection = self.resolver.best_connection(toolkit_slug=self.tool.toolkit_slug)
@@ -142,7 +147,8 @@ def _description(tool: ComposioTool) -> str:
         f"Composio {tool.toolkit_slug} tool {tool.slug}. "
         f"{tool.description or tool.name} Required fields: {required}. "
         "Use only when the task has enough context to satisfy the required fields; "
-        "otherwise use a broader discovery tool or ask a clarification."
+        "otherwise use a broader discovery tool or ask a clarification. "
+        "Omit unknown optional arguments; never pass blank strings for cursors or IDs."
     )
 
 
@@ -187,6 +193,19 @@ def _required_fields(parameters: JsonSchema) -> tuple[str, ...]:
     if not isinstance(required, list):
         return ()
     return tuple(str(item) for item in required if isinstance(item, str) and item)
+
+
+def _strip_blank_optional_arguments(
+    args: JsonObject,
+    *,
+    parameters: JsonSchema,
+) -> JsonObject:
+    required_fields = set(_required_fields(parameters))
+    return {
+        key: value
+        for key, value in args.items()
+        if key in required_fields or not (isinstance(value, str) and not value.strip())
+    }
 
 
 def _safe_identifier(value: str) -> str:

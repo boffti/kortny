@@ -6,6 +6,7 @@ from kortny.tools.list_integrations import ListIntegrationsTool
 from kortny.tools.pdf_generator import PdfGeneratorTool
 from kortny.tools.registry import DuplicateToolError, ToolNotFoundError, ToolRegistry
 from kortny.tools.slack_channel_history import (
+    ObservationChannelHistoryCache,
     SlackChannelHistoryError,
     SlackChannelHistoryTool,
 )
@@ -35,6 +36,7 @@ __all__ = [
     "JsonObject",
     "JsonSchema",
     "ListIntegrationsTool",
+    "ObservationChannelHistoryCache",
     "PdfGeneratorTool",
     "RecallFactTool",
     "RecoverableToolError",

@@ -64,6 +64,7 @@ from kortny.tool_selection import (
     HeuristicToolSelector,
     LLMToolSelector,
     ToolCatalogService,
+    ToolSelection,
     ToolSelectionResult,
     ToolSelector,
     compact_tool_cards,
@@ -72,6 +73,7 @@ from kortny.tools import (
     ForgetFactTool,
     InspectMemoryTool,
     ListIntegrationsTool,
+    ObservationChannelHistoryCache,
     PdfGeneratorTool,
     RecallFactTool,
     RememberFactTool,
@@ -363,6 +365,10 @@ class AgentTaskExecutor:
         slack_channel_history = SlackChannelHistoryTool(
             self._build_slack_history_client(settings),
             default_channel_id=task.slack_channel_id,
+            cache=ObservationChannelHistoryCache(
+                session,
+                installation_id=task.installation_id,
+            ),
         )
         slack_file_read = SlackFileReadTool(
             client=self._build_slack_file_client(settings),
@@ -551,6 +557,11 @@ class AgentTaskExecutor:
                 native_cards=native_cards,
                 external_cards=selector_cards,
             )
+        selection = _expand_related_tool_selection(
+            task_input=task.input,
+            selection=selection,
+            selector_cards=selector_cards,
+        )
 
         self._record_tool_selection(
             task=task,
@@ -1106,6 +1117,104 @@ def _latest_intent_decision(session: Session, task: Task) -> dict[str, Any] | No
     return decision
 
 
+def _expand_related_tool_selection(
+    *,
+    task_input: str,
+    selection: ToolSelectionResult,
+    selector_cards: tuple[Any, ...],
+) -> ToolSelectionResult:
+    """Add obvious same-toolkit read tools needed for multi-step requests."""
+
+    if not _looks_like_linear_task_lookup(task_input):
+        return selection
+
+    selected_names = set(selection.selected_names)
+    if not any(name.startswith("composio_linear_") for name in selected_names):
+        return selection
+
+    additions: list[ToolSelection] = []
+    max_selected = 3
+    for card in selector_cards:
+        registry_name = getattr(card, "registry_name", "")
+        if registry_name in selected_names:
+            continue
+        if getattr(card, "provider", None) != "composio":
+            continue
+        if getattr(card, "toolkit_slug", None) != "linear":
+            continue
+        if getattr(card, "side_effect", None) != "read":
+            continue
+        if not _linear_issue_lookup_tool(card):
+            continue
+
+        additions.append(
+            ToolSelection(
+                registry_name=registry_name,
+                confidence=0.86,
+                reason=(
+                    "Related Linear read tool needed after project discovery for "
+                    "a task/issue summary request."
+                ),
+            )
+        )
+        selected_names.add(registry_name)
+        if len(selection.selected_tools) + len(additions) >= max_selected:
+            break
+
+    if not additions:
+        return selection
+
+    rejected = tuple(
+        item
+        for item in selection.rejected_tools
+        if item.registry_name not in selected_names
+    )
+    route_reason = selection.route_reason
+    if "related_tool_expansion" not in route_reason:
+        route_reason = f"{route_reason}+related_tool_expansion"
+    return ToolSelectionResult(
+        selected_tools=selection.selected_tools + tuple(additions),
+        suppressed_native_tools=selection.suppressed_native_tools,
+        rejected_tools=rejected,
+        route_reason=route_reason,
+        fallback_used=selection.fallback_used,
+    )
+
+
+def _looks_like_linear_task_lookup(text: str) -> bool:
+    words = _input_words(text)
+    if "linear" not in words:
+        return False
+    return bool(words & LINEAR_TASK_LOOKUP_WORDS)
+
+
+def _linear_issue_lookup_tool(card: Any) -> bool:
+    haystack = " ".join(
+        str(part)
+        for part in (
+            getattr(card, "registry_name", ""),
+            getattr(card, "display_name", ""),
+            getattr(card, "description", ""),
+            " ".join(getattr(card, "capabilities", ()) or ()),
+            " ".join(getattr(card, "tool_slugs", ()) or ()),
+        )
+        if part
+    ).casefold()
+    return (
+        ("issue" in haystack or "task" in haystack)
+        and ("list" in haystack or "search" in haystack)
+        and "project" not in haystack
+    )
+
+
+def _input_words(text: str) -> set[str]:
+    return {
+        "".join(char for char in raw.casefold() if char.isalnum())
+        for raw in text.replace("/", " ").replace("-", " ").replace("_", " ").split()
+        if raw.strip()
+    } - {""}
+
+
 def _intent_needs_no_external_tools(decision: dict[str, Any]) -> bool:
     """Return whether the intent record is a cheap, no-tool conversational turn."""
 
@@ -1184,6 +1293,19 @@ NATIVE_WEB_SEARCH_HINTS = frozenset(
     {
         "current_research",
         "web_search",
+    }
+)
+
+LINEAR_TASK_LOOKUP_WORDS = frozenset(
+    {
+        "assigned",
+        "issue",
+        "issues",
+        "open",
+        "task",
+        "tasks",
+        "todo",
+        "todos",
     }
 )
 

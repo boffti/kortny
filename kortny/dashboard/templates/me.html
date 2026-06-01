@@ -6,69 +6,213 @@
   <section class="page-heading">
     <div>
       <h1>My Dashboard</h1>
-      <p>Your tasks, usage, artifacts, and integration access in this workspace.</p>
+      <p>Your recent Slack work, personal usage, files, and connected apps.</p>
     </div>
-    <a class="btn-ghost" href="/me/tasks">View My Tasks</a>
+    <div class="heading-actions">
+      <a class="btn-ghost" href="/me/composio">Connect Apps</a>
+      <a class="btn" href="/me/tasks">View My Tasks</a>
+    </div>
   </section>
 
   {% if detail %}
-    <section class="summary-grid">
+    {% set failure_rate = (detail.failed_task_count / detail.task_count * 100) if detail.task_count else 0 %}
+    {% set activity_window_label = "this window" if from_date or to_date else "all time" %}
+
+    <section class="member-hero-grid" aria-label="Personal workspace snapshot">
+      <div class="card member-hero-card">
+        <div>
+          <span class="eyebrow">Workspace User</span>
+          <h2>{{ detail.user.name }}</h2>
+          {% if detail.user.secondary %}
+            <p>{{ detail.user.secondary }}</p>
+          {% else %}
+            <p>{{ detail.user.slack_id }}</p>
+          {% endif %}
+        </div>
+        <div class="member-hero-summary">
+          <span>Personal Activity</span>
+          <strong>{{ detail.task_count|number }} tasks handled</strong>
+          <p>
+            {% if detail.failed_task_count %}
+              {{ detail.failed_task_count|number }} failed tasks,
+            {% else %}
+              No failed tasks,
+            {% endif %}
+            {{ detail.total_cost_usd|money }} spent {{ activity_window_label }}.
+          </p>
+          <time datetime="{{ detail.last_activity_at.isoformat() }}" title="{{ detail.last_activity_at|datetime }}">
+            Latest task {{ detail.last_activity_at.strftime("%Y-%m-%d %H:%M") }} UTC
+          </time>
+        </div>
+      </div>
+
+      <nav class="card member-action-panel" aria-label="Member shortcuts">
+        <a href="/me/tasks">
+          <span>
+            <strong>Task history</strong>
+            <small>Review requests, status, cost, and traces.</small>
+          </span>
+          <span aria-hidden="true">Open</span>
+        </a>
+        <a href="/me/usage">
+          <span>
+            <strong>Usage</strong>
+            <small>Inspect model calls and token spend.</small>
+          </span>
+          <span aria-hidden="true">Open</span>
+        </a>
+        <a href="/me/composio">
+          <span>
+            <strong>Connected apps</strong>
+            <small>Manage personal Composio access.</small>
+          </span>
+          <span aria-hidden="true">Open</span>
+        </a>
+      </nav>
+    </section>
+
+    {% set toolbar = me_toolbar %}
+    {% include "_data_toolbar.html" with context %}
+
+    <section class="summary-grid member-summary" aria-label="Personal activity metrics">
       <div class="card metric-card">
         <span>Tasks</span>
         <strong>{{ detail.task_count|number }}</strong>
+        <small>Requests Kortny handled for you.</small>
       </div>
-      <div class="card metric-card">
+      <div class="card metric-card {% if detail.failed_task_count %}metric-danger{% else %}metric-success{% endif %}">
         <span>Failures</span>
         <strong>{{ detail.failed_task_count|number }}</strong>
+        <small>{{ "%.1f"|format(failure_rate) }}% of tasks in this window.</small>
       </div>
       <div class="card metric-card">
-        <span>Cost</span>
+        <span>Spend</span>
         <strong>{{ detail.total_cost_usd|money }}</strong>
+        <small>{{ detail.usage_call_count|number }} recent LLM calls shown.</small>
       </div>
       <div class="card metric-card">
         <span>Artifacts</span>
         <strong>{{ detail.artifact_count|number }}</strong>
+        <small>Files generated from your work.</small>
       </div>
     </section>
 
-    <section class="card detail-section">
-      <header>
-        <h2>Recent Tasks</h2>
-        <p>Most recent work Kortny handled for you.</p>
-      </header>
-      {% if detail.tasks %}
-        <div class="table-wrap">
-          <table class="table">
-            <thead>
-              <tr>
-                <th>Task</th>
-                <th>Channel</th>
-                <th>Status</th>
-                <th>Cost</th>
-                <th>Created</th>
-              </tr>
-            </thead>
-            <tbody>
-              {% for row in detail.tasks %}
-                <tr>
-                  <td><a href="/me/tasks/{{ row.task.id }}">{{ row.task.input }}</a></td>
-                  <td>{{ row.channel.name }}</td>
-                  <td><span class="badge status-{{ row.task.status.value }}">{{ row.task.status.value }}</span></td>
-                  <td>{{ row.task.total_cost_usd|money }}</td>
-                  <td>{{ row.task.created_at|datetime }}</td>
-                </tr>
-              {% endfor %}
-            </tbody>
-          </table>
+    <section class="card detail-section member-work-section">
+      <header class="section-header-row">
+        <div>
+          <h2>Recent Work</h2>
+          <p>Latest tasks with status, channel, usage calls, artifacts, and cost.</p>
         </div>
-      {% else %}
-        <p class="empty-state">No tasks yet.</p>
-      {% endif %}
+        <a class="btn-ghost" href="/me/tasks">View all</a>
+      </header>
+      <div class="member-task-list">
+        {% for row in detail.tasks %}
+          <a class="task-list-item" href="/me/tasks/{{ row.task.id }}" aria-label="Open task: {{ row.task.input }}">
+            <span class="task-list-main">
+              <span class="task-list-copy">
+                <span class="task-list-title">{{ row.task.input }}</span>
+                {% if row.task.error %}
+                  <span class="task-list-summary task-list-summary-danger">Failure details recorded</span>
+                {% elif row.task.result_summary %}
+                  <span class="task-list-summary">{{ row.task.result_summary }}</span>
+                {% else %}
+                  <span class="task-list-summary">Trace and run details are available.</span>
+                {% endif %}
+              </span>
+              <span class="task-list-highlights">
+                <span class="badge status-{{ row.task.status.value }}">{{ row.task.status.value.replace("_", " ").title() }}</span>
+                <span class="task-list-cost">{{ row.task.total_cost_usd|money }}</span>
+              </span>
+            </span>
+
+            <span class="task-list-meta" aria-label="Task metadata">
+              <span class="task-meta-field">
+                <span class="task-meta-label">Created</span>
+                <time class="task-meta-value" datetime="{{ row.task.created_at.isoformat() }}" title="{{ row.task.created_at|datetime }}">
+                  {{ row.task.created_at.strftime("%Y-%m-%d %H:%M") }}
+                </time>
+              </span>
+              <span class="task-meta-field">
+                <span class="task-meta-label">Channel</span>
+                <span class="task-meta-value" title="{{ row.channel.name }}">{{ row.channel.name }}</span>
+                {% if row.channel.secondary %}<span class="task-meta-id" title="{{ row.channel.secondary }}">{{ row.channel.secondary }}</span>{% endif %}
+              </span>
+              <span class="task-meta-field task-meta-compact">
+                <span class="task-meta-label">LLM Calls</span>
+                <span class="task-meta-value">{{ row.usage_count|number }}</span>
+              </span>
+              <span class="task-meta-field task-meta-compact">
+                <span class="task-meta-label">Artifacts</span>
+                <span class="task-meta-value">{{ row.artifact_count|number }}</span>
+              </span>
+            </span>
+          </a>
+        {% else %}
+          <p class="empty task-list-empty">No tasks in this range.</p>
+        {% endfor %}
+      </div>
+    </section>
+
+    <section class="member-secondary-grid" aria-label="Personal supporting data">
+      <section class="card member-panel">
+        <header>
+          <h2>Usage Footprint</h2>
+          <p>Token and model-call activity from your latest work.</p>
+        </header>
+        <dl class="member-stat-grid">
+          <div>
+            <dt>Input Tokens</dt>
+            <dd>{{ detail.total_input_tokens|number }}</dd>
+          </div>
+          <div>
+            <dt>Output Tokens</dt>
+            <dd>{{ detail.total_output_tokens|number }}</dd>
+          </div>
+          <div>
+            <dt>LLM Calls</dt>
+            <dd>{{ detail.usage_call_count|number }}</dd>
+          </div>
+          <div>
+            <dt>Total Spend</dt>
+            <dd>{{ detail.total_cost_usd|money }}</dd>
+          </div>
+        </dl>
+        <footer>
+          <a class="btn-ghost" href="/me/usage">Open usage</a>
+        </footer>
+      </section>
+
+      <section class="card member-panel">
+        <header>
+          <h2>Recent Artifacts</h2>
+          <p>Files produced by your tasks.</p>
+        </header>
+        <div class="member-list">
+          {% for row in detail.artifacts[:5] %}
+            <a class="member-list-row" href="/me/tasks/{{ row.task.id }}" aria-label="Open task for artifact {{ row.artifact.filename }}">
+              <span>
+                <strong>{{ row.artifact.filename }}</strong>
+                <small>{{ row.artifact.mime_type or "artifact" }}</small>
+              </span>
+              <time datetime="{{ row.artifact.created_at.isoformat() }}" title="{{ row.artifact.created_at|datetime }}">
+                {{ row.artifact.created_at.strftime("%Y-%m-%d") }}
+              </time>
+            </a>
+          {% else %}
+            <p class="empty-state">No artifacts yet.</p>
+          {% endfor %}
+        </div>
+      </section>
     </section>
   {% else %}
-    <section class="card empty-card">
+    <section class="card member-empty">
+      <span class="eyebrow">My Workspace</span>
       <h2>No activity yet</h2>
-      <p>Kortny has not recorded any tasks for your Slack user in this workspace yet.</p>
+      <p>Kortny has not recorded any Slack tasks for your account in this workspace yet.</p>
+      <div class="heading-actions">
+        <a class="btn" href="/me/tasks">View tasks</a>
+        <a class="btn-ghost" href="/me/composio">Connect apps</a>
+      </div>
     </section>
   {% endif %}
 {% endblock %}

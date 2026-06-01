@@ -400,6 +400,7 @@ def test_dashboard_member_is_filtered_to_own_tasks(
             follow_redirects=False,
         )
         admin_tasks_response = test_client.get("/tasks", follow_redirects=False)
+        member_home_response = test_client.get("/me")
         member_tasks_response = test_client.get("/me/tasks")
         own_detail_response = test_client.get(f"/me/tasks/{own_task.id}")
         other_detail_response = test_client.get(f"/me/tasks/{other_task.id}")
@@ -407,6 +408,15 @@ def test_dashboard_member_is_filtered_to_own_tasks(
     assert login_response.status_code == 303
     assert login_response.headers["location"] == "/me"
     assert admin_tasks_response.status_code == 403
+    assert member_home_response.status_code == 200
+    assert "Recent Work" in member_home_response.text
+    assert "Usage Footprint" in member_home_response.text
+    assert "Recent Artifacts" in member_home_response.text
+    assert "Member private task" in member_home_response.text
+    assert "Other user task" not in member_home_response.text
+    assert f'href="/me/tasks/{own_task.id}"' in member_home_response.text
+    assert 'href="/me/composio"' in member_home_response.text
+    assert "<table" not in member_home_response.text
     assert member_tasks_response.status_code == 200
     assert "Member User" in member_tasks_response.text
     assert "Other User" not in member_tasks_response.text
@@ -1256,7 +1266,7 @@ def test_dashboard_member_composio_connect_uses_logged_in_user_scope(
         DashboardOAuthState(
             provider="slack",
             state="member-composio-state",
-            redirect_path="/me/integrations/notion",
+            redirect_path="/me/composio/notion",
             expires_at=datetime.now(UTC) + timedelta(minutes=10),
         )
     )
@@ -1265,6 +1275,7 @@ def test_dashboard_member_composio_connect_uses_logged_in_user_scope(
     settings = slack_dashboard_settings()
     set_runtime_settings_env(monkeypatch)
     monkeypatch.setenv("COMPOSIO_API_KEY", "composio-dashboard-secret")
+    monkeypatch.setenv("COMPOSIO_CATALOG_ENABLED", "true")
 
     class FakeSlackOpenIDClient:
         def __init__(self, **_kwargs: object) -> None:
@@ -1292,6 +1303,22 @@ def test_dashboard_member_composio_connect_uses_logged_in_user_scope(
     class FakeComposioClient:
         def __init__(self, **_kwargs: object) -> None:
             pass
+
+        def list_toolkits(
+            self,
+            *,
+            search: str | None = None,
+            limit: int = 60,
+            cursor: str | None = None,
+        ) -> ComposioCatalog:
+            assert search is None
+            assert limit == 60
+            assert cursor is None
+            return ComposioCatalog(
+                items=(_composio_toolkit(slug="notion", name="Notion"),),
+                total_items=1,
+                next_cursor=None,
+            )
 
         def list_auth_configs(
             self,
@@ -1365,6 +1392,7 @@ def test_dashboard_member_composio_connect_uses_logged_in_user_scope(
             "/auth/slack/callback?code=member-code&state=member-composio-state",
             follow_redirects=False,
         )
+        catalog_response = test_client.get("/me/composio")
         response = test_client.post(
             "/composio/notion/connect",
             data={
@@ -1377,7 +1405,10 @@ def test_dashboard_member_composio_connect_uses_logged_in_user_scope(
         )
 
     assert login_response.status_code == 303
-    assert login_response.headers["location"] == "/me/integrations/notion"
+    assert login_response.headers["location"] == "/me/composio/notion"
+    assert catalog_response.status_code == 200
+    assert 'href="/me/composio" aria-current="page"' in catalog_response.text
+    assert 'href="/me/composio/notion"' in catalog_response.text
     assert response.status_code == 303
     assert response.headers["location"] == "https://connect.composio.dev/link/ln_member"
     connection = db_session.scalar(
@@ -1489,7 +1520,7 @@ def test_dashboard_member_composio_callback_returns_to_me_scope(
 
     assert login_response.status_code == 303
     assert response.status_code == 303
-    assert response.headers["location"].startswith("/me/integrations/gmail?")
+    assert response.headers["location"].startswith("/me/composio/gmail?")
     db_session.expire_all()
     updated = db_session.get(ComposioConnection, connection_id)
     assert updated is not None

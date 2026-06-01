@@ -2450,7 +2450,11 @@ def _composio_toolkit_placeholder(
     slug: str,
     connection: ComposioConnectionRow | None,
 ) -> ComposioToolkit:
-    name = connection.display_name if connection is not None else _humanize_slug(slug)
+    name = (
+        connection.display_name
+        if connection is not None
+        else _humanize_composio_slug(slug)
+    )
     return ComposioToolkit(
         slug=slug,
         name=name,
@@ -2532,10 +2536,10 @@ def _humanize_composio_tool_slug(slug: str, toolkit_slug: str) -> str:
     toolkit_prefix = f"{toolkit_slug.upper()}_"
     if normalized_slug.startswith(toolkit_prefix):
         normalized_slug = normalized_slug[len(toolkit_prefix) :]
-    return _humanize_slug(normalized_slug)
+    return _humanize_composio_slug(normalized_slug)
 
 
-def _humanize_slug(slug: str) -> str:
+def _humanize_composio_slug(slug: str) -> str:
     return slug.replace("_", " ").replace("-", " ").title()
 
 

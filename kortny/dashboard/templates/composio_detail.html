@@ -6,14 +6,14 @@
   {% set integration_name = detail.toolkit.name if detail.toolkit else detail.slug %}
   {% set default_owner = detail.user_options[0] if detail.user_options else none %}
   {% set active_connection = detail.active_connection %}
-  {% set detail_base_path = '/me/integrations' if member_scope else '/composio' %}
+  {% set detail_base_path = '/me/composio' if member_scope else '/composio' %}
 
   <section class="page-heading">
     <div>
       <h1>{{ integration_name }}</h1>
       <p>Manage the connected account, available tools, and who can use this integration.</p>
     </div>
-    <a class="btn-ghost" href="{{ '/composio' if dashboard_is_admin else '/me/integrations' }}">Back to Catalog</a>
+    <a class="btn-ghost" href="{{ '/composio' if dashboard_is_admin else '/me/composio' }}">Back to Catalog</a>
   </section>
 
   {% if runtime_error %}

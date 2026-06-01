@@ -3,12 +3,16 @@
 {% block title %}Composio - Kortny Dashboard{% endblock %}
 
 {% block content %}
+  {% set catalog_url = composio_catalog_url|default('/composio') %}
+  {% set detail_base_url = composio_detail_base_url|default('/composio') %}
+  {% set registry_url = integration_registry_url|default('/integrations') %}
+
   <section class="page-heading">
     <div>
       <h1>Composio</h1>
       <p>External app catalog and local Slack visibility policy for connected accounts.</p>
     </div>
-    <a class="btn-ghost" href="/integrations">Integration Registry</a>
+    <a class="btn-ghost" href="{{ registry_url }}">Integration Registry</a>
   </section>
 
   <section class="summary-grid integration-summary" aria-label="Composio overview">
@@ -68,7 +72,7 @@
       </div>
     </div>
 
-    <form class="catalog-search" method="get" action="/composio">
+    <form class="catalog-search" method="get" action="{{ catalog_url }}">
       <label class="catalog-search-main">
         Search integrations
         <input type="search" name="q" value="{{ q }}" placeholder="Search by app, category, or auth type" autocomplete="off">
@@ -84,7 +88,7 @@
       <div class="catalog-search-actions">
         <button class="btn" type="submit">Search</button>
         {% if q %}
-          <a class="btn-ghost" href="/composio">Clear</a>
+          <a class="btn-ghost" href="{{ catalog_url }}">Clear</a>
         {% endif %}
       </div>
     </form>
@@ -92,7 +96,7 @@
     {% if catalog.toolkits %}
       <div class="composio-card-grid">
         {% for toolkit in catalog.toolkits %}
-          <a class="composio-card {{ 'connected' if toolkit.connected else '' }}" href="/composio/{{ toolkit.slug }}">
+          <a class="composio-card {{ 'connected' if toolkit.connected else '' }}" href="{{ detail_base_url }}/{{ toolkit.slug }}">
             <header class="composio-card-header">
               <span class="integration-logo" aria-hidden="true">
                 {% if toolkit.logo_url %}

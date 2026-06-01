@@ -542,6 +542,9 @@ def register_routes(app: FastAPI) -> None:
                 if catalog.next_cursor
                 else None,
                 "catalog_restart_url": _url_with_query("/composio", catalog_query),
+                "composio_catalog_url": "/composio",
+                "composio_detail_base_url": "/composio",
+                "integration_registry_url": "/integrations",
             },
         )
 
@@ -598,7 +601,7 @@ def register_routes(app: FastAPI) -> None:
         connection.metadata_json = metadata
         session.commit()
 
-        base_path = "/composio" if principal.role == "admin" else "/me/integrations"
+        base_path = "/composio" if principal.role == "admin" else "/me/composio"
         return _redirect_with_notice(
             f"{base_path}/{quote(connection.toolkit_slug, safe='')}",
             notice,
@@ -613,9 +616,7 @@ def register_routes(app: FastAPI) -> None:
         session: Annotated[Session, Depends(get_session)],
     ) -> RedirectResponse:
         form = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
-        default_next_path = (
-            "/composio" if principal.role == "admin" else "/me/integrations"
-        )
+        default_next_path = "/composio" if principal.role == "admin" else "/me/composio"
         next_path = _safe_next_path(form.get("next", [default_next_path])[0])
         connection = session.get(ComposioConnection, connection_id)
         if connection is None:
@@ -675,9 +676,7 @@ def register_routes(app: FastAPI) -> None:
         session: Annotated[Session, Depends(get_session)],
     ) -> RedirectResponse:
         form = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
-        default_next_path = (
-            "/composio" if principal.role == "admin" else "/me/integrations"
-        )
+        default_next_path = "/composio" if principal.role == "admin" else "/me/composio"
         next_path = _safe_next_path(form.get("next", [default_next_path])[0])
         connection = session.get(ComposioConnection, connection_id)
         if connection is None:
@@ -789,7 +788,7 @@ def register_routes(app: FastAPI) -> None:
             owner_slack_user_id = principal.slack_user_id or ""
             scope_type = "user"
             channel_scope_id = ""
-            next_path = f"/me/integrations/{quote(normalized_slug, safe='')}"
+            next_path = f"/me/composio/{quote(normalized_slug, safe='')}"
 
         if not owner_slack_user_id:
             return _redirect_with_notice(
@@ -1084,6 +1083,18 @@ def register_routes(app: FastAPI) -> None:
             context={
                 **_dashboard_context(principal, active_page="me"),
                 "detail": detail,
+                "me_toolbar": _date_toolbar(
+                    action="/me",
+                    title="Dashboard Window",
+                    count_label=(
+                        f"Showing {detail.task_count:,} tasks"
+                        if detail is not None
+                        else "No tasks"
+                    ),
+                    from_date=from_date,
+                    to_date=to_date,
+                    reset_url="/me",
+                ),
                 "from_date": from_date or "",
                 "to_date": to_date or "",
             },
@@ -1286,6 +1297,59 @@ def register_routes(app: FastAPI) -> None:
             },
         )
 
+    @app.get("/me/composio", response_class=HTMLResponse)
+    def me_composio_catalog(
+        request: Request,
+        principal: Annotated[DashboardPrincipal, Depends(require_principal)],
+        session: Annotated[Session, Depends(get_session)],
+        q: Annotated[str | None, Query()] = None,
+        cursor: Annotated[str | None, Query()] = None,
+        page_size: Annotated[int, Query(ge=1, le=100)] = 60,
+    ) -> Response:
+        if principal.installation_id is None or principal.slack_user_id is None:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN)
+        runtime_settings, runtime_error = _load_runtime_settings()
+        catalog = get_composio_catalog_dashboard(
+            session,
+            runtime_settings=runtime_settings,
+            query=q,
+            cursor=cursor,
+            limit=page_size,
+            installation_id=principal.installation_id,
+            owner_slack_user_id=principal.slack_user_id,
+        )
+        catalog_query = _clean_query_params(
+            {"q": q, "page_size": catalog.page_size or page_size}
+        )
+        return templates.TemplateResponse(
+            request=request,
+            name="composio.html",
+            context={
+                **_dashboard_context(principal, active_page="me_composio"),
+                "catalog": catalog,
+                "runtime_error": runtime_error,
+                "q": q or "",
+                "cursor": cursor or "",
+                "page_size": catalog.page_size or page_size,
+                "page_size_options": (24, 60, 100),
+                "catalog_next_url": _url_with_query(
+                    "/me/composio",
+                    {
+                        **catalog_query,
+                        "cursor": catalog.next_cursor,
+                    },
+                )
+                if catalog.next_cursor
+                else None,
+                "catalog_restart_url": _url_with_query("/me/composio", catalog_query),
+                "composio_catalog_url": "/me/composio",
+                "composio_detail_base_url": "/me/composio",
+                "integration_registry_url": "/me/integrations",
+                "member_scope": True,
+            },
+        )
+
+    @app.get("/me/composio/{toolkit_slug}", response_class=HTMLResponse)
     @app.get("/me/integrations/{toolkit_slug}", response_class=HTMLResponse)
     def me_composio_detail(
         request: Request,
@@ -1311,7 +1375,7 @@ def register_routes(app: FastAPI) -> None:
             request=request,
             name="composio_detail.html",
             context={
-                **_dashboard_context(principal, active_page="me_integrations"),
+                **_dashboard_context(principal, active_page="me_composio"),
                 "detail": detail,
                 "runtime_error": runtime_error,
                 "notice": notice,

@@ -12,6 +12,8 @@
       {% if dashboard_is_admin %}
         <a class="btn-ghost" href="/composio">Composio Catalog</a>
         <a class="btn-ghost" href="/system">System Config</a>
+      {% else %}
+        <a class="btn-ghost" href="/me/composio">Composio Catalog</a>
       {% endif %}
     </div>
   </section>
@@ -100,6 +102,8 @@
         <span class="badge badge-{{ integrations.composio_catalog.tone }}">{{ integrations.composio_catalog.status }}</span>
         {% if dashboard_is_admin %}
           <a class="btn" href="/composio">Open Composio</a>
+        {% else %}
+          <a class="btn" href="/me/composio">Open Composio</a>
         {% endif %}
       </div>
     </article>

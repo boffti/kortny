@@ -414,6 +414,28 @@ def test_worker_registry_expands_linear_project_selection_to_issue_lookup(
         scope_id="UAnalyst",
         toolkit_slug="linear",
     )
+    task_service = TaskService(db_session)
+    task_service.append_event(
+        task,
+        TaskEventType.log,
+        {
+            "message": "intent_classification_completed",
+            "source": "dm",
+            "decision": {
+                "addressed_to_kortny": True,
+                "classification": "task_request",
+                "confidence": 0.95,
+                "should_create_task": False,
+                "should_ack_with_reaction": False,
+                "needs_channel_context": False,
+                "needs_thread_context": False,
+                "needs_file_context": False,
+                "likely_tools": ["get_tasks"],
+                "model_tier": "standard",
+                "reason": "Contradictory classifier output for a direct task.",
+            },
+        },
+    )
     db_session.commit()
     settings = build_settings(composio_api_key="composio-key")
     composio_client = FakeComposioClient(
@@ -474,7 +496,7 @@ def test_worker_registry_expands_linear_project_selection_to_issue_lookup(
         settings=settings,
         session=db_session,
         task=task,
-        task_service=TaskService(db_session),
+        task_service=task_service,
         working_dir=tmp_path,
     )
 

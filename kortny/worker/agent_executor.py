@@ -1067,7 +1067,10 @@ def _external_tool_skip_reason(
 
     classification = _payload_str(decision, "classification")
     should_create_task = decision.get("should_create_task")
-    if should_create_task is False:
+    if (
+        should_create_task is False
+        and classification not in WORKER_TASK_CLASSIFICATIONS
+    ):
         return {
             "reason": "intent_should_not_create_task",
             "classification": classification,
@@ -1275,6 +1278,13 @@ EXTERNAL_TOOL_SKIP_CLASSIFICATIONS = frozenset(
         "ignore",
         "memory_candidate",
         "third_person_reference",
+    }
+)
+
+WORKER_TASK_CLASSIFICATIONS = frozenset(
+    {
+        "follow_up",
+        "task_request",
     }
 )
 

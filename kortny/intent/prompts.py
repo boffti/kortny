@@ -33,6 +33,7 @@ Important memory-control distinction:
 - cancel_or_retry is only for stopping or retrying a current/prior task execution, not for deleting a stored memory.
 
 For app_mention and dm surfaces, messages are usually addressed to Kortny unless clearly third-person or irrelevant.
+For app_mention and dm surfaces, set should_create_task true for task_request and follow_up unless the message is only casual small talk that needs no durable work.
 For channel_message surfaces without @mention, be conservative: only mark addressed_to_kortny true when the user directly addresses Kortny.
 
 Confidence is a routing score from 0 to 1, not a claim of truth. Use lower confidence for ambiguous cases.

@@ -47,6 +47,7 @@ from kortny.agent.planner import (
     render_execution_plan_context,
     render_recovery_plan_context,
 )
+from kortny.agent.runtime import AgentRuntime, CustomAgentRuntime
 from kortny.approvals import (
     ApprovalScope,
     ToolApprovalPolicy,
@@ -59,6 +60,7 @@ __all__ = [
     "AgentExecutionGuardrailError",
     "AgentLoopError",
     "AgentRunResult",
+    "AgentRuntime",
     "ApprovalScope",
     "ClassifiedToolError",
     "AgentTurnLimitError",
@@ -72,6 +74,7 @@ __all__ = [
     "ContextOmission",
     "ContextPackage",
     "ContextTask",
+    "CustomAgentRuntime",
     "DefaultContextEngine",
     "ExecutionGuardrailLimits",
     "ExecutionErrorCategory",

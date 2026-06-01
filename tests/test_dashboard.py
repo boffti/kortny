@@ -399,6 +399,7 @@ def test_dashboard_member_is_filtered_to_own_tasks(
             "/auth/slack/callback?code=member-code&state=member-state",
             follow_redirects=False,
         )
+        member_root_response = test_client.get("/", follow_redirects=False)
         admin_tasks_response = test_client.get("/tasks", follow_redirects=False)
         member_home_response = test_client.get("/me")
         member_tasks_response = test_client.get("/me/tasks")
@@ -407,6 +408,8 @@ def test_dashboard_member_is_filtered_to_own_tasks(
 
     assert login_response.status_code == 303
     assert login_response.headers["location"] == "/me"
+    assert member_root_response.status_code == 303
+    assert member_root_response.headers["location"] == "/me"
     assert admin_tasks_response.status_code == 403
     assert member_home_response.status_code == 200
     assert "Recent Work" in member_home_response.text

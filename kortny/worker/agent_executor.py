@@ -11,8 +11,8 @@ from slack_sdk import WebClient
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from kortny.agent import AgentCoordinator
-from kortny.agent.coordinator import DEFAULT_SYSTEM_PROMPT
+from kortny.agent.coordinator import DEFAULT_SYSTEM_PROMPT, AgentRunResult
+from kortny.agent.runtime import CustomAgentRuntime
 from kortny.agent.thread_context import ThreadTranscriptProvider
 from kortny.approvals import (
     TOOL_APPROVAL_PROMPT_PURPOSE,
@@ -156,35 +156,13 @@ class AgentTaskExecutor:
         try:
             logger.info("agent executor started task_id=%s", task.id)
             with task_workspace(task.id, base_dir=self.workspace_base_dir) as workspace:
-                llm = self._build_llm(
-                    settings=settings,
-                    session=session,
-                    task=task,
-                    task_service=task_service,
-                )
-                registry = self._build_registry(
+                agent_result = self._run_agent_runtime(
                     settings=settings,
                     session=session,
                     task=task,
                     task_service=task_service,
                     working_dir=workspace.path,
                 )
-                logger.info(
-                    "agent executor registry ready task_id=%s tools=%s",
-                    task.id,
-                    ",".join(registry.names()),
-                )
-                agent_result = AgentCoordinator(
-                    session=session,
-                    llm=llm,
-                    registry=registry,
-                    task_service=task_service,
-                    system_prompt=self.system_prompt,
-                    tool_result_prompt_max_chars=settings.tool_result_prompt_max_chars,
-                    thread_transcript_provider=self._build_thread_transcript_provider(
-                        settings
-                    ),
-                ).run(task)
                 task_service.raise_if_cancelled(task, phase="before_post_outputs")
                 self._post_outputs(
                     settings=settings,
@@ -319,6 +297,83 @@ class AgentTaskExecutor:
         if self.thread_transcript_provider is not None:
             return self.thread_transcript_provider
         return SlackThreadTranscriptProvider(WebClient(token=settings.slack_bot_token))
+
+    def _run_agent_runtime(
+        self,
+        *,
+        settings: Settings,
+        session: Session,
+        task: Task,
+        task_service: TaskService,
+        working_dir: Path,
+    ) -> AgentRunResult:
+        task_service.append_event(
+            task,
+            TaskEventType.log,
+            {
+                "message": "agent_runtime_selected",
+                "runtime": settings.agent_runtime,
+            },
+        )
+        log_observation(
+            logger,
+            "agent_runtime_selected",
+            task=task,
+            runtime=settings.agent_runtime,
+        )
+        if settings.agent_runtime == "adk":
+            from kortny.agent.adk_runtime import AdkAgentRuntime
+
+            registry = self._build_registry(
+                settings=settings,
+                session=session,
+                task=task,
+                task_service=task_service,
+                working_dir=working_dir,
+            )
+            logger.info(
+                "agent executor registry ready task_id=%s runtime=adk tools=%s",
+                task.id,
+                ",".join(registry.names()),
+            )
+            return AdkAgentRuntime(
+                settings=settings,
+                session=session,
+                task_service=task_service,
+                registry=registry,
+                thread_transcript_provider=self._build_thread_transcript_provider(
+                    settings
+                ),
+                tool_result_prompt_max_chars=settings.tool_result_prompt_max_chars,
+            ).run(task)
+
+        llm = self._build_llm(
+            settings=settings,
+            session=session,
+            task=task,
+            task_service=task_service,
+        )
+        registry = self._build_registry(
+            settings=settings,
+            session=session,
+            task=task,
+            task_service=task_service,
+            working_dir=working_dir,
+        )
+        logger.info(
+            "agent executor registry ready task_id=%s tools=%s",
+            task.id,
+            ",".join(registry.names()),
+        )
+        return CustomAgentRuntime(
+            session=session,
+            llm=llm,
+            registry=registry,
+            task_service=task_service,
+            system_prompt=self.system_prompt,
+            tool_result_prompt_max_chars=settings.tool_result_prompt_max_chars,
+            thread_transcript_provider=self._build_thread_transcript_provider(settings),
+        ).run(task)
 
     def _build_artifact_comment_generator(
         self,

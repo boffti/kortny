@@ -277,7 +277,7 @@ def register_routes(app: FastAPI) -> None:
     @app.get("/", response_class=HTMLResponse)
     def index(
         request: Request,
-        principal: Annotated[DashboardPrincipal, Depends(require_admin)],
+        principal: Annotated[DashboardPrincipal, Depends(require_dashboard_home)],
         session: Annotated[Session, Depends(get_session)],
     ) -> Response:
         settings = cast(DashboardSettings, request.app.state.dashboard_settings)
@@ -1517,6 +1517,19 @@ def require_admin(
 
     if principal.role != "admin":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN)
+    return principal
+
+
+def require_dashboard_home(
+    principal: Annotated[DashboardPrincipal, Depends(require_principal)],
+) -> DashboardPrincipal:
+    """Route logged-in members from admin home to their dashboard."""
+
+    if principal.role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_303_SEE_OTHER,
+            headers={"Location": "/me"},
+        )
     return principal
 
 

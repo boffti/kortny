@@ -15,6 +15,7 @@ SETTINGS_ENV_VARS = {
     "LLM_ANALYSIS_MODEL",
     "LLM_DOCUMENT_MODEL",
     "LLM_HIGH_REASONING_MODEL",
+    "AGENT_RUNTIME",
     "COMPOSIO_API_KEY",
     "COMPOSIO_CATALOG_ENABLED",
     "COMPOSIO_CATALOG_LIMIT",
@@ -66,6 +67,7 @@ def test_settings_loads_required_environment(monkeypatch: pytest.MonkeyPatch) ->
     assert settings.postgres_url == "postgresql://kortny:kortny@localhost/kortny"
     assert settings.slack_file_read_max_bytes == 25 * 1024 * 1024
     assert settings.slack_app_name == "kortny"
+    assert settings.agent_runtime == "custom"
     assert settings.composio_catalog_enabled is True
     assert settings.composio_catalog_limit == 60
     assert settings.composio_request_timeout_seconds == 10.0
@@ -93,6 +95,7 @@ def test_settings_loads_optional_environment(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setenv("SLACK_APP_NAME", "Courtney")
     monkeypatch.setenv("LLM_CHEAP_MODEL", "anthropic/claude-haiku-test")
     monkeypatch.setenv("LLM_DOCUMENT_MODEL", "anthropic/claude-sonnet-test")
+    monkeypatch.setenv("AGENT_RUNTIME", "adk")
     monkeypatch.setenv("OBSERVABILITY_CAPTURE_CONTENT", "summaries")
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://otel:4318")
     monkeypatch.setenv(
@@ -120,6 +123,7 @@ def test_settings_loads_optional_environment(monkeypatch: pytest.MonkeyPatch) ->
     assert settings.slack_app_name == "Courtney"
     assert settings.llm_cheap_model == "anthropic/claude-haiku-test"
     assert settings.llm_document_model == "anthropic/claude-sonnet-test"
+    assert settings.agent_runtime == "adk"
     assert settings.observability_capture_content == "summaries"
     assert settings.otel_exporter_otlp_endpoint == "http://otel:4318"
     assert (

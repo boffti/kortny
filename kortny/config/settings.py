@@ -60,6 +60,9 @@ class Settings(BaseSettings):
     response_humanizer_min_chars: int = Field(
         default=120, validation_alias="RESPONSE_HUMANIZER_MIN_CHARS"
     )
+    agent_runtime: Literal["custom", "adk"] = Field(
+        default="custom", validation_alias="AGENT_RUNTIME"
+    )
     tool_selector_max_external_candidates: int = Field(
         default=24, validation_alias="TOOL_SELECTOR_MAX_EXTERNAL_CANDIDATES"
     )

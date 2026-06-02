@@ -18,6 +18,9 @@ def test_mvp_schema_declares_all_core_tables() -> None:
         "observe_policies",
         "observation_events",
         "observe_channel_profiles",
+        "kg_entities",
+        "kg_edges",
+        "kg_evidence",
         "procedural_skills",
         "procedural_skill_versions",
         "procedural_skill_invocations",
@@ -32,6 +35,7 @@ def test_task_status_enum_matches_locked_schema() -> None:
     assert [status.value for status in TaskStatus] == [
         "pending",
         "running",
+        "waiting_approval",
         "succeeded",
         "failed",
         "crashed",
@@ -244,3 +248,63 @@ def test_observe_tables_have_policy_and_event_constraints() -> None:
         "idx_observation_events_user",
         "idx_observation_events_purged",
     } <= event_indexes
+
+
+def test_knowledge_graph_tables_have_scope_lifecycle_and_evidence_indexes() -> None:
+    entities = Base.metadata.tables["kg_entities"]
+    edges = Base.metadata.tables["kg_edges"]
+    evidence = Base.metadata.tables["kg_evidence"]
+
+    entity_constraints = {constraint.name for constraint in entities.constraints}
+    entity_indexes = {index.name for index in entities.indexes}
+    edge_constraints = {constraint.name for constraint in edges.constraints}
+    edge_indexes = {index.name for index in edges.indexes}
+    evidence_constraints = {constraint.name for constraint in evidence.constraints}
+    evidence_indexes = {index.name for index in evidence.indexes}
+
+    assert {
+        "ck_kg_entities_type",
+        "ck_kg_entities_visibility_scope_type",
+        "ck_kg_entities_visibility_scope_id",
+        "ck_kg_entities_source_type",
+        "ck_kg_entities_lifecycle_state",
+        "ck_kg_entities_confidence_score",
+    } <= entity_constraints
+    assert {
+        "idx_kg_entities_current_unique_key",
+        "idx_kg_entities_lookup",
+        "idx_kg_entities_scope",
+        "idx_kg_entities_external_ref",
+        "idx_kg_entities_attrs",
+    } <= entity_indexes
+
+    assert {
+        "ck_kg_edges_relationship_type",
+        "ck_kg_edges_visibility_scope_type",
+        "ck_kg_edges_visibility_scope_id",
+        "ck_kg_edges_source_type",
+        "ck_kg_edges_lifecycle_state",
+        "ck_kg_edges_confidence_score",
+    } <= edge_constraints
+    assert {
+        "idx_kg_edges_current_unique",
+        "idx_kg_edges_source_lookup",
+        "idx_kg_edges_target_lookup",
+        "idx_kg_edges_scope",
+        "idx_kg_edges_attrs",
+    } <= edge_indexes
+
+    assert {
+        "ck_kg_evidence_target_kind",
+        "ck_kg_evidence_source_type",
+        "ck_kg_evidence_consensus_count",
+        "ck_kg_evidence_confidence_score",
+        "ck_kg_evidence_source_reference",
+    } <= evidence_constraints
+    assert {
+        "idx_kg_evidence_target",
+        "idx_kg_evidence_task",
+        "idx_kg_evidence_episode",
+        "idx_kg_evidence_observation",
+        "idx_kg_evidence_slack_message",
+    } <= evidence_indexes

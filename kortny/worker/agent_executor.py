@@ -26,6 +26,10 @@ from kortny.config import Settings, load_settings
 from kortny.db.models import Artifact, Task, TaskEvent, TaskEventType, TaskStatus
 from kortny.db.models import LLMProvider as DbLLMProvider
 from kortny.execution import task_workspace
+from kortny.knowledge_graph import (
+    KG_CHANNEL_PROFILE_PROJECTED_MESSAGE,
+    KnowledgeGraphExtractionService,
+)
 from kortny.llm import LLMProvider, LLMService, ModelRouter, create_llm_provider
 from kortny.llm.routing import ModelRouteTier, effective_intent_decision
 from kortny.memory import WorkspaceStateService
@@ -1100,6 +1104,27 @@ class AgentTaskExecutor:
             task=task,
             membership=membership,
             result_summary=result_summary,
+        )
+        projection = KnowledgeGraphExtractionService(session).project_channel_profile(
+            task=task,
+            membership=membership,
+            profile=profile,
+        )
+        task_service.append_event(
+            task,
+            TaskEventType.log,
+            {
+                "message": KG_CHANNEL_PROFILE_PROJECTED_MESSAGE,
+                "channel_id": membership.channel_id,
+                "membership_id": str(membership.id),
+                "profile_id": str(profile.id),
+                "channel_entity_id": projection.channel_entity_id,
+                "profile_entity_id": projection.profile_entity_id,
+                "profile_edge_id": projection.profile_edge_id,
+                "entity_count": projection.entity_count,
+                "edge_count": projection.edge_count,
+                "evidence_count": projection.evidence_count,
+            },
         )
         task_service.append_event(
             task,

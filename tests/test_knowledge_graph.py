@@ -1,0 +1,334 @@
+import os
+import uuid
+from collections.abc import Iterator
+from decimal import Decimal
+
+import pytest
+from alembic import command
+from alembic.config import Config
+from sqlalchemy import Engine, delete
+from sqlalchemy.orm import Session
+
+from kortny.db.models import (
+    Installation,
+    KnowledgeGraphEdge,
+    KnowledgeGraphEntity,
+    KnowledgeGraphEvidence,
+)
+from kortny.db.session import make_engine, make_session_factory, normalize_database_url
+from kortny.knowledge_graph import (
+    DestinationSurface,
+    EvidenceInput,
+    GraphService,
+    VisibilityScope,
+    is_scope_compatible,
+)
+
+TEST_POSTGRES_URL = os.environ.get("KORTNY_TEST_POSTGRES_URL")
+
+pytestmark = pytest.mark.skipif(
+    TEST_POSTGRES_URL is None,
+    reason="KORTNY_TEST_POSTGRES_URL is required for knowledge graph tests",
+)
+
+
+@pytest.fixture(scope="session")
+def engine() -> Iterator[Engine]:
+    assert TEST_POSTGRES_URL is not None
+
+    config = Config("alembic.ini")
+    config.set_main_option("sqlalchemy.url", normalize_database_url(TEST_POSTGRES_URL))
+    command.upgrade(config, "head")
+
+    engine = make_engine(TEST_POSTGRES_URL)
+    try:
+        yield engine
+    finally:
+        engine.dispose()
+
+
+@pytest.fixture
+def db_session(engine: Engine) -> Iterator[Session]:
+    session_factory = make_session_factory(engine=engine)
+    with session_factory() as session:
+        cleanup_database(session)
+        session.commit()
+        yield session
+        session.rollback()
+        cleanup_database(session)
+        session.commit()
+
+
+def test_scope_compatibility_matrix() -> None:
+    assert is_scope_compatible(
+        VisibilityScope.workspace(), DestinationSurface.channel("C_PUBLIC_A")
+    )
+    assert is_scope_compatible(
+        VisibilityScope.channel("C_PUBLIC_A"),
+        DestinationSurface.channel("C_PUBLIC_A"),
+    )
+    assert not is_scope_compatible(
+        VisibilityScope.channel("C_PUBLIC_B"),
+        DestinationSurface.channel("C_PUBLIC_A"),
+    )
+    assert not is_scope_compatible(
+        VisibilityScope.private_channel("G_PRIVATE_A"),
+        DestinationSurface.channel("C_PUBLIC_A"),
+    )
+    assert is_scope_compatible(
+        VisibilityScope.private_channel("G_PRIVATE_A"),
+        DestinationSurface.private_channel("G_PRIVATE_A"),
+    )
+    assert not is_scope_compatible(
+        VisibilityScope.private_channel("G_PRIVATE_B"),
+        DestinationSurface.private_channel("G_PRIVATE_A"),
+    )
+    assert is_scope_compatible(
+        VisibilityScope.dm("D_UA"), DestinationSurface.dm("D_UA", user_id="U_A")
+    )
+    assert is_scope_compatible(
+        VisibilityScope.user("U_A"), DestinationSurface.dm("D_UA", user_id="U_A")
+    )
+    assert not is_scope_compatible(
+        VisibilityScope.user("U_B"), DestinationSurface.dm("D_UA", user_id="U_A")
+    )
+
+
+def test_retrieval_enforces_destination_scope_lifecycle_and_evidence(
+    db_session: Session,
+) -> None:
+    installation = create_installation(db_session)
+    graph = GraphService(db_session)
+
+    add_fact(graph, installation, "workspace:firm", VisibilityScope.workspace())
+    add_fact(graph, installation, "channel:public_a", VisibilityScope.channel("C_A"))
+    add_fact(graph, installation, "channel:public_b", VisibilityScope.channel("C_B"))
+    add_fact(
+        graph,
+        installation,
+        "private:private_a",
+        VisibilityScope.private_channel("G_A"),
+    )
+    add_fact(
+        graph,
+        installation,
+        "private:private_b",
+        VisibilityScope.private_channel("G_B"),
+    )
+    add_fact(graph, installation, "dm:u_a", VisibilityScope.dm("D_UA"))
+    add_fact(graph, installation, "dm:u_b", VisibilityScope.dm("D_UB"))
+    add_fact(graph, installation, "user:u_a", VisibilityScope.user("U_A"))
+    add_fact(graph, installation, "user:u_b", VisibilityScope.user("U_B"))
+    add_fact(
+        graph,
+        installation,
+        "channel:candidate",
+        VisibilityScope.channel("C_A"),
+        lifecycle_state="candidate",
+    )
+    add_fact(
+        graph,
+        installation,
+        "channel:stale",
+        VisibilityScope.channel("C_A"),
+        lifecycle_state="stale",
+    )
+    graph.create_entity(
+        installation_id=installation.id,
+        entity_type="firm_fact",
+        canonical_key="channel:no_evidence",
+        display_name="No evidence",
+        visibility_scope=VisibilityScope.channel("C_A"),
+        source_type="slack_authoritative",
+        lifecycle_state="active",
+    )
+    db_session.commit()
+
+    public_pack = graph.retrieve_current_context(
+        installation_id=installation.id,
+        destination=DestinationSurface.channel("C_A"),
+        max_items=50,
+    )
+    assert entity_keys(public_pack) == {"workspace:firm", "channel:public_a"}
+    assert (
+        graph.scope_guard_violations(public_pack, DestinationSurface.channel("C_A"))
+        == ()
+    )
+    assert all(entity.evidence_ids for entity in public_pack.entities)
+
+    private_pack = graph.retrieve_current_context(
+        installation_id=installation.id,
+        destination=DestinationSurface.private_channel("G_A"),
+        max_items=50,
+    )
+    assert entity_keys(private_pack) == {"workspace:firm", "private:private_a"}
+    assert (
+        graph.scope_guard_violations(
+            private_pack, DestinationSurface.private_channel("G_A")
+        )
+        == ()
+    )
+
+    dm_pack = graph.retrieve_current_context(
+        installation_id=installation.id,
+        destination=DestinationSurface.dm("D_UA", user_id="U_A"),
+        max_items=50,
+    )
+    assert entity_keys(dm_pack) == {"workspace:firm", "dm:u_a", "user:u_a"}
+    assert (
+        graph.scope_guard_violations(
+            dm_pack, DestinationSurface.dm("D_UA", user_id="U_A")
+        )
+        == ()
+    )
+
+
+def test_anchor_traversal_returns_only_scope_safe_evidenced_edges(
+    db_session: Session,
+) -> None:
+    installation = create_installation(db_session)
+    graph = GraphService(db_session)
+
+    channel = add_entity(
+        graph,
+        installation,
+        entity_type="channel",
+        canonical_key="slack_channel:C_A",
+        display_name="#project-a",
+        visibility_scope=VisibilityScope.channel("C_A"),
+    )
+    project = add_entity(
+        graph,
+        installation,
+        entity_type="project",
+        canonical_key="project:alpha",
+        display_name="Project Alpha",
+        visibility_scope=VisibilityScope.channel("C_A"),
+    )
+    private_project = add_entity(
+        graph,
+        installation,
+        entity_type="project",
+        canonical_key="project:private",
+        display_name="Private Project",
+        visibility_scope=VisibilityScope.private_channel("G_A"),
+    )
+    graph.create_edge(
+        installation_id=installation.id,
+        source_entity_id=channel.id,
+        target_entity_id=project.id,
+        relationship_type="maps_to",
+        visibility_scope=VisibilityScope.channel("C_A"),
+        source_type="user_explicit",
+        lifecycle_state="confirmed",
+        confidence_score=Decimal("0.900"),
+        evidence=evidence("explicit channel mapping"),
+    )
+    graph.create_edge(
+        installation_id=installation.id,
+        source_entity_id=channel.id,
+        target_entity_id=private_project.id,
+        relationship_type="maps_to",
+        visibility_scope=VisibilityScope.private_channel("G_A"),
+        source_type="agent_inferred",
+        lifecycle_state="confirmed",
+        confidence_score=Decimal("0.900"),
+        evidence=evidence("private channel mapping"),
+    )
+    graph.create_edge(
+        installation_id=installation.id,
+        source_entity_id=channel.id,
+        target_entity_id=project.id,
+        relationship_type="referenced_in",
+        visibility_scope=VisibilityScope.channel("C_A"),
+        source_type="agent_inferred",
+        lifecycle_state="confirmed",
+        confidence_score=Decimal("0.700"),
+    )
+    db_session.commit()
+
+    pack = graph.retrieve_current_context(
+        installation_id=installation.id,
+        destination=DestinationSurface.channel("C_A"),
+        anchor_keys=("slack_channel:C_A",),
+        max_hops=1,
+        max_items=20,
+    )
+
+    assert entity_keys(pack) == {"slack_channel:C_A", "project:alpha"}
+    assert {edge.relationship_type for edge in pack.edges} == {"maps_to"}
+    assert all(edge.evidence_ids for edge in pack.edges)
+    assert graph.scope_guard_violations(pack, DestinationSurface.channel("C_A")) == ()
+
+
+def cleanup_database(session: Session) -> None:
+    for model in (
+        KnowledgeGraphEvidence,
+        KnowledgeGraphEdge,
+        KnowledgeGraphEntity,
+        Installation,
+    ):
+        session.execute(delete(model))
+
+
+def create_installation(session: Session) -> Installation:
+    installation = Installation(slack_team_id=f"T{uuid.uuid4().hex}")
+    session.add(installation)
+    session.flush()
+    return installation
+
+
+def add_fact(
+    graph: GraphService,
+    installation: Installation,
+    canonical_key: str,
+    visibility_scope: VisibilityScope,
+    *,
+    lifecycle_state: str = "active",
+) -> KnowledgeGraphEntity:
+    return add_entity(
+        graph,
+        installation,
+        entity_type="firm_fact",
+        canonical_key=canonical_key,
+        display_name=canonical_key,
+        visibility_scope=visibility_scope,
+        lifecycle_state=lifecycle_state,
+    )
+
+
+def add_entity(
+    graph: GraphService,
+    installation: Installation,
+    *,
+    entity_type: str,
+    canonical_key: str,
+    display_name: str,
+    visibility_scope: VisibilityScope,
+    lifecycle_state: str = "active",
+) -> KnowledgeGraphEntity:
+    return graph.create_entity(
+        installation_id=installation.id,
+        entity_type=entity_type,
+        canonical_key=canonical_key,
+        display_name=display_name,
+        visibility_scope=visibility_scope,
+        source_type="slack_authoritative",
+        lifecycle_state=lifecycle_state,
+        confidence_score=Decimal("0.900"),
+        evidence=evidence(display_name),
+    )
+
+
+def evidence(snippet: str) -> EvidenceInput:
+    return EvidenceInput(
+        source_type="slack_authoritative",
+        extracted_by="test",
+        source_slack_channel_id="C_EVIDENCE",
+        raw_snippet=snippet,
+        confidence_score=Decimal("0.900"),
+    )
+
+
+def entity_keys(pack) -> set[str]:
+    return {entity.canonical_key for entity in pack.entities}

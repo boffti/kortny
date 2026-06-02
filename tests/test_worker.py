@@ -29,6 +29,9 @@ from kortny.db.models import (
     EncryptedSecret,
     Episode,
     Installation,
+    KnowledgeGraphEdge,
+    KnowledgeGraphEntity,
+    KnowledgeGraphEvidence,
     LLMProvider,
     LLMUsage,
     ModelPricing,
@@ -42,6 +45,11 @@ from kortny.db.models import (
     TaskStatus,
 )
 from kortny.db.session import make_engine, make_session_factory, normalize_database_url
+from kortny.knowledge_graph import (
+    KG_CHANNEL_PROFILE_PROJECTED_MESSAGE,
+    DestinationSurface,
+    GraphService,
+)
 from kortny.llm import ChatMessage, Completion, TokenUsage, ToolCall
 from kortny.llm.routing import ModelRoute, ModelRouteTier
 from kortny.observe.assessment import (
@@ -764,7 +772,9 @@ def test_agent_executor_records_planned_workflow_classifier_event_for_complex_ta
 
     events = task_events(db_session, task)
 
-    assert result.result_summary == "Complex task still executed by the current runtime."
+    assert (
+        result.result_summary == "Complex task still executed by the current runtime."
+    )
     assert any(
         event.payload.get("message") == "planned_workflow_classified"
         and event.payload.get("behavior") == "observe_only"
@@ -851,7 +861,9 @@ def test_agent_executor_shadow_starts_temporal_for_planned_candidate(
 
     events = task_events(db_session, task)
 
-    assert result.result_summary == "Planned task still answered by the current runtime."
+    assert (
+        result.result_summary == "Planned task still answered by the current runtime."
+    )
     assert launch_calls == [str(task.id)]
     assert any(
         event.payload.get("message") == "planned_workflow_classified"
@@ -2046,6 +2058,25 @@ def test_agent_executor_records_channel_profile_when_assessment_completes(
         for event in task_events(db_session, task)
         if event.payload.get("message") == CHANNEL_ASSESSMENT_COMPLETED_MESSAGE
     )
+    projection_event = next(
+        event
+        for event in task_events(db_session, task)
+        if event.payload.get("message") == KG_CHANNEL_PROFILE_PROJECTED_MESSAGE
+    )
+    channel_entity = db_session.scalar(
+        select(KnowledgeGraphEntity).where(
+            KnowledgeGraphEntity.installation_id == task.installation_id,
+            KnowledgeGraphEntity.canonical_key == "slack_channel:CObserve",
+            KnowledgeGraphEntity.is_current.is_(True),
+        )
+    )
+    profile_entity = db_session.scalar(
+        select(KnowledgeGraphEntity).where(
+            KnowledgeGraphEntity.installation_id == task.installation_id,
+            KnowledgeGraphEntity.canonical_key == "channel_profile:CObserve",
+            KnowledgeGraphEntity.is_current.is_(True),
+        )
+    )
 
     assert membership.metadata_json["assessment_status"] == "posted"
     assert profile is not None
@@ -2055,10 +2086,32 @@ def test_agent_executor_records_channel_profile_when_assessment_completes(
     assert profile.source_task_id == task.id
     assert completed_event.payload["profile_id"] == str(profile.id)
     assert completed_event.payload["profile_version"] == 1
+    assert projection_event.payload["channel_id"] == "CObserve"
+    assert projection_event.payload["entity_count"] == 2
+    assert projection_event.payload["edge_count"] == 1
+    assert projection_event.payload["evidence_count"] == 3
+    assert channel_entity is not None
+    assert channel_entity.entity_type == "channel"
+    assert channel_entity.lifecycle_state == "active"
+    assert channel_entity.visibility_scope_type == "channel"
+    assert profile_entity is not None
+    assert profile_entity.lifecycle_state == "candidate"
+    current_context = GraphService(db_session).retrieve_current_context(
+        installation_id=task.installation_id,
+        destination=DestinationSurface.channel("CObserve"),
+        anchor_keys=("slack_channel:CObserve",),
+        max_hops=1,
+    )
+    assert {entity.canonical_key for entity in current_context.entities} == {
+        "slack_channel:CObserve"
+    }
 
 
 def cleanup_database(session: Session) -> None:
     for model in (
+        KnowledgeGraphEvidence,
+        KnowledgeGraphEdge,
+        KnowledgeGraphEntity,
         Episode,
         ObserveChannelProfile,
         SlackChannelMembership,

@@ -15,6 +15,7 @@ from enum import StrEnum
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     CheckConstraint,
     ForeignKey,
     Index,
@@ -968,6 +969,335 @@ class ObserveChannelProfile(Base):
             "last_profiled_at",
         ),
         Index("idx_observe_channel_profiles_source_task", "source_task_id"),
+    )
+
+
+class KnowledgeGraphEntity(Base):
+    __tablename__ = "kg_entities"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    installation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("installations.id", ondelete="CASCADE"), nullable=False
+    )
+    entity_type: Mapped[str] = mapped_column(String, nullable=False)
+    canonical_key: Mapped[str] = mapped_column(String, nullable=False)
+    display_name: Mapped[str | None] = mapped_column(String)
+    external_ref_type: Mapped[str | None] = mapped_column(String)
+    external_ref_id: Mapped[str | None] = mapped_column(String)
+    attrs_json: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    visibility_scope_type: Mapped[str] = mapped_column(String, nullable=False)
+    visibility_scope_id: Mapped[str | None] = mapped_column(String)
+    source_type: Mapped[str] = mapped_column(String, nullable=False)
+    confidence_score: Mapped[Decimal] = mapped_column(
+        Numeric(4, 3), nullable=False, server_default=text("0.500")
+    )
+    confidence_reason: Mapped[str | None] = mapped_column(Text)
+    lifecycle_state: Mapped[str] = mapped_column(
+        String, nullable=False, server_default=text("'candidate'")
+    )
+    valid_from: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now()
+    )
+    valid_to: Mapped[datetime | None] = mapped_column(TZ)
+    recorded_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now()
+    )
+    expired_at: Mapped[datetime | None] = mapped_column(TZ)
+    is_current: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("true")
+    )
+    freshness_window_days: Mapped[int | None] = mapped_column(Integer)
+    last_reinforced_at: Mapped[datetime | None] = mapped_column(TZ)
+    reinforcement_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "entity_type in "
+            "('person', 'channel', 'project', 'firm_fact', 'artifact', "
+            "'decision', 'open_question', 'commitment', 'integration', "
+            "'external_entity')",
+            name="ck_kg_entities_type",
+        ),
+        CheckConstraint(
+            "visibility_scope_type in "
+            "('workspace', 'channel', 'private_channel', 'dm', 'user')",
+            name="ck_kg_entities_visibility_scope_type",
+        ),
+        CheckConstraint(
+            "(visibility_scope_type = 'workspace' and visibility_scope_id is null) or "
+            "(visibility_scope_type in ('channel', 'private_channel', 'dm', 'user') "
+            "and visibility_scope_id is not null)",
+            name="ck_kg_entities_visibility_scope_id",
+        ),
+        CheckConstraint(
+            "source_type in "
+            "('slack_authoritative', 'user_explicit', 'agent_inferred', "
+            "'onboarding_scan', 'task_summary', 'integration_result', "
+            "'workspace_state', 'admin_import')",
+            name="ck_kg_entities_source_type",
+        ),
+        CheckConstraint(
+            "lifecycle_state in "
+            "('candidate', 'active', 'confirmed', 'stale', 'superseded', "
+            "'contradicted', 'archived', 'forgotten')",
+            name="ck_kg_entities_lifecycle_state",
+        ),
+        CheckConstraint(
+            "confidence_score >= 0 and confidence_score <= 1",
+            name="ck_kg_entities_confidence_score",
+        ),
+        CheckConstraint(
+            "reinforcement_count >= 0",
+            name="ck_kg_entities_reinforcement_count",
+        ),
+        Index(
+            "idx_kg_entities_current_unique_key",
+            "installation_id",
+            "canonical_key",
+            unique=True,
+            postgresql_where=text("is_current = true AND expired_at IS NULL"),
+        ),
+        Index(
+            "idx_kg_entities_lookup",
+            "installation_id",
+            "entity_type",
+            "lifecycle_state",
+            "is_current",
+        ),
+        Index(
+            "idx_kg_entities_scope",
+            "installation_id",
+            "visibility_scope_type",
+            "visibility_scope_id",
+        ),
+        Index("idx_kg_entities_external_ref", "external_ref_type", "external_ref_id"),
+        Index("idx_kg_entities_attrs", "attrs_json", postgresql_using="gin"),
+    )
+
+
+class KnowledgeGraphEdge(Base):
+    __tablename__ = "kg_edges"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    installation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("installations.id", ondelete="CASCADE"), nullable=False
+    )
+    source_entity_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("kg_entities.id", ondelete="CASCADE"), nullable=False
+    )
+    target_entity_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("kg_entities.id", ondelete="CASCADE"), nullable=False
+    )
+    relationship_type: Mapped[str] = mapped_column(String, nullable=False)
+    attrs_json: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    visibility_scope_type: Mapped[str] = mapped_column(String, nullable=False)
+    visibility_scope_id: Mapped[str | None] = mapped_column(String)
+    source_type: Mapped[str] = mapped_column(String, nullable=False)
+    confidence_score: Mapped[Decimal] = mapped_column(
+        Numeric(4, 3), nullable=False, server_default=text("0.500")
+    )
+    confidence_reason: Mapped[str | None] = mapped_column(Text)
+    lifecycle_state: Mapped[str] = mapped_column(
+        String, nullable=False, server_default=text("'candidate'")
+    )
+    valid_from: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now()
+    )
+    valid_to: Mapped[datetime | None] = mapped_column(TZ)
+    recorded_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now()
+    )
+    expired_at: Mapped[datetime | None] = mapped_column(TZ)
+    is_current: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("true")
+    )
+    freshness_window_days: Mapped[int | None] = mapped_column(Integer)
+    last_reinforced_at: Mapped[datetime | None] = mapped_column(TZ)
+    reinforcement_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "relationship_type in "
+            "('member_of', 'maps_to', 'works_on', 'owns', 'belongs_to', "
+            "'referenced_in', 'made_in', 'affects', 'relates_to', 'available_for')",
+            name="ck_kg_edges_relationship_type",
+        ),
+        CheckConstraint(
+            "visibility_scope_type in "
+            "('workspace', 'channel', 'private_channel', 'dm', 'user')",
+            name="ck_kg_edges_visibility_scope_type",
+        ),
+        CheckConstraint(
+            "(visibility_scope_type = 'workspace' and visibility_scope_id is null) or "
+            "(visibility_scope_type in ('channel', 'private_channel', 'dm', 'user') "
+            "and visibility_scope_id is not null)",
+            name="ck_kg_edges_visibility_scope_id",
+        ),
+        CheckConstraint(
+            "source_type in "
+            "('slack_authoritative', 'user_explicit', 'agent_inferred', "
+            "'onboarding_scan', 'task_summary', 'integration_result', "
+            "'workspace_state', 'admin_import')",
+            name="ck_kg_edges_source_type",
+        ),
+        CheckConstraint(
+            "lifecycle_state in "
+            "('candidate', 'active', 'confirmed', 'stale', 'superseded', "
+            "'contradicted', 'archived', 'forgotten')",
+            name="ck_kg_edges_lifecycle_state",
+        ),
+        CheckConstraint(
+            "confidence_score >= 0 and confidence_score <= 1",
+            name="ck_kg_edges_confidence_score",
+        ),
+        CheckConstraint(
+            "reinforcement_count >= 0",
+            name="ck_kg_edges_reinforcement_count",
+        ),
+        Index(
+            "idx_kg_edges_current_unique",
+            "installation_id",
+            "source_entity_id",
+            "target_entity_id",
+            "relationship_type",
+            "visibility_scope_type",
+            text("coalesce(visibility_scope_id, '')"),
+            unique=True,
+            postgresql_where=text("is_current = true AND expired_at IS NULL"),
+        ),
+        Index(
+            "idx_kg_edges_source_lookup",
+            "installation_id",
+            "source_entity_id",
+            "relationship_type",
+            "is_current",
+        ),
+        Index(
+            "idx_kg_edges_target_lookup",
+            "installation_id",
+            "target_entity_id",
+            "relationship_type",
+            "is_current",
+        ),
+        Index(
+            "idx_kg_edges_scope",
+            "installation_id",
+            "visibility_scope_type",
+            "visibility_scope_id",
+        ),
+        Index("idx_kg_edges_attrs", "attrs_json", postgresql_using="gin"),
+    )
+
+
+class KnowledgeGraphEvidence(Base):
+    __tablename__ = "kg_evidence"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    installation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("installations.id", ondelete="CASCADE"), nullable=False
+    )
+    target_kind: Mapped[str] = mapped_column(String, nullable=False)
+    target_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    source_type: Mapped[str] = mapped_column(String, nullable=False)
+    source_task_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("tasks.id", ondelete="SET NULL")
+    )
+    source_episode_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("episodes.id", ondelete="SET NULL")
+    )
+    source_task_event_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("task_events.id", ondelete="SET NULL")
+    )
+    source_observation_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("observation_events.id", ondelete="SET NULL")
+    )
+    source_slack_channel_id: Mapped[str | None] = mapped_column(String)
+    source_slack_message_ts: Mapped[str | None] = mapped_column(String)
+    source_slack_file_id: Mapped[str | None] = mapped_column(String)
+    source_url: Mapped[str | None] = mapped_column(Text)
+    extracted_by: Mapped[str] = mapped_column(String, nullable=False)
+    raw_snippet: Mapped[str | None] = mapped_column(Text)
+    confidence_score: Mapped[Decimal | None] = mapped_column(Numeric(4, 3))
+    confidence_reason: Mapped[str | None] = mapped_column(Text)
+    consensus_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("1")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "target_kind in ('entity', 'edge')",
+            name="ck_kg_evidence_target_kind",
+        ),
+        CheckConstraint(
+            "source_type in "
+            "('slack_authoritative', 'user_explicit', 'agent_inferred', "
+            "'onboarding_scan', 'task_summary', 'integration_result', "
+            "'workspace_state', 'admin_import')",
+            name="ck_kg_evidence_source_type",
+        ),
+        CheckConstraint(
+            "consensus_count > 0",
+            name="ck_kg_evidence_consensus_count",
+        ),
+        CheckConstraint(
+            "confidence_score is null or "
+            "(confidence_score >= 0 and confidence_score <= 1)",
+            name="ck_kg_evidence_confidence_score",
+        ),
+        CheckConstraint(
+            "source_type = 'admin_import' or "
+            "source_task_id is not null or "
+            "source_episode_id is not null or "
+            "source_task_event_id is not null or "
+            "source_observation_id is not null or "
+            "source_slack_channel_id is not null or "
+            "source_slack_file_id is not null or "
+            "source_url is not null",
+            name="ck_kg_evidence_source_reference",
+        ),
+        Index(
+            "idx_kg_evidence_target",
+            "target_kind",
+            "target_id",
+        ),
+        Index("idx_kg_evidence_task", "source_task_id"),
+        Index("idx_kg_evidence_episode", "source_episode_id"),
+        Index("idx_kg_evidence_observation", "source_observation_id"),
+        Index(
+            "idx_kg_evidence_slack_message",
+            "installation_id",
+            "source_slack_channel_id",
+            "source_slack_message_ts",
+        ),
     )
 
 

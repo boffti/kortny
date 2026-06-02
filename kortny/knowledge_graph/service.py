@@ -1,0 +1,576 @@
+"""Postgres-backed workspace knowledge graph service."""
+
+from __future__ import annotations
+
+import uuid
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from decimal import Decimal
+
+from sqlalchemy import and_, exists, func, or_, select
+from sqlalchemy.orm import Session
+
+from kortny.db.models import (
+    KnowledgeGraphEdge,
+    KnowledgeGraphEntity,
+    KnowledgeGraphEvidence,
+)
+from kortny.knowledge_graph.scopes import (
+    DestinationSurface,
+    VisibilityScope,
+    compatible_scope_predicate,
+    is_scope_compatible,
+)
+
+CURRENT_CONTEXT_STATES = ("active", "confirmed")
+
+
+@dataclass(frozen=True)
+class EvidenceInput:
+    source_type: str
+    extracted_by: str
+    source_task_id: uuid.UUID | None = None
+    source_episode_id: uuid.UUID | None = None
+    source_task_event_id: int | None = None
+    source_observation_id: uuid.UUID | None = None
+    source_slack_channel_id: str | None = None
+    source_slack_message_ts: str | None = None
+    source_slack_file_id: str | None = None
+    source_url: str | None = None
+    raw_snippet: str | None = None
+    confidence_score: Decimal | None = None
+    confidence_reason: str | None = None
+    consensus_count: int = 1
+
+
+@dataclass(frozen=True)
+class RetrievedGraphEntity:
+    id: uuid.UUID
+    entity_type: str
+    canonical_key: str
+    display_name: str | None
+    visibility_scope: VisibilityScope
+    lifecycle_state: str
+    confidence_score: Decimal
+    evidence_ids: tuple[uuid.UUID, ...]
+
+
+@dataclass(frozen=True)
+class RetrievedGraphEdge:
+    id: uuid.UUID
+    source_entity_id: uuid.UUID
+    target_entity_id: uuid.UUID
+    relationship_type: str
+    visibility_scope: VisibilityScope
+    lifecycle_state: str
+    confidence_score: Decimal
+    evidence_ids: tuple[uuid.UUID, ...]
+
+
+@dataclass(frozen=True)
+class GraphContextPack:
+    entities: tuple[RetrievedGraphEntity, ...]
+    edges: tuple[RetrievedGraphEdge, ...]
+    returned_scopes: tuple[VisibilityScope, ...]
+    omitted_count: int
+    omitted_reasons: tuple[str, ...]
+
+
+class GraphService:
+    """Service API for the HIG-181 workspace knowledge graph."""
+
+    def __init__(self, session: Session) -> None:
+        self.session = session
+
+    def create_entity(
+        self,
+        *,
+        installation_id: uuid.UUID,
+        entity_type: str,
+        canonical_key: str,
+        visibility_scope: VisibilityScope,
+        source_type: str,
+        display_name: str | None = None,
+        external_ref_type: str | None = None,
+        external_ref_id: str | None = None,
+        attrs_json: dict | None = None,
+        lifecycle_state: str = "candidate",
+        confidence_score: Decimal | float = Decimal("0.500"),
+        confidence_reason: str | None = None,
+        evidence: EvidenceInput | None = None,
+    ) -> KnowledgeGraphEntity:
+        entity = KnowledgeGraphEntity(
+            installation_id=installation_id,
+            entity_type=entity_type,
+            canonical_key=canonical_key,
+            display_name=display_name,
+            external_ref_type=external_ref_type,
+            external_ref_id=external_ref_id,
+            attrs_json=attrs_json or {},
+            visibility_scope_type=visibility_scope.scope_type,
+            visibility_scope_id=visibility_scope.scope_id,
+            source_type=source_type,
+            lifecycle_state=lifecycle_state,
+            confidence_score=confidence_score,
+            confidence_reason=confidence_reason,
+        )
+        self.session.add(entity)
+        self.session.flush()
+        if evidence is not None:
+            self.add_evidence(
+                installation_id=installation_id,
+                target_kind="entity",
+                target_id=entity.id,
+                evidence=evidence,
+            )
+        return entity
+
+    def create_edge(
+        self,
+        *,
+        installation_id: uuid.UUID,
+        source_entity_id: uuid.UUID,
+        target_entity_id: uuid.UUID,
+        relationship_type: str,
+        visibility_scope: VisibilityScope,
+        source_type: str,
+        attrs_json: dict | None = None,
+        lifecycle_state: str = "candidate",
+        confidence_score: Decimal | float = Decimal("0.500"),
+        confidence_reason: str | None = None,
+        evidence: EvidenceInput | None = None,
+    ) -> KnowledgeGraphEdge:
+        edge = KnowledgeGraphEdge(
+            installation_id=installation_id,
+            source_entity_id=source_entity_id,
+            target_entity_id=target_entity_id,
+            relationship_type=relationship_type,
+            attrs_json=attrs_json or {},
+            visibility_scope_type=visibility_scope.scope_type,
+            visibility_scope_id=visibility_scope.scope_id,
+            source_type=source_type,
+            lifecycle_state=lifecycle_state,
+            confidence_score=confidence_score,
+            confidence_reason=confidence_reason,
+        )
+        self.session.add(edge)
+        self.session.flush()
+        if evidence is not None:
+            self.add_evidence(
+                installation_id=installation_id,
+                target_kind="edge",
+                target_id=edge.id,
+                evidence=evidence,
+            )
+        return edge
+
+    def add_evidence(
+        self,
+        *,
+        installation_id: uuid.UUID,
+        target_kind: str,
+        target_id: uuid.UUID,
+        evidence: EvidenceInput,
+    ) -> KnowledgeGraphEvidence:
+        row = KnowledgeGraphEvidence(
+            installation_id=installation_id,
+            target_kind=target_kind,
+            target_id=target_id,
+            source_type=evidence.source_type,
+            source_task_id=evidence.source_task_id,
+            source_episode_id=evidence.source_episode_id,
+            source_task_event_id=evidence.source_task_event_id,
+            source_observation_id=evidence.source_observation_id,
+            source_slack_channel_id=evidence.source_slack_channel_id,
+            source_slack_message_ts=evidence.source_slack_message_ts,
+            source_slack_file_id=evidence.source_slack_file_id,
+            source_url=evidence.source_url,
+            extracted_by=evidence.extracted_by,
+            raw_snippet=evidence.raw_snippet,
+            confidence_score=evidence.confidence_score,
+            confidence_reason=evidence.confidence_reason,
+            consensus_count=evidence.consensus_count,
+        )
+        self.session.add(row)
+        self.session.flush()
+        return row
+
+    def supersede_entity(
+        self,
+        current: KnowledgeGraphEntity,
+        replacement: KnowledgeGraphEntity | None = None,
+    ) -> None:
+        now = datetime.now(UTC)
+        current.is_current = False
+        current.lifecycle_state = "superseded"
+        current.valid_to = now
+        current.expired_at = now
+        if replacement is not None:
+            replacement.is_current = True
+
+    def supersede_edge(
+        self,
+        current: KnowledgeGraphEdge,
+        replacement: KnowledgeGraphEdge | None = None,
+    ) -> None:
+        now = datetime.now(UTC)
+        current.is_current = False
+        current.lifecycle_state = "superseded"
+        current.valid_to = now
+        current.expired_at = now
+        if replacement is not None:
+            replacement.is_current = True
+
+    def retrieve_current_context(
+        self,
+        *,
+        installation_id: uuid.UUID,
+        destination: DestinationSurface,
+        anchor_keys: Sequence[str] = (),
+        max_hops: int = 1,
+        max_items: int = 20,
+    ) -> GraphContextPack:
+        """Return current graph context allowed for the destination surface."""
+
+        if max_hops < 0:
+            raise ValueError("max_hops must be non-negative")
+        if max_items <= 0:
+            return GraphContextPack((), (), (), 0, ("max_items<=0",))
+
+        entity_rows: list[KnowledgeGraphEntity]
+        edge_rows: list[KnowledgeGraphEdge]
+        omitted_reasons: list[str] = []
+
+        if anchor_keys:
+            anchor_rows = self._select_current_entities(
+                installation_id=installation_id,
+                destination=destination,
+                canonical_keys=anchor_keys,
+                limit=max_items,
+            )
+            if not anchor_rows:
+                return GraphContextPack((), (), (), 0, ("no_anchors_found",))
+            entity_ids = {row.id for row in anchor_rows}
+            edge_ids: set[uuid.UUID] = set()
+            frontier = set(entity_ids)
+            for _hop in range(max_hops):
+                if not frontier:
+                    break
+                hop_edges = self._select_current_edges_for_frontier(
+                    installation_id=installation_id,
+                    destination=destination,
+                    frontier_ids=frontier,
+                    limit=max_items,
+                )
+                next_frontier: set[uuid.UUID] = set()
+                for edge in hop_edges:
+                    if edge.id in edge_ids:
+                        continue
+                    edge_ids.add(edge.id)
+                    for candidate_id in (edge.source_entity_id, edge.target_entity_id):
+                        if candidate_id not in entity_ids:
+                            next_frontier.add(candidate_id)
+                            entity_ids.add(candidate_id)
+                frontier = next_frontier
+
+            entity_rows = self._select_current_entities_by_id(
+                installation_id=installation_id,
+                destination=destination,
+                entity_ids=entity_ids,
+                limit=max_items,
+            )
+            edge_rows = self._select_current_edges_by_id(
+                installation_id=installation_id,
+                destination=destination,
+                edge_ids=edge_ids,
+                limit=max_items,
+            )
+        else:
+            entity_rows = self._select_current_entities(
+                installation_id=installation_id,
+                destination=destination,
+                limit=max_items,
+            )
+            edge_rows = self._select_current_edges(
+                installation_id=installation_id,
+                destination=destination,
+                limit=max_items,
+            )
+
+        entity_evidence = self._evidence_ids("entity", [row.id for row in entity_rows])
+        edge_evidence = self._evidence_ids("edge", [row.id for row in edge_rows])
+        entities = tuple(
+            RetrievedGraphEntity(
+                id=row.id,
+                entity_type=row.entity_type,
+                canonical_key=row.canonical_key,
+                display_name=row.display_name,
+                visibility_scope=VisibilityScope(
+                    row.visibility_scope_type, row.visibility_scope_id
+                ),
+                lifecycle_state=row.lifecycle_state,
+                confidence_score=row.confidence_score,
+                evidence_ids=tuple(entity_evidence.get(row.id, ())),
+            )
+            for row in entity_rows
+        )
+        edges = tuple(
+            RetrievedGraphEdge(
+                id=row.id,
+                source_entity_id=row.source_entity_id,
+                target_entity_id=row.target_entity_id,
+                relationship_type=row.relationship_type,
+                visibility_scope=VisibilityScope(
+                    row.visibility_scope_type, row.visibility_scope_id
+                ),
+                lifecycle_state=row.lifecycle_state,
+                confidence_score=row.confidence_score,
+                evidence_ids=tuple(edge_evidence.get(row.id, ())),
+            )
+            for row in edge_rows
+        )
+        omitted_count = 0
+        if len(entity_rows) >= max_items:
+            omitted_count += 1
+            omitted_reasons.append("entity_limit_reached")
+        if len(edge_rows) >= max_items:
+            omitted_count += 1
+            omitted_reasons.append("edge_limit_reached")
+
+        return GraphContextPack(
+            entities=entities,
+            edges=edges,
+            returned_scopes=_returned_scopes(entities, edges),
+            omitted_count=omitted_count,
+            omitted_reasons=tuple(omitted_reasons),
+        )
+
+    @staticmethod
+    def scope_guard_violations(
+        pack: GraphContextPack,
+        destination: DestinationSurface,
+    ) -> tuple[VisibilityScope, ...]:
+        scopes = [entity.visibility_scope for entity in pack.entities]
+        scopes.extend(edge.visibility_scope for edge in pack.edges)
+        return tuple(
+            scope for scope in scopes if not is_scope_compatible(scope, destination)
+        )
+
+    def _select_current_entities(
+        self,
+        *,
+        installation_id: uuid.UUID,
+        destination: DestinationSurface,
+        canonical_keys: Sequence[str] = (),
+        limit: int,
+    ) -> list[KnowledgeGraphEntity]:
+        predicates = [
+            KnowledgeGraphEntity.installation_id == installation_id,
+            self._current_entity_predicate(),
+            compatible_scope_predicate(KnowledgeGraphEntity, destination),
+            self._entity_has_evidence_predicate(),
+        ]
+        if canonical_keys:
+            predicates.append(KnowledgeGraphEntity.canonical_key.in_(canonical_keys))
+        return list(
+            self.session.scalars(
+                select(KnowledgeGraphEntity)
+                .where(*predicates)
+                .order_by(
+                    KnowledgeGraphEntity.confidence_score.desc(),
+                    KnowledgeGraphEntity.updated_at.desc(),
+                )
+                .limit(limit)
+            )
+        )
+
+    def _select_current_entities_by_id(
+        self,
+        *,
+        installation_id: uuid.UUID,
+        destination: DestinationSurface,
+        entity_ids: Iterable[uuid.UUID],
+        limit: int,
+    ) -> list[KnowledgeGraphEntity]:
+        ids = tuple(entity_ids)
+        if not ids:
+            return []
+        return list(
+            self.session.scalars(
+                select(KnowledgeGraphEntity)
+                .where(
+                    KnowledgeGraphEntity.installation_id == installation_id,
+                    KnowledgeGraphEntity.id.in_(ids),
+                    self._current_entity_predicate(),
+                    compatible_scope_predicate(KnowledgeGraphEntity, destination),
+                    self._entity_has_evidence_predicate(),
+                )
+                .order_by(
+                    KnowledgeGraphEntity.confidence_score.desc(),
+                    KnowledgeGraphEntity.updated_at.desc(),
+                )
+                .limit(limit)
+            )
+        )
+
+    def _select_current_edges(
+        self,
+        *,
+        installation_id: uuid.UUID,
+        destination: DestinationSurface,
+        limit: int,
+    ) -> list[KnowledgeGraphEdge]:
+        return list(
+            self.session.scalars(
+                select(KnowledgeGraphEdge)
+                .where(
+                    KnowledgeGraphEdge.installation_id == installation_id,
+                    self._current_edge_predicate(),
+                    compatible_scope_predicate(KnowledgeGraphEdge, destination),
+                    self._edge_has_evidence_predicate(),
+                )
+                .order_by(
+                    KnowledgeGraphEdge.confidence_score.desc(),
+                    KnowledgeGraphEdge.updated_at.desc(),
+                )
+                .limit(limit)
+            )
+        )
+
+    def _select_current_edges_for_frontier(
+        self,
+        *,
+        installation_id: uuid.UUID,
+        destination: DestinationSurface,
+        frontier_ids: set[uuid.UUID],
+        limit: int,
+    ) -> list[KnowledgeGraphEdge]:
+        if not frontier_ids:
+            return []
+        return list(
+            self.session.scalars(
+                select(KnowledgeGraphEdge)
+                .where(
+                    KnowledgeGraphEdge.installation_id == installation_id,
+                    or_(
+                        KnowledgeGraphEdge.source_entity_id.in_(frontier_ids),
+                        KnowledgeGraphEdge.target_entity_id.in_(frontier_ids),
+                    ),
+                    self._current_edge_predicate(),
+                    compatible_scope_predicate(KnowledgeGraphEdge, destination),
+                    self._edge_has_evidence_predicate(),
+                )
+                .order_by(
+                    KnowledgeGraphEdge.confidence_score.desc(),
+                    KnowledgeGraphEdge.updated_at.desc(),
+                )
+                .limit(limit)
+            )
+        )
+
+    def _select_current_edges_by_id(
+        self,
+        *,
+        installation_id: uuid.UUID,
+        destination: DestinationSurface,
+        edge_ids: Iterable[uuid.UUID],
+        limit: int,
+    ) -> list[KnowledgeGraphEdge]:
+        ids = tuple(edge_ids)
+        if not ids:
+            return []
+        return list(
+            self.session.scalars(
+                select(KnowledgeGraphEdge)
+                .where(
+                    KnowledgeGraphEdge.installation_id == installation_id,
+                    KnowledgeGraphEdge.id.in_(ids),
+                    self._current_edge_predicate(),
+                    compatible_scope_predicate(KnowledgeGraphEdge, destination),
+                    self._edge_has_evidence_predicate(),
+                )
+                .order_by(
+                    KnowledgeGraphEdge.confidence_score.desc(),
+                    KnowledgeGraphEdge.updated_at.desc(),
+                )
+                .limit(limit)
+            )
+        )
+
+    def _evidence_ids(
+        self,
+        target_kind: str,
+        target_ids: Sequence[uuid.UUID],
+    ) -> dict[uuid.UUID, list[uuid.UUID]]:
+        if not target_ids:
+            return {}
+        rows = self.session.execute(
+            select(KnowledgeGraphEvidence.target_id, KnowledgeGraphEvidence.id).where(
+                KnowledgeGraphEvidence.target_kind == target_kind,
+                KnowledgeGraphEvidence.target_id.in_(target_ids),
+            )
+        )
+        result: dict[uuid.UUID, list[uuid.UUID]] = {}
+        for target_id, evidence_id in rows:
+            result.setdefault(target_id, []).append(evidence_id)
+        return result
+
+    @staticmethod
+    def _current_entity_predicate():
+        return and_(
+            KnowledgeGraphEntity.is_current.is_(True),
+            KnowledgeGraphEntity.expired_at.is_(None),
+            or_(
+                KnowledgeGraphEntity.valid_to.is_(None),
+                KnowledgeGraphEntity.valid_to > func.now(),
+            ),
+            KnowledgeGraphEntity.lifecycle_state.in_(CURRENT_CONTEXT_STATES),
+        )
+
+    @staticmethod
+    def _current_edge_predicate():
+        return and_(
+            KnowledgeGraphEdge.is_current.is_(True),
+            KnowledgeGraphEdge.expired_at.is_(None),
+            or_(
+                KnowledgeGraphEdge.valid_to.is_(None),
+                KnowledgeGraphEdge.valid_to > func.now(),
+            ),
+            KnowledgeGraphEdge.lifecycle_state.in_(CURRENT_CONTEXT_STATES),
+        )
+
+    @staticmethod
+    def _entity_has_evidence_predicate():
+        return exists().where(
+            KnowledgeGraphEvidence.target_kind == "entity",
+            KnowledgeGraphEvidence.target_id == KnowledgeGraphEntity.id,
+            KnowledgeGraphEvidence.installation_id
+            == KnowledgeGraphEntity.installation_id,
+        )
+
+    @staticmethod
+    def _edge_has_evidence_predicate():
+        return exists().where(
+            KnowledgeGraphEvidence.target_kind == "edge",
+            KnowledgeGraphEvidence.target_id == KnowledgeGraphEdge.id,
+            KnowledgeGraphEvidence.installation_id
+            == KnowledgeGraphEdge.installation_id,
+        )
+
+
+def _returned_scopes(
+    entities: Sequence[RetrievedGraphEntity],
+    edges: Sequence[RetrievedGraphEdge],
+) -> tuple[VisibilityScope, ...]:
+    seen: set[tuple[str, str | None]] = set()
+    scopes: list[VisibilityScope] = []
+    for scope in [entity.visibility_scope for entity in entities] + [
+        edge.visibility_scope for edge in edges
+    ]:
+        key = (scope.scope_type, scope.scope_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        scopes.append(scope)
+    return tuple(scopes)

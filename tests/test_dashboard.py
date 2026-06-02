@@ -11,7 +11,7 @@ from alembic import command
 from alembic.config import Config
 from fastapi.testclient import TestClient
 from httpx import Response
-from sqlalchemy import Engine, delete, select
+from sqlalchemy import Engine, delete, func, select
 from sqlalchemy.orm import Session
 
 from kortny.composio import (
@@ -38,6 +38,7 @@ from kortny.db.models import (
     LLMProvider,
     LLMUsage,
     ModelPricing,
+    SlackChannelMembership,
     SlackIdentity,
     Task,
     TaskEvent,
@@ -46,6 +47,11 @@ from kortny.db.models import (
     WorkspaceState,
 )
 from kortny.db.session import make_engine, make_session_factory, normalize_database_url
+from kortny.knowledge_graph.refresh import KG_CHANNEL_REFRESH_REQUESTED_MESSAGE
+from kortny.observe.assessment import (
+    CHANNEL_ASSESSMENT_REQUESTED_MESSAGE,
+    CHANNEL_ASSESSMENT_SUPPRESS_SLACK_POST_KEY,
+)
 from tests.db_safety import assert_safe_test_database
 
 TEST_POSTGRES_URL = os.environ.get("KORTNY_TEST_POSTGRES_URL")
@@ -1969,6 +1975,10 @@ def test_dashboard_knowledge_graph_page_shows_entities_relationships_and_evidenc
 
     assert response.status_code == 200
     assert "Knowledge Graph" in response.text
+    assert "Graph Map" in response.text
+    assert "2 nodes / 1 links" in response.text
+    assert 'data-kg-map-node="' in response.text
+    assert 'data-kg-edge="' in response.text
     assert "Entities" in response.text
     assert "slack_channel:CCost" in response.text
     assert "#ops-desk" in response.text
@@ -1983,6 +1993,7 @@ def test_dashboard_knowledge_graph_page_shows_entities_relationships_and_evidenc
 
     assert relationship_response.status_code == 200
     assert "Relationships" in relationship_response.text
+    assert "Graph Map" in relationship_response.text
     assert "relates_to" in relationship_response.text
     assert "slack_channel:CCost" in relationship_response.text
     assert "project:operator-console" in relationship_response.text
@@ -1995,6 +2006,89 @@ def test_dashboard_knowledge_graph_page_shows_entities_relationships_and_evidenc
     assert candidate_response.status_code == 200
     assert "project:operator-console" in candidate_response.text
     assert "slack_channel:CCost" not in candidate_response.text
+
+
+def test_dashboard_knowledge_graph_refresh_queues_channel_assessment_tasks(
+    client: tuple[TestClient, Session],
+) -> None:
+    test_client, session = client
+    task = create_dashboard_task(session)
+    membership = SlackChannelMembership(
+        installation_id=task.installation_id,
+        channel_id="CRefresh",
+        channel_name="graph-refresh",
+        channel_type="channel",
+        membership_status="active",
+        discovered_via="message_observation",
+        added_by_user_id="UCost",
+        onboarding_status="posted",
+        onboarding_message_ts="1779900000.000000",
+        metadata_json={},
+    )
+    session.add(membership)
+    session.commit()
+    login(test_client)
+
+    page_response = test_client.get("/knowledge-graph")
+
+    assert page_response.status_code == 200
+    assert "Known Channels" in page_response.text
+    assert "Profiled Channels" in page_response.text
+    assert "Refresh Channel Graph" in page_response.text
+
+    response = test_client.post(
+        "/knowledge-graph/refresh",
+        data={"next": "/knowledge-graph"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert "Queued+1+graph+refresh+assessment" in response.headers["location"]
+    session.refresh(membership)
+    queued_task_id = uuid.UUID(membership.metadata_json["assessment_task_id"])
+    queued_task = session.get(Task, queued_task_id)
+    assert queued_task is not None
+    assert queued_task.status == TaskStatus.pending
+    assert queued_task.slack_channel_id == "CRefresh"
+    assert queued_task.slack_thread_ts == "1779900000.000000"
+    assert queued_task.slack_user_id == "dashboard:admin"
+    assert queued_task.identity_kind == "synthetic"
+    assert queued_task.identity_key.startswith(
+        "synthetic:dashboard_knowledge_graph_refresh:"
+    )
+    assert membership.metadata_json["assessment_source"] == (
+        "dashboard_knowledge_graph_refresh"
+    )
+    assert session.scalar(
+        select(TaskEvent).where(
+            TaskEvent.task_id == queued_task_id,
+            TaskEvent.payload["message"].as_string()
+            == CHANNEL_ASSESSMENT_REQUESTED_MESSAGE,
+            TaskEvent.payload[
+                CHANNEL_ASSESSMENT_SUPPRESS_SLACK_POST_KEY
+            ].as_boolean()
+            .is_(True),
+        )
+    )
+    assert session.scalar(
+        select(TaskEvent).where(
+            TaskEvent.task_id == queued_task_id,
+            TaskEvent.payload["message"].as_string()
+            == KG_CHANNEL_REFRESH_REQUESTED_MESSAGE,
+        )
+    )
+
+    duplicate_response = test_client.post(
+        "/knowledge-graph/refresh",
+        data={"next": "/knowledge-graph"},
+        follow_redirects=False,
+    )
+
+    assert duplicate_response.status_code == 303
+    assert "Queued+0+graph+refresh+assessments" in duplicate_response.headers[
+        "location"
+    ]
+    assert session.scalar(select(func.count()).select_from(Task)) == 2
 
 
 def test_dashboard_knowledge_graph_review_actions_preserve_evidence(
@@ -2526,6 +2620,7 @@ def cleanup_database(session: Session) -> None:
         ComposioConnection,
         DashboardOAuthState,
         DashboardUser,
+        SlackChannelMembership,
         SlackIdentity,
         TaskEvent,
         Task,

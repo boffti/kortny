@@ -71,6 +71,7 @@ from kortny.db.models import (
     TaskStatus,
 )
 from kortny.db.session import make_session_factory
+from kortny.knowledge_graph.refresh import KnowledgeGraphRefreshService
 
 TEMPLATE_DIR = Path(__file__).parent / "templates"
 STATIC_DIR = Path(__file__).parent / "static"
@@ -525,6 +526,34 @@ def register_routes(app: FastAPI) -> None:
                 "notice_tone": _notice_tone(notice_tone),
             },
         )
+
+    @app.post("/knowledge-graph/refresh")
+    async def knowledge_graph_refresh(
+        request: Request,
+        principal: Annotated[DashboardPrincipal, Depends(require_admin)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> RedirectResponse:
+        form = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
+        next_path = _safe_next_path(form.get("next", ["/knowledge-graph"])[0])
+        actor = principal.slack_user_id or dashboard_actor(principal.display_name)
+        result = KnowledgeGraphRefreshService(session).queue_channel_profile_refresh(
+            installation_id=principal.installation_id,
+            requested_by_user_id=actor,
+        )
+        session.commit()
+        if result.known_channel_count == 0:
+            return _redirect_with_notice(
+                next_path,
+                "No known active channels to refresh yet.",
+                tone="warning",
+            )
+        if result.queued_count == 0:
+            return _redirect_with_notice(
+                next_path,
+                _graph_refresh_notice(result),
+                tone="neutral",
+            )
+        return _redirect_with_notice(next_path, _graph_refresh_notice(result))
 
     @app.post("/knowledge-graph/entities/{entity_id}/confirm")
     async def knowledge_graph_confirm_entity(
@@ -2229,6 +2258,20 @@ def _safe_next_path(value: str | None) -> str:
     if not value or not value.startswith("/") or value.startswith("//"):
         return "/"
     return value
+
+
+def _graph_refresh_notice(result: object) -> str:
+    queued_count = getattr(result, "queued_count", 0)
+    skipped_count = getattr(result, "skipped_count", 0)
+    known_channel_count = getattr(result, "known_channel_count", 0)
+    pieces = [
+        f"Queued {queued_count:,} graph refresh assessment"
+        f"{'' if queued_count == 1 else 's'}"
+    ]
+    if skipped_count:
+        pieces.append(f"skipped {skipped_count:,} already active or recent")
+    pieces.append(f"across {known_channel_count:,} known active channel")
+    return "; ".join(pieces) + f"{'' if known_channel_count == 1 else 's'}."
 
 
 def _redirect_with_notice(

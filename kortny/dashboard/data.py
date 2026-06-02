@@ -36,6 +36,7 @@ from kortny.db.models import (
     KnowledgeGraphEntity,
     KnowledgeGraphEvidence,
     LLMUsage,
+    SlackChannelMembership,
     SlackIdentity,
     Task,
     TaskEvent,
@@ -57,6 +58,10 @@ from kortny.tools.workspace_memory import (
 DEFAULT_PAGE_SIZE = 25
 MAX_PAGE_SIZE = 100
 COMPOSIO_DETAIL_TOOL_LIMIT = 12
+KG_GRAPH_NODE_LIMIT = 18
+KG_GRAPH_EDGE_LIMIT = 30
+KG_GRAPH_WIDTH = 920
+KG_GRAPH_HEIGHT = 420
 
 
 @dataclass(frozen=True)
@@ -498,6 +503,49 @@ class KnowledgeGraphEdgeRow:
 
 
 @dataclass(frozen=True)
+class KnowledgeGraphMapNode:
+    id: str
+    label: str
+    secondary_label: str
+    entity_type: str
+    lifecycle_state: str
+    tone: str
+    x: int
+    y: int
+    radius: int
+    evidence_count: int
+    incoming_count: int
+    outgoing_count: int
+    confidence_label: str
+    scope_label: str
+
+
+@dataclass(frozen=True)
+class KnowledgeGraphMapEdge:
+    id: str
+    source_id: str
+    target_id: str
+    label: str
+    relationship_type: str
+    tone: str
+    x1: int
+    y1: int
+    x2: int
+    y2: int
+    label_x: int
+    label_y: int
+
+
+@dataclass(frozen=True)
+class KnowledgeGraphMap:
+    nodes: tuple[KnowledgeGraphMapNode, ...]
+    edges: tuple[KnowledgeGraphMapEdge, ...]
+    empty: bool
+    node_count: int
+    edge_count: int
+
+
+@dataclass(frozen=True)
 class KnowledgeGraphPageInfo:
     page: int
     page_size: int
@@ -538,6 +586,8 @@ class KnowledgeGraphDashboard:
     entity_count: int
     current_entity_count: int
     candidate_entity_count: int
+    known_channel_count: int
+    profiled_channel_count: int
     edge_count: int
     evidence_count: int
     stale_entity_count: int
@@ -552,6 +602,7 @@ class KnowledgeGraphDashboard:
     state_filter: str
     kind_filter: str
     sort: str
+    map: KnowledgeGraphMap
     page: KnowledgeGraphPageInfo
     previous_page_url: str | None
     next_page_url: str | None
@@ -1439,6 +1490,30 @@ def get_knowledge_graph_dashboard(
         )
         or 0
     )
+    known_channel_count = (
+        session.scalar(
+            select(func.count())
+            .select_from(SlackChannelMembership)
+            .where(
+                *_kg_installation_filter(SlackChannelMembership, installation_id),
+                SlackChannelMembership.membership_status == "active",
+            )
+        )
+        or 0
+    )
+    profiled_channel_count = (
+        session.scalar(
+            select(func.count())
+            .select_from(KnowledgeGraphEntity)
+            .where(
+                *entity_scope,
+                KnowledgeGraphEntity.canonical_key.like("channel_profile:%"),
+                KnowledgeGraphEntity.is_current.is_(True),
+                KnowledgeGraphEntity.expired_at.is_(None),
+            )
+        )
+        or 0
+    )
     stale_entity_count = (
         session.scalar(
             select(func.count())
@@ -1557,6 +1632,16 @@ def get_knowledge_graph_dashboard(
         )
         noun = "relationships"
 
+    graph_map = _kg_graph_map(
+        session,
+        active_view=active_view,
+        query=normalized_query,
+        scope_filter=normalized_scope,
+        state_filter=normalized_state,
+        kind_filter=normalized_kind,
+        sort=normalized_sort,
+        installation_id=installation_id,
+    )
     page_info = KnowledgeGraphPageInfo(
         page=resolved_page,
         page_size=normalized_size,
@@ -1589,6 +1674,8 @@ def get_knowledge_graph_dashboard(
         entity_count=int(entity_count),
         current_entity_count=int(current_entity_count),
         candidate_entity_count=int(candidate_entity_count),
+        known_channel_count=int(known_channel_count),
+        profiled_channel_count=int(profiled_channel_count),
         edge_count=int(edge_count),
         evidence_count=int(evidence_count),
         stale_entity_count=int(stale_entity_count),
@@ -1603,6 +1690,7 @@ def get_knowledge_graph_dashboard(
         state_filter=normalized_state,
         kind_filter=normalized_kind,
         sort=normalized_sort,
+        map=graph_map,
         page=page_info,
         previous_page_url=(
             _knowledge_graph_page_url(
@@ -3559,6 +3647,260 @@ def _kg_edge_rows(
         for edge in edges
     )
     return int(total_count), resolved_page, rows
+
+
+def _kg_graph_map(
+    session: Session,
+    *,
+    active_view: str,
+    query: str,
+    scope_filter: str,
+    state_filter: str,
+    kind_filter: str,
+    sort: str,
+    installation_id: uuid.UUID | None,
+) -> KnowledgeGraphMap:
+    if active_view == "relationships":
+        entities, edges = _kg_graph_from_relationship_filters(
+            session,
+            query=query,
+            scope_filter=scope_filter,
+            state_filter=state_filter,
+            kind_filter=kind_filter,
+            sort=sort,
+            installation_id=installation_id,
+        )
+    else:
+        entities, edges = _kg_graph_from_entity_filters(
+            session,
+            query=query,
+            scope_filter=scope_filter,
+            state_filter=state_filter,
+            kind_filter=kind_filter,
+            sort=sort,
+            installation_id=installation_id,
+        )
+
+    if not entities:
+        return KnowledgeGraphMap(nodes=(), edges=(), empty=True, node_count=0, edge_count=0)
+
+    positions = _kg_graph_positions(len(entities))
+    entity_ids = [entity.id for entity in entities]
+    entity_id_set = set(entity_ids)
+    evidence_counts = _kg_evidence_counts(session, "entity", entity_ids)
+    source_edge_counts, target_edge_counts = _kg_edge_counts_by_entity(
+        session, entity_ids
+    )
+    identities = _identity_map_from_keys(
+        session,
+        tuple(
+            key
+            for entity in entities
+            if (key := _kg_scope_identity_key(entity)) is not None
+        ),
+    )
+    node_by_id: dict[uuid.UUID, KnowledgeGraphMapNode] = {}
+    for index, entity in enumerate(entities):
+        outgoing_count = source_edge_counts.get(entity.id, 0)
+        incoming_count = target_edge_counts.get(entity.id, 0)
+        evidence_count = evidence_counts.get(entity.id, 0)
+        degree = outgoing_count + incoming_count
+        scope = _kg_scope_label(
+            identities,
+            installation_id=entity.installation_id,
+            scope_type=entity.visibility_scope_type,
+            scope_id=entity.visibility_scope_id,
+        )
+        node_by_id[entity.id] = KnowledgeGraphMapNode(
+            id=str(entity.id),
+            label=_kg_graph_node_label(entity),
+            secondary_label=_kg_graph_node_secondary(entity),
+            entity_type=entity.entity_type,
+            lifecycle_state=entity.lifecycle_state,
+            tone=_kg_lifecycle_tone(entity.lifecycle_state),
+            x=positions[index][0],
+            y=positions[index][1],
+            radius=min(24, 13 + min(degree + evidence_count, 8)),
+            evidence_count=evidence_count,
+            incoming_count=incoming_count,
+            outgoing_count=outgoing_count,
+            confidence_label=_confidence_label(entity.confidence_score),
+            scope_label=_kg_graph_scope_label(scope),
+        )
+
+    map_edges: list[KnowledgeGraphMapEdge] = []
+    for edge in edges:
+        if edge.source_entity_id not in entity_id_set:
+            continue
+        if edge.target_entity_id not in entity_id_set:
+            continue
+        source_node = node_by_id[edge.source_entity_id]
+        target_node = node_by_id[edge.target_entity_id]
+        map_edges.append(
+            KnowledgeGraphMapEdge(
+                id=str(edge.id),
+                source_id=source_node.id,
+                target_id=target_node.id,
+                label=_truncate(edge.relationship_type.replace("_", " "), 22),
+                relationship_type=edge.relationship_type,
+                tone=_kg_lifecycle_tone(edge.lifecycle_state),
+                x1=source_node.x,
+                y1=source_node.y,
+                x2=target_node.x,
+                y2=target_node.y,
+                label_x=(source_node.x + target_node.x) // 2,
+                label_y=(source_node.y + target_node.y) // 2,
+            )
+        )
+        if len(map_edges) >= KG_GRAPH_EDGE_LIMIT:
+            break
+
+    nodes = tuple(node_by_id[entity.id] for entity in entities)
+    return KnowledgeGraphMap(
+        nodes=nodes,
+        edges=tuple(map_edges),
+        empty=False,
+        node_count=len(nodes),
+        edge_count=len(map_edges),
+    )
+
+
+def _kg_graph_from_entity_filters(
+    session: Session,
+    *,
+    query: str,
+    scope_filter: str,
+    state_filter: str,
+    kind_filter: str,
+    sort: str,
+    installation_id: uuid.UUID | None,
+) -> tuple[tuple[KnowledgeGraphEntity, ...], tuple[KnowledgeGraphEdge, ...]]:
+    filters = _kg_entity_filters(
+        query=query,
+        scope_filter=scope_filter,
+        state_filter=state_filter,
+        kind_filter=kind_filter,
+        installation_id=installation_id,
+    )
+    seed_entities = list(
+        session.scalars(
+            select(KnowledgeGraphEntity)
+            .where(*filters)
+            .order_by(*_kg_entity_order(sort))
+            .limit(KG_GRAPH_NODE_LIMIT)
+        )
+    )
+    if not seed_entities:
+        return (), ()
+
+    seed_ids = [entity.id for entity in seed_entities]
+    edge_filters = _kg_installation_filter(KnowledgeGraphEdge, installation_id)
+    edge_filters.extend(_kg_state_filters(KnowledgeGraphEdge, state_filter))
+    if scope_filter != "all":
+        edge_filters.append(KnowledgeGraphEdge.visibility_scope_type == scope_filter)
+    edge_filters.append(
+        or_(
+            KnowledgeGraphEdge.source_entity_id.in_(seed_ids),
+            KnowledgeGraphEdge.target_entity_id.in_(seed_ids),
+        )
+    )
+    edges = list(
+        session.scalars(
+            select(KnowledgeGraphEdge)
+            .where(*edge_filters)
+            .order_by(KnowledgeGraphEdge.updated_at.desc(), KnowledgeGraphEdge.id.desc())
+            .limit(KG_GRAPH_EDGE_LIMIT)
+        )
+    )
+    entity_ids = list(seed_ids)
+    for edge in edges:
+        for entity_id in (edge.source_entity_id, edge.target_entity_id):
+            if entity_id in entity_ids:
+                continue
+            if len(entity_ids) >= KG_GRAPH_NODE_LIMIT:
+                continue
+            entity_ids.append(entity_id)
+    entities_by_id = _kg_entities_by_id(session, entity_ids)
+    entities = tuple(entity for entity_id in entity_ids if (entity := entities_by_id.get(entity_id)))
+    return entities, tuple(edges)
+
+
+def _kg_graph_from_relationship_filters(
+    session: Session,
+    *,
+    query: str,
+    scope_filter: str,
+    state_filter: str,
+    kind_filter: str,
+    sort: str,
+    installation_id: uuid.UUID | None,
+) -> tuple[tuple[KnowledgeGraphEntity, ...], tuple[KnowledgeGraphEdge, ...]]:
+    source = aliased(KnowledgeGraphEntity)
+    target = aliased(KnowledgeGraphEntity)
+    filters = _kg_edge_filters(
+        source=source,
+        target=target,
+        query=query,
+        scope_filter=scope_filter,
+        state_filter=state_filter,
+        kind_filter=kind_filter,
+        installation_id=installation_id,
+    )
+    edges = list(
+        session.scalars(
+            select(KnowledgeGraphEdge)
+            .join(source, KnowledgeGraphEdge.source_entity_id == source.id)
+            .join(target, KnowledgeGraphEdge.target_entity_id == target.id)
+            .where(*filters)
+            .order_by(*_kg_edge_order(sort))
+            .limit(KG_GRAPH_EDGE_LIMIT)
+        )
+    )
+    entity_ids: list[uuid.UUID] = []
+    for edge in edges:
+        for entity_id in (edge.source_entity_id, edge.target_entity_id):
+            if entity_id in entity_ids:
+                continue
+            if len(entity_ids) >= KG_GRAPH_NODE_LIMIT:
+                continue
+            entity_ids.append(entity_id)
+    entities_by_id = _kg_entities_by_id(session, entity_ids)
+    entities = tuple(entity for entity_id in entity_ids if (entity := entities_by_id.get(entity_id)))
+    return entities, tuple(edges)
+
+
+def _kg_graph_positions(count: int) -> tuple[tuple[int, int], ...]:
+    if count <= 0:
+        return ()
+    center_x = KG_GRAPH_WIDTH // 2
+    center_y = KG_GRAPH_HEIGHT // 2
+    if count == 1:
+        return ((center_x, center_y),)
+    radius_x = 310 if count > 8 else 260
+    radius_y = 150 if count > 8 else 128
+    return tuple(
+        (
+            int(center_x + math.cos((-math.pi / 2) + ((2 * math.pi * index) / count)) * radius_x),
+            int(center_y + math.sin((-math.pi / 2) + ((2 * math.pi * index) / count)) * radius_y),
+        )
+        for index in range(count)
+    )
+
+
+def _kg_graph_node_label(entity: KnowledgeGraphEntity) -> str:
+    return _truncate(entity.display_name or entity.canonical_key, 28)
+
+
+def _kg_graph_node_secondary(entity: KnowledgeGraphEntity) -> str:
+    if entity.display_name:
+        return _truncate(entity.canonical_key, 42)
+    return _truncate(entity.entity_type, 42)
+
+
+def _kg_graph_scope_label(scope: IdentityLabel) -> str:
+    if scope.secondary:
+        return f"{scope.name} / {scope.secondary}"
+    return scope.name
 
 
 def _kg_entity_filters(

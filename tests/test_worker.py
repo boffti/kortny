@@ -35,6 +35,7 @@ from kortny.db.models import (
     LLMProvider,
     LLMUsage,
     ModelPricing,
+    ObservationEvent,
     ObserveChannelProfile,
     ProceduralSkillInvocation,
     SlackChannelMembership,
@@ -47,6 +48,12 @@ from kortny.db.models import (
 from kortny.db.session import make_engine, make_session_factory, normalize_database_url
 from kortny.knowledge_graph import (
     KG_CHANNEL_PROFILE_PROJECTED_MESSAGE,
+    KG_CHANNEL_REFRESH_HISTORY_LOADED_MESSAGE,
+    KG_CHANNEL_REFRESH_PIPELINE_STARTED_MESSAGE,
+    KG_CHANNEL_REFRESH_PROFILE_SYNTHESIZED_MESSAGE,
+    KG_CHANNEL_REFRESH_SEMANTIC_EXTRACTED_MESSAGE,
+    KG_CHANNEL_REFRESH_SEMANTIC_FALLBACK_MESSAGE,
+    KG_REFRESH_SOURCE,
     DestinationSurface,
     GraphService,
 )
@@ -55,6 +62,7 @@ from kortny.llm.routing import ModelRoute, ModelRouteTier
 from kortny.observe.assessment import (
     CHANNEL_ASSESSMENT_COMPLETED_MESSAGE,
     CHANNEL_ASSESSMENT_REQUESTED_MESSAGE,
+    CHANNEL_ASSESSMENT_SUPPRESS_SLACK_POST_KEY,
 )
 from kortny.slack.comments import ARTIFACT_COMMENT_FALLBACK_TEXT
 from kortny.slack.humanizer import build_response_record, build_synthesis_context
@@ -1885,6 +1893,438 @@ def test_agent_executor_suppresses_final_message_after_memory_prompt(
     assert not any(event.payload.get("purpose") == "result" for event in posted_events)
 
 
+def test_agent_executor_suppresses_final_message_for_background_channel_assessment(
+    db_session: Session,
+) -> None:
+    task = create_task(db_session, event_id="EvGraphRefresh")
+    task_service = TaskService(db_session)
+    task_service.append_event(
+        task,
+        TaskEventType.log,
+        {
+            "message": CHANNEL_ASSESSMENT_REQUESTED_MESSAGE,
+            "source": "dashboard_knowledge_graph_refresh",
+            "channel_id": "C123",
+            "membership_id": "membership-id",
+            CHANNEL_ASSESSMENT_SUPPRESS_SLACK_POST_KEY: True,
+        },
+    )
+    db_session.commit()
+    slack_client = FakeSlackClient()
+
+    AgentTaskExecutor(
+        settings=make_settings(),
+        slack_client=slack_client,
+    )._post_outputs(
+        settings=make_settings(),
+        session=db_session,
+        task=task,
+        task_service=task_service,
+        result_summary="Internal graph refresh assessment.",
+    )
+
+    assert slack_client.messages == []
+    assert any(
+        event.payload.get("message") == "slack_final_message_suppressed"
+        and event.payload.get("reason") == "background_channel_assessment"
+        for event in task_events(db_session, task)
+    )
+
+
+def test_worker_runs_dashboard_graph_refresh_without_agent_runtime(
+    db_session: Session,
+    worker_session_factory: sessionmaker[Session],
+    tmp_path: Path,
+) -> None:
+    claim_time = datetime(2026, 6, 2, 11, 0, tzinfo=UTC)
+    task = create_task(db_session, event_id="EvGraphPipeline")
+    installation = db_session.get(Installation, task.installation_id)
+    assert installation is not None
+    task.slack_channel_id = "CGraph"
+    task.slack_thread_ts = "1780400000.000000"
+    task.slack_message_ts = "1780400000.000000"
+    task.input = "Run background channel graph refresh."
+    task.available_at = claim_time - timedelta(seconds=1)
+    membership = SlackChannelMembership(
+        installation_id=task.installation_id,
+        channel_id="CGraph",
+        channel_name="trading-ops",
+        channel_type="public_channel",
+        membership_status="active",
+        discovered_via="member_joined_channel",
+        added_by_user_id="UInvite",
+        onboarding_status="posted",
+        onboarding_message_ts="1780400000.000000",
+        metadata_json={
+            "assessment_task_id": str(task.id),
+            "assessment_status": "queued",
+        },
+    )
+    db_session.add_all(
+        [
+            membership,
+            ObservationEvent(
+                installation_id=installation.id,
+                slack_team_id=installation.slack_team_id,
+                channel_id="CGraph",
+                user_id="U1",
+                event_type="message",
+                slack_event_id="EvObsGraph1",
+                message_ts="1780400001.000001",
+                thread_ts="1780400001.000001",
+                file_id=None,
+                raw_payload_checksum="checksum-EvObsGraph1",
+                text_preview="Daily trade blotter posted for NVDA and AAPL earnings review.",
+                visibility_metadata={"scope_type": "channel", "scope_id": "CGraph"},
+                observed_at=claim_time,
+            ),
+            ObservationEvent(
+                installation_id=installation.id,
+                slack_team_id=installation.slack_team_id,
+                channel_id="CGraph",
+                user_id="U2",
+                event_type="message",
+                slack_event_id="EvObsGraph2",
+                message_ts="1780400002.000002",
+                thread_ts="1780400001.000001",
+                file_id=None,
+                raw_payload_checksum="checksum-EvObsGraph2",
+                text_preview="Please review the entry and exit signals before the PM meeting.",
+                visibility_metadata={"scope_type": "channel", "scope_id": "CGraph"},
+                observed_at=claim_time + timedelta(seconds=1),
+            ),
+            ObservationEvent(
+                installation_id=installation.id,
+                slack_team_id=installation.slack_team_id,
+                channel_id="CGraph",
+                user_id="U3",
+                event_type="file_share",
+                slack_event_id="EvObsGraph3",
+                message_ts="1780400003.000003",
+                thread_ts="1780400003.000003",
+                file_id="FBlotter",
+                raw_payload_checksum="checksum-EvObsGraph3",
+                text_preview="Uploaded blotter.csv with scale-down candidates and liquidation notes.",
+                visibility_metadata={"scope_type": "channel", "scope_id": "CGraph"},
+                observed_at=claim_time + timedelta(seconds=2),
+            ),
+        ]
+    )
+    task_service = TaskService(db_session)
+    task_service.append_event(
+        task,
+        TaskEventType.log,
+        {
+            "message": CHANNEL_ASSESSMENT_REQUESTED_MESSAGE,
+            "source": KG_REFRESH_SOURCE,
+            "channel_id": "CGraph",
+            "membership_id": str(membership.id),
+            CHANNEL_ASSESSMENT_SUPPRESS_SLACK_POST_KEY: True,
+        },
+    )
+    db_session.commit()
+
+    provider = FakeAgentProvider(
+        [
+            Completion(
+                content=json.dumps(
+                    {
+                        "likely_purpose": (
+                            "Daily trading operations review for blotter updates, "
+                            "earnings, and entry or exit signals."
+                        ),
+                        "recurring_topics": [
+                            "trade blotter",
+                            "entry and exit signals",
+                            "earnings review",
+                        ],
+                        "workflows": [
+                            "Review daily blotter files before PM meeting",
+                            "Check scale-down and liquidation notes",
+                        ],
+                        "important_entities": [
+                            "NVDA",
+                            "AAPL",
+                            "blotter.csv",
+                        ],
+                        "assumptions": [
+                            "The channel appears focused on investment operations.",
+                        ],
+                        "help_opportunities": [
+                            "Summarize daily blotter changes",
+                            "Flag unresolved review items",
+                        ],
+                        "evidence": [
+                            "Daily trade blotter posted",
+                            "review the entry and exit signals",
+                        ],
+                        "confidence": "medium",
+                    }
+                ),
+                tool_calls=(),
+                usage=TokenUsage(input_tokens=240, output_tokens=90),
+                cost_usd=Decimal("0.000100"),
+                model="openai/gpt-4o-mini",
+            )
+        ]
+    )
+    slack_client = FakeSlackClient()
+    result = TaskWorker(
+        session_factory=worker_session_factory,
+        worker_id="agent-worker-test",
+        executor=AgentTaskExecutor(
+            settings=make_settings(),
+            llm_provider=provider,
+            provider_name=LLMProvider.openrouter,
+            slack_client=slack_client,
+            workspace_base_dir=tmp_path,
+        ),
+    ).run_once(now=claim_time)
+
+    db_session.refresh(task)
+    db_session.refresh(membership)
+    events = task_events(db_session, task)
+    event_messages = [event.payload.get("message") for event in events]
+    tool_results = [
+        event
+        for event in events
+        if event.type is TaskEventType.tool_result
+        and event.payload.get("tool") == "slack_channel_history"
+    ]
+    profile = db_session.scalar(
+        select(ObserveChannelProfile).where(
+            ObserveChannelProfile.installation_id == task.installation_id,
+            ObserveChannelProfile.channel_id == "CGraph",
+        )
+    )
+    profile_entity = db_session.scalar(
+        select(KnowledgeGraphEntity).where(
+            KnowledgeGraphEntity.installation_id == task.installation_id,
+            KnowledgeGraphEntity.canonical_key == "channel_profile:CGraph",
+            KnowledgeGraphEntity.is_current.is_(True),
+        )
+    )
+    projection_event = next(
+        event
+        for event in events
+        if event.payload.get("message") == KG_CHANNEL_PROFILE_PROJECTED_MESSAGE
+    )
+    semantic_entities = tuple(
+        db_session.scalars(
+            select(KnowledgeGraphEntity).where(
+                KnowledgeGraphEntity.installation_id == task.installation_id,
+                KnowledgeGraphEntity.visibility_scope_id == "CGraph",
+                KnowledgeGraphEntity.source_type == "onboarding_scan",
+                KnowledgeGraphEntity.is_current.is_(True),
+                KnowledgeGraphEntity.expired_at.is_(None),
+            )
+        )
+    )
+    semantic_edges = tuple(
+        db_session.scalars(
+            select(KnowledgeGraphEdge).where(
+                KnowledgeGraphEdge.installation_id == task.installation_id,
+                KnowledgeGraphEdge.source_type == "onboarding_scan",
+                KnowledgeGraphEdge.is_current.is_(True),
+                KnowledgeGraphEdge.expired_at.is_(None),
+            )
+        )
+    )
+
+    assert result.status == TaskStatus.succeeded.value, task.error
+    assert task.status is TaskStatus.succeeded
+    assert len(provider.calls) == 1
+    assert provider.calls[0][2] == {"type": "json_object"}
+    assert slack_client.messages == []
+    assert "agent_runtime_selected" in event_messages
+    assert KG_CHANNEL_REFRESH_PIPELINE_STARTED_MESSAGE in event_messages
+    assert KG_CHANNEL_REFRESH_HISTORY_LOADED_MESSAGE in event_messages
+    assert KG_CHANNEL_REFRESH_SEMANTIC_EXTRACTED_MESSAGE in event_messages
+    assert KG_CHANNEL_REFRESH_PROFILE_SYNTHESIZED_MESSAGE in event_messages
+    assert KG_CHANNEL_PROFILE_PROJECTED_MESSAGE in event_messages
+    assert "tool_selection_completed" not in event_messages
+    assert "adk_runtime_started" not in event_messages
+    assert "planned_workflow_classified" not in event_messages
+    assert len(tool_results) == 1
+    assert tool_results[0].payload["output"]["context_source"] == "observation_cache"
+    assert tool_results[0].payload["output"]["message_count"] == 3
+    assert membership.metadata_json["assessment_status"] == "posted"
+    assert profile is not None
+    assert profile.message_count == 3
+    assert profile.file_count == 1
+    assert profile.metadata_json["synthesis"] == "semantic_llm"
+    assert profile.profile_json["semantic_extraction"]["workflows"] == [
+        "Review daily blotter files before PM meeting",
+        "Check scale-down and liquidation notes",
+    ]
+    assert "investment operations" in profile.summary.lower()
+    assert "blotter" in profile.summary.lower()
+    assert next(
+        event.payload["synthesis"]
+        for event in events
+        if event.payload.get("message") == KG_CHANNEL_REFRESH_PROFILE_SYNTHESIZED_MESSAGE
+    ) == "semantic_llm"
+    assert "adk" not in profile.summary.lower()
+    assert "branch outputs" not in profile.summary.lower()
+    assert profile_entity is not None
+    assert profile_entity.attrs_json["summary"] == profile.summary
+    assert projection_event.payload["entity_count"] > 2
+    assert projection_event.payload["edge_count"] > 1
+    assert projection_event.payload["evidence_count"] > 3
+    semantic_keys = {entity.canonical_key for entity in semantic_entities}
+    assert "channel_topic:CGraph:trade-blotter" in semantic_keys
+    assert "channel_entity:CGraph:nvda" in semantic_keys
+    assert any(
+        key.startswith(
+            "channel_workflow:CGraph:review-daily-blotter-files-before-pm-meeting"
+        )
+        for key in semantic_keys
+    )
+    semantic_kinds = {
+        entity.attrs_json.get("semantic_kind")
+        for entity in semantic_entities
+        if entity.attrs_json.get("kind") == "channel_semantic_projection"
+    }
+    assert {"topic", "workflow", "important_entity", "assumption", "help_opportunity"} <= (
+        semantic_kinds
+    )
+    assert any(
+        edge.relationship_type == "maps_to"
+        and edge.attrs_json.get("kind") == "channel_semantic_projection"
+        for edge in semantic_edges
+    )
+
+
+def test_worker_dashboard_graph_refresh_falls_back_on_bad_semantic_output(
+    db_session: Session,
+    worker_session_factory: sessionmaker[Session],
+    tmp_path: Path,
+) -> None:
+    claim_time = datetime(2026, 6, 2, 11, 30, tzinfo=UTC)
+    task = create_task(db_session, event_id="EvGraphSemanticFallback")
+    installation = db_session.get(Installation, task.installation_id)
+    assert installation is not None
+    task.slack_channel_id = "CGraphFallback"
+    task.slack_thread_ts = "1780400100.000000"
+    task.slack_message_ts = "1780400100.000000"
+    task.input = "Run background channel graph refresh."
+    task.available_at = claim_time - timedelta(seconds=1)
+    membership = SlackChannelMembership(
+        installation_id=task.installation_id,
+        channel_id="CGraphFallback",
+        channel_name="product-launch",
+        channel_type="public_channel",
+        membership_status="active",
+        discovered_via="member_joined_channel",
+        added_by_user_id="UInvite",
+        onboarding_status="posted",
+        onboarding_message_ts="1780400100.000000",
+        metadata_json={
+            "assessment_task_id": str(task.id),
+            "assessment_status": "queued",
+        },
+    )
+    db_session.add_all(
+        [
+            membership,
+            ObservationEvent(
+                installation_id=installation.id,
+                slack_team_id=installation.slack_team_id,
+                channel_id="CGraphFallback",
+                user_id="U1",
+                event_type="message",
+                slack_event_id="EvObsFallback1",
+                message_ts="1780400101.000001",
+                thread_ts="1780400101.000001",
+                file_id=None,
+                raw_payload_checksum="checksum-EvObsFallback1",
+                text_preview=(
+                    "Product launch checklist needs owner review and legal signoff."
+                ),
+                visibility_metadata={
+                    "scope_type": "channel",
+                    "scope_id": "CGraphFallback",
+                },
+                observed_at=claim_time,
+            ),
+        ]
+    )
+    task_service = TaskService(db_session)
+    task_service.append_event(
+        task,
+        TaskEventType.log,
+        {
+            "message": CHANNEL_ASSESSMENT_REQUESTED_MESSAGE,
+            "source": KG_REFRESH_SOURCE,
+            "channel_id": "CGraphFallback",
+            "membership_id": str(membership.id),
+            CHANNEL_ASSESSMENT_SUPPRESS_SLACK_POST_KEY: True,
+        },
+    )
+    db_session.commit()
+
+    provider = FakeAgentProvider(
+        [
+            Completion(
+                content=json.dumps(
+                    {
+                        "likely_purpose": "ADK branch outputs for final answer merge",
+                        "recurring_topics": ["route_reason"],
+                        "workflows": [],
+                        "important_entities": [],
+                        "assumptions": [],
+                        "help_opportunities": [],
+                        "evidence": [],
+                        "confidence": "medium",
+                    }
+                ),
+                tool_calls=(),
+                usage=TokenUsage(input_tokens=120, output_tokens=45),
+                cost_usd=Decimal("0.000050"),
+                model="openai/gpt-4o-mini",
+            )
+        ]
+    )
+    result = TaskWorker(
+        session_factory=worker_session_factory,
+        worker_id="agent-worker-test",
+        executor=AgentTaskExecutor(
+            settings=make_settings(),
+            llm_provider=provider,
+            provider_name=LLMProvider.openrouter,
+            slack_client=FakeSlackClient(),
+            workspace_base_dir=tmp_path,
+        ),
+    ).run_once(now=claim_time)
+
+    db_session.refresh(task)
+    events = task_events(db_session, task)
+    event_messages = [event.payload.get("message") for event in events]
+    profile = db_session.scalar(
+        select(ObserveChannelProfile).where(
+            ObserveChannelProfile.installation_id == task.installation_id,
+            ObserveChannelProfile.channel_id == "CGraphFallback",
+        )
+    )
+
+    assert result.status == TaskStatus.succeeded.value, task.error
+    assert len(provider.calls) == 1
+    assert KG_CHANNEL_REFRESH_SEMANTIC_FALLBACK_MESSAGE in event_messages
+    assert KG_CHANNEL_REFRESH_SEMANTIC_EXTRACTED_MESSAGE not in event_messages
+    assert next(
+        event.payload["synthesis"]
+        for event in events
+        if event.payload.get("message") == KG_CHANNEL_REFRESH_PROFILE_SYNTHESIZED_MESSAGE
+    ) == "deterministic"
+    assert profile is not None
+    assert profile.metadata_json["synthesis"] == "deterministic"
+    assert "product" in profile.summary.lower()
+    assert "launch" in profile.summary.lower()
+    assert "adk" not in profile.summary.lower()
+    assert task.total_input_tokens == 120
+    assert task.total_output_tokens == 45
+
+
 def test_agent_executor_records_missing_brave_key_and_continues_without_web_search(
     db_session: Session,
     worker_session_factory: sessionmaker[Session],
@@ -2114,6 +2554,7 @@ def cleanup_database(session: Session) -> None:
         KnowledgeGraphEntity,
         Episode,
         ObserveChannelProfile,
+        ObservationEvent,
         SlackChannelMembership,
         Artifact,
         LLMUsage,
@@ -2159,7 +2600,9 @@ class FakeAgentProvider:
 
     def __init__(self, completions: list[Completion]) -> None:
         self.completions = completions
-        self.calls: list[tuple[tuple[ChatMessage, ...], tuple[JsonSchema, ...]]] = []
+        self.calls: list[
+            tuple[tuple[ChatMessage, ...], tuple[JsonSchema, ...], JsonObject | None]
+        ] = []
 
     def complete(
         self,
@@ -2168,8 +2611,7 @@ class FakeAgentProvider:
         *,
         response_format: JsonObject | None = None,
     ) -> Completion:
-        del response_format
-        self.calls.append((tuple(messages), tuple(tools)))
+        self.calls.append((tuple(messages), tuple(tools), response_format))
         if not self.completions:
             raise AssertionError("FakeAgentProvider received too many calls")
         return self.completions.pop(0)

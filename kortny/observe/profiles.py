@@ -55,6 +55,7 @@ class ObserveChannelProfileService:
         summary = _bounded_text(result_summary, 8000)
         confidence_score = _confidence_score(stats.message_count)
         confidence_reason = _confidence_reason(stats.message_count)
+        semantic_extraction = _latest_semantic_extraction(self.session, task)
         profile = self.get(
             installation_id=task.installation_id,
             channel_id=membership.channel_id,
@@ -90,10 +91,12 @@ class ObserveChannelProfileService:
             summary=summary,
             stats=stats,
             task=task,
+            semantic_extraction=semantic_extraction,
         )
         profile.assumptions_json = _assumptions_payload(
             summary=summary,
             message_count=stats.message_count,
+            semantic_extraction=semantic_extraction,
         )
         profile.evidence_refs_json = _evidence_refs_payload(
             task=task,
@@ -126,6 +129,8 @@ class ObserveChannelProfileService:
             "fresh_window_days": DEFAULT_FRESH_WINDOW_DAYS,
             "archive_window_days": DEFAULT_ARCHIVE_WINDOW_DAYS,
             "history_event_ids": list(stats.history_event_ids),
+            "synthesis": _latest_profile_synthesis(self.session, task),
+            "semantic_extraction": semantic_extraction,
         }
         profile.updated_at = now
         self.session.flush()
@@ -210,8 +215,9 @@ def _profile_payload(
     summary: str,
     stats: ChannelAssessmentStats,
     task: Task,
+    semantic_extraction: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    return {
+    payload = {
         "kind": "slack_channel_profile",
         "source": "channel_assessment",
         "summary": summary,
@@ -235,13 +241,39 @@ def _profile_payload(
             "last_scanned_message_ts": stats.last_scanned_message_ts,
         },
     }
+    if semantic_extraction:
+        payload["semantic_extraction"] = semantic_extraction
+    return payload
 
 
 def _assumptions_payload(
     *,
     summary: str,
     message_count: int,
+    semantic_extraction: dict[str, Any] | None,
 ) -> list[dict[str, Any]]:
+    if semantic_extraction:
+        assumptions = semantic_extraction.get("assumptions")
+        if isinstance(assumptions, list) and assumptions:
+            confidence = semantic_extraction.get("confidence")
+            if not isinstance(confidence, str) or confidence not in {
+                "low",
+                "medium",
+                "high",
+            }:
+                confidence = "medium" if message_count >= 10 else "low"
+            return [
+                {
+                    "type": "channel_assumption",
+                    "text": _bounded_text(str(item), 1000),
+                    "confidence": confidence,
+                    "source": "semantic_extraction",
+                    "staleness": "fresh_profile_seed",
+                }
+                for item in assumptions
+                if isinstance(item, str) and item.strip()
+            ][:5]
+
     if not summary:
         return []
     confidence = "medium" if message_count >= 10 else "low"
@@ -277,6 +309,7 @@ def _evidence_refs_payload(
             "discovered_via": membership.discovered_via,
         },
     ]
+
     if stats.history_event_ids:
         refs.append(
             {
@@ -290,6 +323,78 @@ def _evidence_refs_payload(
             }
         )
     return refs
+
+
+def _latest_profile_synthesis(session: Session, task: Task) -> str | None:
+    event = session.scalar(
+        select(TaskEvent)
+        .where(
+            TaskEvent.task_id == task.id,
+            TaskEvent.type == TaskEventType.log,
+            TaskEvent.payload["message"].as_string()
+            == "kg_channel_refresh_profile_synthesized",
+        )
+        .order_by(TaskEvent.seq.desc())
+        .limit(1)
+    )
+    if event is None:
+        return None
+    synthesis = event.payload.get("synthesis")
+    return synthesis if isinstance(synthesis, str) and synthesis else None
+
+
+def _latest_semantic_extraction(session: Session, task: Task) -> dict[str, Any] | None:
+    event = session.scalar(
+        select(TaskEvent)
+        .where(
+            TaskEvent.task_id == task.id,
+            TaskEvent.type == TaskEventType.log,
+            TaskEvent.payload["message"].as_string()
+            == "kg_channel_refresh_semantic_extracted",
+        )
+        .order_by(TaskEvent.seq.desc())
+        .limit(1)
+    )
+    if event is None:
+        return None
+    extraction = event.payload.get("extraction")
+    if not isinstance(extraction, dict):
+        return None
+    return {
+        "likely_purpose": _optional_bounded_text(extraction.get("likely_purpose")),
+        "recurring_topics": _bounded_text_list(extraction.get("recurring_topics")),
+        "workflows": _bounded_text_list(extraction.get("workflows")),
+        "important_entities": _bounded_text_list(extraction.get("important_entities")),
+        "assumptions": _bounded_text_list(extraction.get("assumptions")),
+        "help_opportunities": _bounded_text_list(extraction.get("help_opportunities")),
+        "evidence": _bounded_text_list(extraction.get("evidence")),
+        "confidence": _semantic_confidence(extraction.get("confidence")),
+    }
+
+
+def _optional_bounded_text(value: object) -> str | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return _bounded_text(value, 220)
+
+
+def _bounded_text_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    output: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            continue
+        output.append(_bounded_text(item, 220))
+        if len(output) >= 5:
+            break
+    return output
+
+
+def _semantic_confidence(value: object) -> str:
+    if isinstance(value, str) and value in {"low", "medium", "high"}:
+        return value
+    return "medium"
 
 
 def _confidence_score(message_count: int) -> Decimal:

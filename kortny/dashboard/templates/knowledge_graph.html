@@ -8,7 +8,13 @@
       <h1>Knowledge Graph</h1>
       <p>Inspect scoped workspace entities, relationships, and the evidence Kortny uses for runtime context.</p>
     </div>
-    <a class="btn-ghost" href="/memory">View Memory</a>
+    <div class="heading-actions">
+      <form method="post" action="/knowledge-graph/refresh" onsubmit="return confirm('Queue background graph refresh assessments for known active channels?');">
+        <input type="hidden" name="next" value="{{ graph_return_path }}">
+        <button class="btn" type="submit">Refresh Channel Graph</button>
+      </form>
+      <a class="btn-ghost" href="/memory">View Memory</a>
+    </div>
   </section>
 
   {% if notice %}
@@ -25,6 +31,16 @@
       <span>Candidates</span>
       <strong>{{ graph.candidate_entity_count|number }}</strong>
       <small>Visible to operators, withheld from runtime context</small>
+    </div>
+    <div class="card metric-card">
+      <span>Known Channels</span>
+      <strong>{{ graph.known_channel_count|number }}</strong>
+      <small>Active Slack memberships Kortny has recorded</small>
+    </div>
+    <div class="card metric-card metric-success">
+      <span>Profiled Channels</span>
+      <strong>{{ graph.profiled_channel_count|number }}</strong>
+      <small>Channel profiles projected into the graph</small>
     </div>
     <div class="card metric-card">
       <span>Relationships</span>
@@ -51,6 +67,93 @@
       <strong>{{ (graph.unbacked_current_entity_count + graph.unbacked_current_edge_count)|number }}</strong>
       <small>Current rows withheld from runtime context</small>
     </div>
+  </section>
+
+  <section class="card graph-map-card" aria-label="Knowledge graph topology map">
+    <header>
+      <div>
+        <h2>Graph Map</h2>
+        <p>Topology preview for the current filters. Select a node to inspect the runtime context signal behind it.</p>
+      </div>
+      <span class="badge badge-neutral">
+        {{ graph.map.node_count|number }} nodes / {{ graph.map.edge_count|number }} links
+      </span>
+    </header>
+
+    {% if graph.map.empty %}
+      <p class="empty attention-empty">No graph nodes match these filters yet.</p>
+    {% else %}
+      <div class="graph-map-layout">
+        <div class="graph-map-canvas">
+          <svg class="kg-map-svg" viewBox="0 0 920 420" role="img" aria-labelledby="kg-map-title kg-map-desc">
+            <title id="kg-map-title">Knowledge graph topology</title>
+            <desc id="kg-map-desc">A bounded visual map of currently filtered Kortny knowledge graph nodes and relationships.</desc>
+            {% for edge in graph.map.edges %}
+              <g class="kg-map-edge-group" data-kg-edge="{{ edge.id }}" data-kg-source="{{ edge.source_id }}" data-kg-target="{{ edge.target_id }}">
+                <line class="kg-map-edge kg-map-edge-{{ edge.tone }}" x1="{{ edge.x1 }}" y1="{{ edge.y1 }}" x2="{{ edge.x2 }}" y2="{{ edge.y2 }}"></line>
+                <text class="kg-map-edge-label" x="{{ edge.label_x }}" y="{{ edge.label_y }}">{{ edge.label }}</text>
+              </g>
+            {% endfor %}
+            {% for node in graph.map.nodes %}
+              <g class="kg-map-node kg-map-node-{{ node.tone }}" tabindex="0" role="button" data-kg-map-node="{{ node.id }}" aria-label="{{ node.label }} {{ node.entity_type }} {{ node.lifecycle_state }}">
+                <circle cx="{{ node.x }}" cy="{{ node.y }}" r="{{ node.radius }}"></circle>
+                <text class="kg-map-node-label" x="{{ node.x }}" y="{{ node.y + node.radius + 18 }}" text-anchor="middle">{{ node.label }}</text>
+                <text class="kg-map-node-kind" x="{{ node.x }}" y="{{ node.y + node.radius + 33 }}" text-anchor="middle">{{ node.entity_type }}</text>
+              </g>
+            {% endfor %}
+          </svg>
+        </div>
+
+        <aside class="graph-map-inspector" aria-live="polite">
+          <span class="eyebrow">Selected Node</span>
+          <div class="graph-map-selected" data-kg-selected>
+            <p>Select a node in the map to inspect its scope, confidence, evidence, and connection count.</p>
+          </div>
+          <div class="graph-map-legend" aria-label="Lifecycle legend">
+            <span><i class="legend-dot legend-success"></i>Active / confirmed</span>
+            <span><i class="legend-dot legend-warning"></i>Candidate / stale</span>
+            <span><i class="legend-dot legend-danger"></i>Contradicted / forgotten</span>
+          </div>
+          {% for node in graph.map.nodes %}
+            <div hidden data-kg-node-detail="{{ node.id }}">
+              <div class="graph-map-detail">
+                <div class="graph-map-detail-title">
+                  <strong>{{ node.label }}</strong>
+                  <span class="badge badge-{{ node.tone }}">{{ node.lifecycle_state }}</span>
+                </div>
+                <code class="inline-code">{{ node.secondary_label }}</code>
+                <dl class="graph-map-detail-grid">
+                  <div>
+                    <dt>Type</dt>
+                    <dd>{{ node.entity_type }}</dd>
+                  </div>
+                  <div>
+                    <dt>Scope</dt>
+                    <dd>{{ node.scope_label }}</dd>
+                  </div>
+                  <div>
+                    <dt>Confidence</dt>
+                    <dd>{{ node.confidence_label }}</dd>
+                  </div>
+                  <div>
+                    <dt>Evidence</dt>
+                    <dd>{{ node.evidence_count|number }}</dd>
+                  </div>
+                  <div>
+                    <dt>Outgoing</dt>
+                    <dd>{{ node.outgoing_count|number }}</dd>
+                  </div>
+                  <div>
+                    <dt>Incoming</dt>
+                    <dd>{{ node.incoming_count|number }}</dd>
+                  </div>
+                </dl>
+              </div>
+            </div>
+          {% endfor %}
+        </aside>
+      </div>
+    {% endif %}
   </section>
 
   <section class="memory-toolbar graph-toolbar" aria-label="Knowledge graph view selector">
@@ -269,4 +372,48 @@
       <span class="btn-ghost disabled" aria-disabled="true">Next</span>
     {% endif %}
   </nav>
+
+  <script>
+    (() => {
+      const nodes = Array.from(document.querySelectorAll("[data-kg-map-node]"));
+      const selected = document.querySelector("[data-kg-selected]");
+      if (!nodes.length || !selected) {
+        return;
+      }
+
+      const details = new Map(
+        Array.from(document.querySelectorAll("[data-kg-node-detail]")).map((detail) => [
+          detail.dataset.kgNodeDetail,
+          detail.innerHTML,
+        ])
+      );
+      const edges = Array.from(document.querySelectorAll("[data-kg-edge]"));
+
+      function selectNode(nodeId) {
+        nodes.forEach((node) => {
+          node.classList.toggle("active", node.dataset.kgMapNode === nodeId);
+        });
+        edges.forEach((edge) => {
+          edge.classList.toggle(
+            "active",
+            edge.dataset.kgSource === nodeId || edge.dataset.kgTarget === nodeId
+          );
+        });
+        selected.innerHTML = details.get(nodeId) || "<p>No node detail available.</p>";
+      }
+
+      nodes.forEach((node) => {
+        node.addEventListener("click", () => selectNode(node.dataset.kgMapNode));
+        node.addEventListener("keydown", (event) => {
+          if (event.key !== "Enter" && event.key !== " ") {
+            return;
+          }
+          event.preventDefault();
+          selectNode(node.dataset.kgMapNode);
+        });
+      });
+
+      selectNode(nodes[0].dataset.kgMapNode);
+    })();
+  </script>
 {% endblock %}

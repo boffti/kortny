@@ -343,6 +343,10 @@ caption {
   justify-content: flex-end;
 }
 
+.heading-actions form {
+  margin: 0;
+}
+
 h1,
 h2,
 p {
@@ -1483,6 +1487,248 @@ p {
 
 .graph-summary {
   margin-bottom: 20px;
+}
+
+.graph-map-card {
+  margin-bottom: 20px;
+  overflow: hidden;
+}
+
+.graph-map-card > header {
+  align-items: start;
+  display: flex;
+  gap: 14px;
+  justify-content: space-between;
+}
+
+.graph-map-card h2,
+.graph-map-card p {
+  margin: 0;
+}
+
+.graph-map-card h2 {
+  font-size: 16px;
+}
+
+.graph-map-card p {
+  color: var(--muted-foreground);
+  font-size: 13px;
+}
+
+.graph-map-layout {
+  display: grid;
+  gap: 0;
+  grid-template-columns: minmax(0, 1fr) minmax(260px, 320px);
+}
+
+.graph-map-canvas {
+  background:
+    linear-gradient(var(--border) 1px, transparent 1px),
+    linear-gradient(90deg, var(--border) 1px, transparent 1px),
+    color-mix(in srgb, var(--muted) 54%, var(--card));
+  background-size: 44px 44px;
+  border-right: 1px solid var(--border);
+  min-height: 420px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.kg-map-svg {
+  display: block;
+  height: auto;
+  min-height: 360px;
+  width: 100%;
+}
+
+.kg-map-edge {
+  stroke: color-mix(in srgb, var(--muted-foreground) 44%, transparent);
+  stroke-linecap: round;
+  stroke-width: 2;
+}
+
+.kg-map-edge-success {
+  stroke: color-mix(in srgb, var(--success) 58%, transparent);
+}
+
+.kg-map-edge-warning {
+  stroke: color-mix(in srgb, var(--warning) 56%, transparent);
+}
+
+.kg-map-edge-danger {
+  stroke: color-mix(in srgb, var(--destructive) 58%, transparent);
+}
+
+.kg-map-edge-group.active .kg-map-edge {
+  stroke-width: 4;
+}
+
+.kg-map-edge-label {
+  fill: var(--muted-foreground);
+  font-size: 11px;
+  font-weight: 750;
+  paint-order: stroke;
+  pointer-events: none;
+  stroke: color-mix(in srgb, var(--card) 92%, transparent);
+  stroke-width: 5px;
+  text-anchor: middle;
+  text-transform: lowercase;
+}
+
+.kg-map-node {
+  cursor: pointer;
+  outline: none;
+}
+
+.kg-map-node circle {
+  fill: var(--card);
+  stroke: var(--muted-foreground);
+  stroke-width: 2.5;
+  transition: filter 160ms ease, stroke-width 160ms ease, transform 160ms ease;
+}
+
+.kg-map-node-success circle {
+  fill: var(--success-bg);
+  stroke: var(--success);
+}
+
+.kg-map-node-warning circle {
+  fill: var(--warning-bg);
+  stroke: var(--warning);
+}
+
+.kg-map-node-danger circle {
+  fill: var(--destructive-bg);
+  stroke: var(--destructive);
+}
+
+.kg-map-node.active circle,
+.kg-map-node:focus-visible circle {
+  filter: drop-shadow(0 5px 12px rgb(21 24 26 / 18%));
+  stroke-width: 4;
+}
+
+.kg-map-node-label,
+.kg-map-node-kind {
+  fill: var(--foreground);
+  font-weight: 800;
+  paint-order: stroke;
+  pointer-events: none;
+  stroke: color-mix(in srgb, var(--card) 92%, transparent);
+  stroke-width: 5px;
+}
+
+.kg-map-node-label {
+  font-size: 12px;
+}
+
+.kg-map-node-kind {
+  fill: var(--muted-foreground);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.graph-map-inspector {
+  background: color-mix(in srgb, var(--card) 88%, var(--muted));
+  display: grid;
+  gap: 14px;
+  grid-template-rows: auto 1fr auto;
+  min-width: 0;
+  padding: 16px;
+}
+
+.graph-map-selected {
+  min-width: 0;
+}
+
+.graph-map-selected p {
+  margin: 0;
+}
+
+.graph-map-detail {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.graph-map-detail-title {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+.graph-map-detail-title strong {
+  color: var(--foreground);
+  font-size: 16px;
+  overflow-wrap: anywhere;
+}
+
+.graph-map-detail-grid {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin: 0;
+}
+
+.graph-map-detail-grid div {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  min-width: 0;
+  padding: 8px;
+}
+
+.graph-map-detail-grid dt {
+  color: var(--muted-foreground);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.graph-map-detail-grid dd {
+  color: var(--foreground);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 750;
+  margin: 2px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.graph-map-legend {
+  border-top: 1px solid var(--border);
+  display: grid;
+  gap: 7px;
+  padding-top: 12px;
+}
+
+.graph-map-legend span {
+  align-items: center;
+  color: var(--muted-foreground);
+  display: flex;
+  font-size: 12px;
+  gap: 7px;
+}
+
+.legend-dot {
+  border-radius: 999px;
+  display: inline-block;
+  flex: 0 0 auto;
+  height: 9px;
+  width: 9px;
+}
+
+.legend-success {
+  background: var(--success);
+}
+
+.legend-warning {
+  background: var(--warning);
+}
+
+.legend-danger {
+  background: var(--destructive);
 }
 
 .graph-toolbar {
@@ -4267,6 +4513,25 @@ pre {
   .memory-fact-row {
     grid-template-columns: 1fr;
     padding: 14px 12px;
+  }
+
+  .graph-map-card > header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .graph-map-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .graph-map-canvas {
+    border-bottom: 1px solid var(--border);
+    border-right: 0;
+    min-height: 320px;
+  }
+
+  .graph-map-detail-grid {
+    grid-template-columns: 1fr;
   }
 
   .graph-row {

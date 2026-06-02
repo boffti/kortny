@@ -28,7 +28,9 @@ from kortny.db.models import LLMProvider as DbLLMProvider
 from kortny.execution import task_workspace
 from kortny.knowledge_graph import (
     KG_CHANNEL_PROFILE_PROJECTED_MESSAGE,
+    ChannelGraphRefreshPipeline,
     KnowledgeGraphExtractionService,
+    is_dashboard_graph_refresh_task,
 )
 from kortny.llm import LLMProvider, LLMService, ModelRouter, create_llm_provider
 from kortny.llm.routing import ModelRouteTier, effective_intent_decision
@@ -37,6 +39,8 @@ from kortny.observability import log_observation
 from kortny.observe.assessment import (
     CHANNEL_ASSESSMENT_COMPLETED_MESSAGE,
     CHANNEL_ASSESSMENT_FAILED_MESSAGE,
+    CHANNEL_ASSESSMENT_SUPPRESS_SLACK_POST_KEY,
+    channel_assessment_request_event,
     is_channel_assessment_task,
 )
 from kortny.observe.profiles import ObserveChannelProfileService
@@ -170,13 +174,21 @@ class AgentTaskExecutor:
         try:
             logger.info("agent executor started task_id=%s", task.id)
             with task_workspace(task.id, base_dir=self.workspace_base_dir) as workspace:
-                agent_result = self._run_agent_runtime(
-                    settings=settings,
-                    session=session,
-                    task=task,
-                    task_service=task_service,
-                    working_dir=workspace.path,
-                )
+                if is_dashboard_graph_refresh_task(session, task):
+                    agent_result = self._run_channel_graph_refresh_pipeline(
+                        settings=settings,
+                        session=session,
+                        task=task,
+                        task_service=task_service,
+                    )
+                else:
+                    agent_result = self._run_agent_runtime(
+                        settings=settings,
+                        session=session,
+                        task=task,
+                        task_service=task_service,
+                        working_dir=workspace.path,
+                    )
                 task_service.raise_if_cancelled(task, phase="before_post_outputs")
                 self._post_outputs(
                     settings=settings,
@@ -259,6 +271,60 @@ class AgentTaskExecutor:
                 succeeded=False,
             )
             raise
+
+    def _run_channel_graph_refresh_pipeline(
+        self,
+        *,
+        settings: Settings,
+        session: Session,
+        task: Task,
+        task_service: TaskService,
+    ) -> AgentRunResult:
+        """Run dashboard graph refresh jobs without the general agent runtime."""
+
+        task_service.append_event(
+            task,
+            TaskEventType.log,
+            {
+                "message": "agent_runtime_selected",
+                "runtime": "kg_channel_refresh_pipeline",
+                "reason": "dashboard_knowledge_graph_refresh",
+            },
+        )
+        model_route = ModelRouter(settings).route_for_tier(
+            ModelRouteTier.cheap_fast,
+            reason="knowledge_graph_semantic_extraction",
+        )
+        provider = self.llm_provider or create_llm_provider(
+            settings,
+            model=model_route.model,
+        )
+        provider_name = self.provider_name or DbLLMProvider(settings.llm_provider.value)
+        result = ChannelGraphRefreshPipeline(
+            session=session,
+            task_service=task_service,
+            history_tool=SlackChannelHistoryTool(
+                self._build_slack_history_client(settings),
+                default_channel_id=task.slack_channel_id,
+                cache=ObservationChannelHistoryCache(
+                    session,
+                    installation_id=task.installation_id,
+                ),
+            ),
+            llm=LLMService(
+                session=session,
+                provider=provider,
+                provider_name=provider_name,
+                task_service=task_service,
+                model_route=model_route,
+            ),
+        ).run(task)
+        return AgentRunResult(
+            task_id=task.id,
+            result_summary=result.result_summary,
+            turns=0,
+            artifact_count=result.artifact_count,
+        )
 
     def _build_llm(
         self,
@@ -973,6 +1039,20 @@ class AgentTaskExecutor:
         task_service: TaskService,
         result_summary: str,
     ) -> None:
+        if _should_suppress_slack_post(session, task):
+            task_service.append_event(
+                task,
+                TaskEventType.log,
+                {
+                    "message": "slack_final_message_suppressed",
+                    "reason": "background_channel_assessment",
+                },
+            )
+            logger.info(
+                "suppressing final message for background assessment task_id=%s",
+                task.id,
+            )
+            return
         client = self.slack_client
         if client is None:
             client = cast(
@@ -1196,6 +1276,20 @@ class AgentTaskExecutor:
         task: Task,
         task_service: TaskService,
     ) -> None:
+        if _should_suppress_slack_post(session, task):
+            task_service.append_event(
+                task,
+                TaskEventType.log,
+                {
+                    "message": "slack_failure_notice_suppressed",
+                    "reason": "background_channel_assessment",
+                },
+            )
+            logger.info(
+                "suppressing failure notice for background assessment task_id=%s",
+                task.id,
+            )
+            return
         try:
             client = self.slack_client
             if client is None:
@@ -1418,6 +1512,15 @@ def _latest_payload_event(
             continue
         return event.payload
     return None
+
+
+def _should_suppress_slack_post(session: Session, task: Task) -> bool:
+    request_event = channel_assessment_request_event(session, task)
+    if request_event is None:
+        return False
+    return (
+        request_event.payload.get(CHANNEL_ASSESSMENT_SUPPRESS_SLACK_POST_KEY) is True
+    )
 
 
 def _external_tool_skip_reason(

@@ -13,6 +13,7 @@ from kortny.db.models import Task, TaskEvent, TaskEventType
 CHANNEL_ASSESSMENT_REQUESTED_MESSAGE = "observe_channel_assessment_requested"
 CHANNEL_ASSESSMENT_COMPLETED_MESSAGE = "observe_channel_assessment_completed"
 CHANNEL_ASSESSMENT_FAILED_MESSAGE = "observe_channel_assessment_failed"
+CHANNEL_ASSESSMENT_SUPPRESS_SLACK_POST_KEY = "suppress_slack_post"
 
 
 def build_channel_assessment_input(*, channel_id: str) -> str:
@@ -35,6 +36,26 @@ def build_channel_assessment_input(*, channel_id: str) -> str:
         "- Keep it human, specific, and low-pressure.\n"
         "- Do not claim to have read DMs or anything outside this channel.\n"
         "- Use Slack mrkdwn, not Markdown headings."
+    )
+
+
+def build_channel_graph_refresh_input(*, channel_id: str) -> str:
+    """Return the synthetic worker prompt for a silent graph refresh assessment."""
+
+    return (
+        "Run Kortny's background channel graph refresh assessment for this Slack "
+        "channel.\n\n"
+        f"Channel ID: {channel_id}\n\n"
+        "Use slack_channel_history for the current task channel with a bounded "
+        "lookback. Prefer limit 80 and include_threads true. Do not use web "
+        "search, Composio, PDF generation, or memory-writing tools for this "
+        "assessment.\n\n"
+        "Produce a concise internal assessment summary for the workspace knowledge "
+        "graph. The summary should identify the likely channel purpose, recurring "
+        "topics, important entities or workflows, and practical ways Kortny may "
+        "help in this channel. Use careful language when evidence is thin. Do not "
+        "address the channel directly, do not ask a follow-up question, and do not "
+        "claim to have read DMs or anything outside this channel."
     )
 
 

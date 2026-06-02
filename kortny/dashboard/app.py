@@ -509,8 +509,10 @@ def register_routes(app: FastAPI) -> None:
         q: Annotated[str | None, Query()] = None,
         cursor: Annotated[str | None, Query()] = None,
         page_size: Annotated[int, Query(ge=1, le=100)] = 60,
+        view: Annotated[str | None, Query()] = None,
     ) -> Response:
         runtime_settings, runtime_error = _load_runtime_settings()
+        catalog_view = "list" if (view or "").strip().lower() == "list" else "card"
         catalog = get_composio_catalog_dashboard(
             session,
             runtime_settings=runtime_settings,
@@ -519,7 +521,7 @@ def register_routes(app: FastAPI) -> None:
             limit=page_size,
         )
         catalog_query = _clean_query_params(
-            {"q": q, "page_size": catalog.page_size or page_size}
+            {"q": q, "page_size": catalog.page_size or page_size, "view": catalog_view}
         )
         return templates.TemplateResponse(
             request=request,
@@ -532,6 +534,17 @@ def register_routes(app: FastAPI) -> None:
                 "cursor": cursor or "",
                 "page_size": catalog.page_size or page_size,
                 "page_size_options": (24, 60, 100),
+                "catalog_view": catalog_view,
+                "catalog_card_view_url": _url_with_query(
+                    "/composio", {**catalog_query, "view": "card"}
+                ),
+                "catalog_list_view_url": _url_with_query(
+                    "/composio", {**catalog_query, "view": "list"}
+                ),
+                "catalog_clear_url": _url_with_query(
+                    "/composio",
+                    {"page_size": catalog.page_size or page_size, "view": catalog_view},
+                ),
                 "catalog_next_url": _url_with_query(
                     "/composio",
                     {
@@ -1305,10 +1318,12 @@ def register_routes(app: FastAPI) -> None:
         q: Annotated[str | None, Query()] = None,
         cursor: Annotated[str | None, Query()] = None,
         page_size: Annotated[int, Query(ge=1, le=100)] = 60,
+        view: Annotated[str | None, Query()] = None,
     ) -> Response:
         if principal.installation_id is None or principal.slack_user_id is None:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN)
         runtime_settings, runtime_error = _load_runtime_settings()
+        catalog_view = "list" if (view or "").strip().lower() == "list" else "card"
         catalog = get_composio_catalog_dashboard(
             session,
             runtime_settings=runtime_settings,
@@ -1319,7 +1334,7 @@ def register_routes(app: FastAPI) -> None:
             owner_slack_user_id=principal.slack_user_id,
         )
         catalog_query = _clean_query_params(
-            {"q": q, "page_size": catalog.page_size or page_size}
+            {"q": q, "page_size": catalog.page_size or page_size, "view": catalog_view}
         )
         return templates.TemplateResponse(
             request=request,
@@ -1332,6 +1347,17 @@ def register_routes(app: FastAPI) -> None:
                 "cursor": cursor or "",
                 "page_size": catalog.page_size or page_size,
                 "page_size_options": (24, 60, 100),
+                "catalog_view": catalog_view,
+                "catalog_card_view_url": _url_with_query(
+                    "/me/composio", {**catalog_query, "view": "card"}
+                ),
+                "catalog_list_view_url": _url_with_query(
+                    "/me/composio", {**catalog_query, "view": "list"}
+                ),
+                "catalog_clear_url": _url_with_query(
+                    "/me/composio",
+                    {"page_size": catalog.page_size or page_size, "view": catalog_view},
+                ),
                 "catalog_next_url": _url_with_query(
                     "/me/composio",
                     {

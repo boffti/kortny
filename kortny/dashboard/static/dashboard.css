@@ -2210,7 +2210,7 @@ pre {
   box-shadow: var(--shadow);
   display: grid;
   gap: 12px;
-  grid-template-columns: minmax(0, 1fr) minmax(120px, 0.18fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   padding: 14px;
 }
 
@@ -2329,14 +2329,14 @@ pre {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
-.catalog-pager {
+.catalog-view-toolbar {
   align-items: center;
   display: flex;
   gap: 12px;
   justify-content: space-between;
 }
 
-.catalog-pager > div {
+.catalog-result-count {
   align-items: center;
   color: var(--muted-foreground);
   display: flex;
@@ -2345,8 +2345,12 @@ pre {
   gap: 8px;
 }
 
-.catalog-pager-actions {
-  justify-content: flex-end;
+.catalog-view-switch {
+  flex: 0 0 auto;
+}
+
+.catalog-view-switch .segmented-item {
+  text-decoration: none;
 }
 
 .catalog-toolkit {
@@ -2445,10 +2449,17 @@ pre {
   gap: 16px;
 }
 
-.composio-card-grid {
+.composio-catalog-results {
   display: grid;
   gap: 14px;
+}
+
+.composio-catalog-results[data-view="card"] {
   grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.composio-catalog-results[data-view="list"] {
+  grid-template-columns: 1fr;
 }
 
 .composio-card {
@@ -2474,6 +2485,29 @@ pre {
 
 .composio-card.connected {
   border-color: color-mix(in srgb, var(--success) 28%, var(--border));
+}
+
+.composio-catalog-results[data-view="list"] .composio-card {
+  align-items: center;
+  gap: 14px;
+  grid-template-columns: minmax(240px, 0.95fr) minmax(260px, 1.35fr) minmax(220px, 0.9fr) minmax(140px, 0.45fr);
+  padding: 12px 14px;
+}
+
+.composio-catalog-results[data-view="list"] .composio-card-header {
+  grid-column: 1;
+}
+
+.composio-catalog-results[data-view="list"] .integration-card-description {
+  grid-column: 2;
+}
+
+.composio-catalog-results[data-view="list"] .integration-card-facts {
+  grid-column: 3;
+}
+
+.composio-catalog-results[data-view="list"] .integration-card-categories {
+  grid-column: 4;
 }
 
 .composio-card header,
@@ -2561,6 +2595,12 @@ pre {
   overflow: hidden;
 }
 
+.composio-catalog-results[data-view="list"] .integration-card-description {
+  -webkit-line-clamp: 2;
+  margin: 0;
+  min-height: 0;
+}
+
 .integration-card-facts {
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -2610,6 +2650,53 @@ pre {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.catalog-load-state {
+  align-items: center;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--muted-foreground);
+  display: flex;
+  gap: 10px;
+  justify-content: center;
+  min-height: 54px;
+  padding: 12px 14px;
+}
+
+.catalog-load-status {
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.catalog-load-state.is-loading .catalog-load-status::before {
+  animation: catalog-loader-spin 760ms linear infinite;
+  border: 2px solid color-mix(in srgb, var(--accent) 20%, transparent);
+  border-top-color: var(--accent);
+  border-radius: 999px;
+  content: "";
+  display: inline-block;
+  height: 12px;
+  margin-right: 8px;
+  vertical-align: -2px;
+  width: 12px;
+}
+
+.catalog-load-state.is-complete {
+  background: var(--muted);
+}
+
+.catalog-load-state.has-error {
+  background: var(--warning-bg);
+  border-color: color-mix(in srgb, var(--warning) 26%, transparent);
+  color: var(--warning);
+}
+
+@keyframes catalog-loader-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .empty-panel {
@@ -3888,7 +3975,8 @@ pre {
   .catalog-stats,
   .catalog-search,
   .catalog-grid,
-  .composio-card-grid,
+  .composio-catalog-results[data-view="card"],
+  .composio-catalog-results[data-view="list"] .composio-card,
   .composio-detail-grid,
   .connect-hero,
   .connected-account-panel,
@@ -3919,8 +4007,8 @@ pre {
   }
 
   .external-tool-card-actions,
-  .catalog-pager,
-  .catalog-pager-actions,
+  .catalog-view-toolbar,
+  .catalog-load-state,
   .catalog-search-actions {
     align-items: stretch;
     flex-direction: column;
@@ -3974,6 +4062,13 @@ pre {
 
   .catalog-search-actions {
     justify-content: flex-start;
+  }
+
+  .composio-catalog-results[data-view="list"] .composio-card-header,
+  .composio-catalog-results[data-view="list"] .integration-card-description,
+  .composio-catalog-results[data-view="list"] .integration-card-facts,
+  .composio-catalog-results[data-view="list"] .integration-card-categories {
+    grid-column: auto;
   }
 
   .tool-group-header {
@@ -4401,4 +4496,3 @@ pre {
   justify-content: center;
   margin-top: 24px;
 }
-

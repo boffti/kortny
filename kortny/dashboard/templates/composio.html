@@ -39,14 +39,14 @@
     </div>
     <div class="card metric-card">
       <span>Loaded</span>
-      <strong>{{ catalog.visible_count|number }}</strong>
-      <small>
+      <strong id="catalog-loaded-count">{{ catalog.visible_count|number }}</strong>
+      <small id="catalog-loaded-detail">
         {% if catalog.pinned_connected_count %}
           Includes {{ catalog.pinned_connected_count|number }} connected app{% if catalog.pinned_connected_count != 1 %}s{% endif %}
         {% elif catalog.cursor %}
-          Current page
+          Current batch
         {% else %}
-          First page
+          Initial batch
         {% endif %}
       </small>
     </div>
@@ -68,7 +68,7 @@
     <div class="section-header-row">
       <div>
         <h2>Integration Catalog</h2>
-        <p>Connected integrations stay pinned above the Composio catalog page results.</p>
+        <p>Connected integrations stay pinned above the Composio catalog results.</p>
       </div>
     </div>
 
@@ -77,26 +77,33 @@
         Search integrations
         <input type="search" name="q" value="{{ q }}" placeholder="Search by app, category, or auth type" autocomplete="off">
       </label>
-      <label class="catalog-search-size">
-        Per page
-        <select name="page_size">
-          {% for option in page_size_options %}
-            <option value="{{ option }}" {{ "selected" if option == page_size else "" }}>{{ option }}</option>
-          {% endfor %}
-        </select>
-      </label>
+      <input type="hidden" name="page_size" value="{{ page_size }}">
+      <input type="hidden" name="view" value="{{ catalog_view }}">
       <div class="catalog-search-actions">
         <button class="btn" type="submit">Search</button>
         {% if q %}
-          <a class="btn-ghost" href="{{ catalog_url }}">Clear</a>
+          <a class="btn-ghost" href="{{ catalog_clear_url }}">Clear</a>
         {% endif %}
       </div>
     </form>
 
     {% if catalog.toolkits %}
-      <div class="composio-card-grid">
+      <div class="catalog-view-toolbar" aria-label="Catalog view controls">
+        <div class="catalog-result-count">
+          {% if catalog.total_items is not none %}
+            <span id="catalog-loaded-label">{{ catalog.visible_count|number }} shown of {{ catalog.total_items|number }}</span>
+          {% else %}
+            <span id="catalog-loaded-label">{{ catalog.visible_count|number }} shown</span>
+          {% endif %}
+        </div>
+        <div class="segmented-control catalog-view-switch" role="group" aria-label="Catalog layout">
+          <a class="segmented-item {{ 'active' if catalog_view == 'card' else '' }}" href="{{ catalog_card_view_url }}" aria-current="{{ 'true' if catalog_view == 'card' else 'false' }}">Cards</a>
+          <a class="segmented-item {{ 'active' if catalog_view == 'list' else '' }}" href="{{ catalog_list_view_url }}" aria-current="{{ 'true' if catalog_view == 'list' else 'false' }}">List</a>
+        </div>
+      </div>
+      <div class="composio-catalog-results" data-view="{{ catalog_view }}">
         {% for toolkit in catalog.toolkits %}
-          <a class="composio-card {{ 'connected' if toolkit.connected else '' }}" href="{{ detail_base_url }}/{{ toolkit.slug }}">
+          <a class="composio-card composio-catalog-item {{ 'connected' if toolkit.connected else '' }}" href="{{ detail_base_url }}/{{ toolkit.slug }}" data-toolkit-slug="{{ toolkit.slug }}">
             <header class="composio-card-header">
               <span class="integration-logo" aria-hidden="true">
                 {% if toolkit.logo_url %}
@@ -144,30 +151,25 @@
           </a>
         {% endfor %}
       </div>
-      <nav class="catalog-pager" role="navigation" aria-label="Composio catalog pages">
-        <div>
-          {% if catalog.cursor %}
-            <span class="badge badge-neutral">Cursor page</span>
-          {% else %}
-            <span class="badge badge-neutral">First page</span>
-          {% endif %}
-          {% if catalog.total_items is not none %}
-            <span>{{ catalog.visible_count|number }} shown of {{ catalog.total_items|number }}</span>
-          {% else %}
-            <span>{{ catalog.visible_count|number }} shown</span>
-          {% endif %}
-        </div>
-        <div class="catalog-pager-actions">
-          {% if catalog.cursor %}
-            <a class="btn-ghost" href="{{ catalog_restart_url }}">Back to first page</a>
-          {% endif %}
+      <div
+        id="catalog-load-state"
+        class="catalog-load-state"
+        data-next-url="{{ catalog_next_url or '' }}"
+        data-total-items="{{ catalog.total_items if catalog.total_items is not none else '' }}"
+        data-view="{{ catalog_view }}"
+        aria-live="polite"
+      >
+        <span class="catalog-load-status">
           {% if catalog_next_url %}
-            <a class="btn" href="{{ catalog_next_url }}">Load next page</a>
+            Loading more integrations
           {% else %}
-            <span class="btn-ghost disabled" aria-disabled="true">No more pages</span>
+            All integrations loaded
           {% endif %}
-        </div>
-      </nav>
+        </span>
+        {% if catalog_next_url %}
+          <a class="btn-ghost catalog-load-fallback" href="{{ catalog_next_url }}">Load more</a>
+        {% endif %}
+      </div>
     {% elif catalog.configured and catalog.enabled and not catalog.error %}
       <p class="empty-state">No Composio toolkits matched the current search.</p>
     {% else %}
@@ -177,4 +179,143 @@
       </article>
     {% endif %}
   </section>
+
+  <script>
+    (() => {
+      const results = document.querySelector(".composio-catalog-results");
+      const loadState = document.getElementById("catalog-load-state");
+      if (!results || !loadState) {
+        return;
+      }
+
+      const loadedCount = document.getElementById("catalog-loaded-count");
+      const loadedDetail = document.getElementById("catalog-loaded-detail");
+      const loadedLabel = document.getElementById("catalog-loaded-label");
+      const status = loadState.querySelector(".catalog-load-status");
+      const fallback = loadState.querySelector(".catalog-load-fallback");
+      const seenSlugs = new Set(
+        Array.from(results.querySelectorAll("[data-toolkit-slug]"))
+          .map((item) => item.getAttribute("data-toolkit-slug"))
+          .filter(Boolean)
+      );
+      const formatter = new Intl.NumberFormat();
+      let nextUrl = loadState.dataset.nextUrl || "";
+      let loading = false;
+
+      const countItems = () => results.querySelectorAll(".composio-catalog-item").length;
+      const updateCount = () => {
+        const count = countItems();
+        const total = loadState.dataset.totalItems || "";
+        const label = total
+          ? `${formatter.format(count)} shown of ${formatter.format(Number(total))}`
+          : `${formatter.format(count)} shown`;
+        if (loadedCount) {
+          loadedCount.textContent = formatter.format(count);
+        }
+        if (loadedDetail) {
+          loadedDetail.textContent = label;
+        }
+        if (loadedLabel) {
+          loadedLabel.textContent = label;
+        }
+      };
+
+      const setComplete = () => {
+        nextUrl = "";
+        loadState.dataset.nextUrl = "";
+        loadState.classList.add("is-complete");
+        if (status) {
+          status.textContent = "All integrations loaded";
+        }
+        if (fallback) {
+          fallback.removeAttribute("href");
+          fallback.setAttribute("aria-disabled", "true");
+          fallback.textContent = "All loaded";
+        }
+      };
+
+      const loadMore = async () => {
+        if (!nextUrl || loading) {
+          return;
+        }
+        loading = true;
+        loadState.classList.add("is-loading");
+        if (status) {
+          status.textContent = "Loading more integrations";
+        }
+
+        try {
+          const response = await fetch(nextUrl, { headers: { "Accept": "text/html" } });
+          if (!response.ok) {
+            throw new Error(`Catalog request failed: ${response.status}`);
+          }
+          const html = await response.text();
+          const doc = new DOMParser().parseFromString(html, "text/html");
+          const nextResults = doc.querySelector(".composio-catalog-results");
+          const nextState = doc.getElementById("catalog-load-state");
+          if (!nextResults || !nextState) {
+            throw new Error("Catalog response did not include results.");
+          }
+
+          let appended = 0;
+          nextResults.querySelectorAll(".composio-catalog-item").forEach((item) => {
+            const slug = item.getAttribute("data-toolkit-slug");
+            if (slug && seenSlugs.has(slug)) {
+              return;
+            }
+            if (slug) {
+              seenSlugs.add(slug);
+            }
+            results.appendChild(item);
+            appended += 1;
+          });
+
+          nextUrl = nextState.dataset.nextUrl || "";
+          loadState.dataset.nextUrl = nextUrl;
+          if (fallback && nextUrl) {
+            fallback.setAttribute("href", nextUrl);
+          }
+          updateCount();
+
+          if (!nextUrl || appended === 0) {
+            setComplete();
+          } else if (status) {
+            status.textContent = "More integrations available";
+          }
+        } catch (error) {
+          loadState.classList.add("has-error");
+          if (status) {
+            status.textContent = "Catalog loading paused";
+          }
+        } finally {
+          loading = false;
+          loadState.classList.remove("is-loading");
+        }
+      };
+
+      if (fallback) {
+        fallback.addEventListener("click", (event) => {
+          if (!nextUrl) {
+            return;
+          }
+          event.preventDefault();
+          loadMore();
+        });
+      }
+
+      if (!nextUrl) {
+        setComplete();
+      } else if ("IntersectionObserver" in window) {
+        const observer = new IntersectionObserver(
+          (entries) => {
+            if (entries.some((entry) => entry.isIntersecting)) {
+              loadMore();
+            }
+          },
+          { rootMargin: "480px 0px" }
+        );
+        observer.observe(loadState);
+      }
+    })();
+  </script>
 {% endblock %}

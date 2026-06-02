@@ -593,6 +593,7 @@ def test_dashboard_composio_page_renders_catalog_shell(
     assert "Composio" in response.text
     assert "Integration Catalog" in response.text
     assert "Catalog not available" in response.text
+    assert "Composio catalog results" in response.text
     assert 'href="/composio" aria-current="page"' in response.text
     assert "composio-dashboard-secret" not in response.text
 
@@ -763,10 +764,12 @@ def test_dashboard_composio_page_exposes_cursor_pagination(
     response = test_client.get("/composio?q=git&page_size=24&cursor=cursor_1")
 
     assert response.status_code == 200
-    assert "Load next page" in response.text
+    assert "Load more" in response.text
     assert "cursor_2" in response.text
-    assert "Back to first page" in response.text
     assert "page_size=24" in response.text
+    assert "view=card" in response.text
+    assert "Cards" in response.text
+    assert "List" in response.text
     assert 'src="https://assets.composio.dev/logos/github.png"' in response.text
 
 

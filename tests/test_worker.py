@@ -788,6 +788,78 @@ def test_adk_model_callback_records_llm_usage(
     assert event.payload["pricing_missing"] is False
 
 
+def test_adk_model_callback_uses_openrouter_catalog_pricing_when_litellm_misses(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = create_task(db_session, event_id="EvAdkOpenRouterCatalogUsage")
+    task_service = TaskService(db_session)
+    monkeypatch.setattr(
+        "kortny.agent.adk_runtime._openrouter_model_pricing_catalog",
+        lambda: {
+            "deepseek/deepseek-v4-pro": (
+                Decimal("0.000000435"),
+                Decimal("0.00000087"),
+            ),
+            "deepseek/deepseek-v4-pro-20260423": (
+                Decimal("0.000000435"),
+                Decimal("0.00000087"),
+            ),
+        },
+    )
+    settings = Settings.model_validate(
+        {
+            "SLACK_BOT_TOKEN": "xoxb-test",
+            "SLACK_APP_TOKEN": "xapp-test",
+            "SLACK_SIGNING_SECRET": "signing-secret",
+            "LLM_PROVIDER": SettingsLLMProvider.openrouter,
+            "LLM_API_KEY": "openrouter-key",
+            "LLM_MODEL": "deepseek/deepseek-v4-pro",
+            "POSTGRES_URL": "postgresql://kortny:kortny@localhost/kortny",
+            "AGENT_RUNTIME": "adk",
+        }
+    )
+    runtime = AdkAgentRuntime(
+        settings=settings,
+        session=db_session,
+        task_service=task_service,
+        model_route=ModelRoute(
+            tier=ModelRouteTier.standard,
+            model="deepseek/deepseek-v4-pro",
+            reason="intent_classifier",
+        ),
+    )
+    context = FakeAdkContext(
+        agent_name="kortny_root_orchestrator",
+        invocation_id="adk-invocation-catalog",
+        task_id=str(task.id),
+    )
+    response = LlmResponse(
+        model_version="openrouter/deepseek/deepseek-v4-pro-20260423",
+        usage_metadata=genai_types.GenerateContentResponseUsageMetadata(
+            prompt_token_count=4238,
+            candidates_token_count=343,
+            total_token_count=4581,
+        ),
+    )
+
+    runtime._record_adk_model_usage(callback_context=context, llm_response=response)
+    usage = db_session.scalar(select(LLMUsage).where(LLMUsage.task_id == task.id))
+
+    assert usage is not None
+    assert usage.model == "deepseek/deepseek-v4-pro-20260423"
+    assert usage.cost_usd == Decimal("0.002142")
+    db_session.refresh(task)
+    assert task.total_cost_usd == Decimal("0.002142")
+    event = next(
+        event
+        for event in task_events(db_session, task)
+        if event.payload.get("prompt_name") == "kortny.adk.kortny_root_orchestrator"
+    )
+    assert event.payload["pricing_missing"] is False
+    assert event.payload["cost_usd"] == "0.002142"
+
+
 def test_agent_executor_skips_humanizer_for_adk_quick_fast_path(
     db_session: Session,
 ) -> None:

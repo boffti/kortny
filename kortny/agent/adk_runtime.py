@@ -11,6 +11,7 @@ from collections.abc import Callable
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from decimal import ROUND_HALF_UP, Decimal
+from functools import lru_cache
 from typing import Any
 
 from google.adk.agents import Agent
@@ -49,6 +50,8 @@ ADK_CLARIFICATION_SPECIALIST_MODEL_TIER = ModelRouteTier.cheap_fast
 ADK_INTENT_SPECIALIST_MODEL_TIER = ModelRouteTier.cheap_fast
 ADK_HUMANIZER_SPECIALIST_MODEL_TIER = ModelRouteTier.standard
 ADK_EVAL_SPECIALIST_MODEL_TIER = ModelRouteTier.high_reasoning
+OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
+OPENROUTER_MODELS_TIMEOUT_SECONDS = 5.0
 ADK_SINGLE_PERSONA_PROMPT = """User-facing identity rules:
 - Speak as Kortny, a single Slack-native coworker. Use first person when
   describing capabilities or limitations.
@@ -611,6 +614,10 @@ class AdkAgentRuntime:
         litellm_cost = _litellm_model_cost_usd(candidates, usage)
         if litellm_cost is not None:
             return litellm_cost, False
+        if provider == DbLLMProvider.openrouter:
+            openrouter_cost = _openrouter_model_catalog_cost_usd(candidates, usage)
+            if openrouter_cost is not None:
+                return openrouter_cost, False
         return Decimal("0"), True
 
     def _adk_model_name_for_agent(self, agent_name: str) -> str:
@@ -878,6 +885,71 @@ def _litellm_model_cost_usd(
         )
         return cost.quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP)
     return None
+
+
+def _openrouter_model_catalog_cost_usd(
+    model_candidates: tuple[str, ...],
+    usage: TokenUsage,
+) -> Decimal | None:
+    pricing_catalog = _openrouter_model_pricing_catalog()
+    if not pricing_catalog:
+        return None
+    for model in model_candidates:
+        normalized = _normalized_litellm_model_name(model)
+        pricing = pricing_catalog.get(normalized)
+        if pricing is None:
+            continue
+        input_cost_per_token, output_cost_per_token = pricing
+        cost = (
+            Decimal(usage.input_tokens) * input_cost_per_token
+            + Decimal(usage.output_tokens) * output_cost_per_token
+        )
+        return cost.quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP)
+    return None
+
+
+@lru_cache(maxsize=1)
+def _openrouter_model_pricing_catalog() -> dict[str, tuple[Decimal, Decimal]]:
+    try:
+        import httpx
+    except ImportError:
+        return {}
+
+    try:
+        response = httpx.get(
+            OPENROUTER_MODELS_URL,
+            timeout=OPENROUTER_MODELS_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+    except Exception:
+        logger.exception("openrouter model pricing catalog lookup failed")
+        return {}
+    return _openrouter_model_pricing_from_payload(response.json())
+
+
+def _openrouter_model_pricing_from_payload(
+    payload: object,
+) -> dict[str, tuple[Decimal, Decimal]]:
+    if not isinstance(payload, dict):
+        return {}
+    data = payload.get("data")
+    if not isinstance(data, list):
+        return {}
+    pricing_by_model: dict[str, tuple[Decimal, Decimal]] = {}
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        pricing = item.get("pricing")
+        if not isinstance(pricing, dict):
+            continue
+        input_cost = _decimal_or_none(pricing.get("prompt"))
+        output_cost = _decimal_or_none(pricing.get("completion"))
+        if input_cost is None or output_cost is None:
+            continue
+        for key in (item.get("id"), item.get("canonical_slug")):
+            if isinstance(key, str) and key.strip():
+                pricing_by_model[key.strip()] = (input_cost, output_cost)
+    return pricing_by_model
 
 
 def _decimal_or_none(value: object) -> Decimal | None:

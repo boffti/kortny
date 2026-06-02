@@ -85,7 +85,9 @@ built for exactly that.
 1. Go to https://api.slack.com/apps → Create New App → From Manifest
 2. Paste the contents of `manifest.json` from this repo
 3. Name your bot whatever you want — this is your bot, your brand
-4. Upload a custom avatar if you'd like
+4. Upload a custom avatar if you'd like. This repo includes the Kortny icon at
+   `kortny/dashboard/static/assets/kortny_icon.png`; when the dashboard is
+   running, it is served at `/static/assets/kortny_icon.png`.
 5. Install the app to your workspace
 6. Copy your **Bot Token** (`xoxb-...`), **App-Level Token**
    (`xapp-...` with `connections:write` for Socket Mode), and

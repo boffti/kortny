@@ -64,6 +64,7 @@ from kortny.worker import (
     TaskWorker,
     WalkingSkeletonExecutor,
 )
+from kortny.workflow.launcher import TemporalWorkflowLaunch
 
 TEST_POSTGRES_URL = os.environ.get("KORTNY_TEST_POSTGRES_URL")
 
@@ -708,6 +709,101 @@ def test_agent_executor_passes_routed_model_to_adk_runtime(
         and event.payload.get("runtime") == "adk"
         and event.payload.get("tier") == "cheap_fast"
         and event.payload.get("model") == "deepseek/deepseek-v4-flash"
+        for event in events
+    )
+
+
+def test_agent_executor_shadow_starts_temporal_workflow_for_durable_candidate(
+    db_session: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = create_task(db_session, event_id="EvTemporalShadow")
+    task.input = (
+        "Research AI observability tools, check Linear and Notion, compare with "
+        "our docs, and recommend next actions."
+    )
+    db_session.commit()
+    task_service = TaskService(db_session)
+    settings = Settings.model_validate(
+        {
+            "SLACK_BOT_TOKEN": "xoxb-test",
+            "SLACK_APP_TOKEN": "xapp-test",
+            "SLACK_SIGNING_SECRET": "signing-secret",
+            "LLM_PROVIDER": SettingsLLMProvider.openrouter,
+            "LLM_API_KEY": "openrouter-key",
+            "LLM_MODEL": "anthropic/sonnet-default",
+            "LLM_CHEAP_MODEL": "deepseek/deepseek-v4-flash",
+            "LLM_STANDARD_MODEL": "openai/gpt-5.4-mini",
+            "POSTGRES_URL": "postgresql://kortny:kortny@localhost/kortny",
+            "AGENT_RUNTIME": "adk",
+            "KORTNY_WORKFLOW_BACKEND": "temporal",
+        }
+    )
+    launch_calls: list[str] = []
+
+    def fake_start_temporal_task_workflow_sync(
+        *,
+        settings: Settings,
+        task: Task,
+    ) -> TemporalWorkflowLaunch:
+        launch_calls.append(str(task.id))
+        return TemporalWorkflowLaunch(
+            workflow_id=f"kortny-task-{task.id}",
+            run_id="run-1",
+            first_execution_run_id="first-run-1",
+            result_run_id=None,
+            namespace=settings.temporal_namespace,
+            task_queue=settings.temporal_task_queue,
+        )
+
+    class FakeAdkRuntime:
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+        def run(self, task_arg: Task) -> AgentRunResult:
+            return AgentRunResult(
+                task_id=task_arg.id,
+                result_summary="Durable task still answered inline.",
+                turns=1,
+                artifact_count=0,
+            )
+
+    monkeypatch.setattr(
+        "kortny.workflow.launcher.start_temporal_task_workflow_sync",
+        fake_start_temporal_task_workflow_sync,
+    )
+    monkeypatch.setattr(
+        "kortny.agent.adk_runtime.AdkAgentRuntime",
+        FakeAdkRuntime,
+    )
+
+    result = AgentTaskExecutor(settings=settings)._run_agent_runtime(
+        settings=settings,
+        session=db_session,
+        task=task,
+        task_service=task_service,
+        working_dir=tmp_path,
+    )
+
+    events = task_events(db_session, task)
+
+    assert result.result_summary == "Durable task still answered inline."
+    assert launch_calls == [str(task.id)]
+    assert any(
+        event.payload.get("message") == "runtime_handoff_evaluated"
+        and event.payload.get("runtime_class") == "durable_workflow_task"
+        and event.payload.get("configured_backend") == "temporal"
+        and event.payload.get("selected_backend") == "inline"
+        and event.payload.get("fallback_reason")
+        == "temporal_primary_execution_not_enabled"
+        for event in events
+    )
+    assert any(
+        event.payload.get("message") == "temporal_workflow_shadow_started"
+        and event.payload.get("mode") == "shadow"
+        and event.payload.get("workflow_id") == f"kortny-task-{task.id}"
+        and event.payload.get("run_id") == "run-1"
         for event in events
     )
 

@@ -329,6 +329,12 @@ class AgentTaskExecutor:
             reason_codes=list(handoff.reason_codes),
             fallback_reason=handoff.fallback_reason,
         )
+        if handoff.durable_candidate and handoff.configured_backend == "temporal":
+            self._shadow_start_temporal_workflow(
+                settings=settings,
+                task=task,
+                task_service=task_service,
+            )
         task_service.append_event(
             task,
             TaskEventType.log,
@@ -424,6 +430,64 @@ class AgentTaskExecutor:
             tool_result_prompt_max_chars=settings.tool_result_prompt_max_chars,
             thread_transcript_provider=self._build_thread_transcript_provider(settings),
         ).run(task)
+
+    def _shadow_start_temporal_workflow(
+        self,
+        *,
+        settings: Settings,
+        task: Task,
+        task_service: TaskService,
+    ) -> None:
+        """Start the Temporal envelope without handing over task completion yet."""
+
+        try:
+            from kortny.workflow.launcher import start_temporal_task_workflow_sync
+
+            launch = start_temporal_task_workflow_sync(
+                settings=settings,
+                task=task,
+            )
+        except Exception as exc:
+            task_service.append_event(
+                task,
+                TaskEventType.error,
+                {
+                    "message": "temporal_workflow_shadow_start_failed",
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                    "mode": "shadow",
+                },
+            )
+            log_observation(
+                logger,
+                "temporal_workflow_shadow_start_failed",
+                task=task,
+                error_type=type(exc).__name__,
+                error_summary=str(exc)[:500],
+                mode="shadow",
+            )
+            logger.exception(
+                "temporal workflow shadow start failed task_id=%s",
+                task.id,
+            )
+            return
+
+        payload = {
+            "message": "temporal_workflow_shadow_started",
+            "mode": "shadow",
+            **launch.to_payload(),
+        }
+        task_service.append_event(task, TaskEventType.log, payload)
+        log_observation(
+            logger,
+            "temporal_workflow_shadow_started",
+            task=task,
+            workflow_id=launch.workflow_id,
+            run_id=launch.run_id,
+            task_queue=launch.task_queue,
+            namespace=launch.namespace,
+            mode="shadow",
+        )
 
     def _build_artifact_comment_generator(
         self,

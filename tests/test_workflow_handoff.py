@@ -37,7 +37,7 @@ def test_handoff_classifies_multi_integration_research_as_durable_candidate() ->
     assert decision.fallback_reason == "workflow_backend_inline"
 
 
-def test_handoff_records_temporal_configured_but_adapter_not_enabled() -> None:
+def test_handoff_records_temporal_configured_but_primary_execution_not_enabled() -> None:
     decision = evaluate_runtime_handoff(
         settings=_settings(KORTNY_WORKFLOW_BACKEND="temporal"),
         task=_task("Use Firecrawl to crawl the whole website and summarize it."),
@@ -47,7 +47,7 @@ def test_handoff_records_temporal_configured_but_adapter_not_enabled() -> None:
     assert decision.recommended_backend == "temporal"
     assert decision.configured_backend == "temporal"
     assert decision.selected_backend == "inline"
-    assert decision.fallback_reason == "temporal_adapter_not_enabled_in_this_slice"
+    assert decision.fallback_reason == "temporal_primary_execution_not_enabled"
 
 
 def test_handoff_classifies_scheduled_identity_as_scheduled_workflow() -> None:

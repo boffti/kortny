@@ -1,4 +1,4 @@
-"""CLI entrypoint for Kortny's optional Temporal worker."""
+"""CLI entrypoint for Kortny's Temporal worker."""
 
 from __future__ import annotations
 
@@ -64,7 +64,7 @@ def _temporal_plugins() -> list[Any]:
 
 
 def main(argv: Sequence[str] | None = None) -> None:
-    """Run the optional Temporal workflow worker."""
+    """Run the Temporal workflow worker."""
 
     configure_logging()
     parser = argparse.ArgumentParser(description="Run the Kortny Temporal worker")

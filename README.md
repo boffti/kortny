@@ -127,21 +127,22 @@ POSTGRES_DB=kortny
 POSTGRES_USER=kortny
 POSTGRES_PASSWORD=kortny
 POSTGRES_HOST_PORT=5432
-KORTNY_WORKFLOW_BACKEND=inline
+KORTNY_WORKFLOW_BACKEND=temporal
 ```
 
 ### 3. Start Kortny
 
 ```
-docker compose up
+docker compose up -d --force-recreate
 ```
 
 This starts Postgres on `localhost:5432`, runs the Alembic migration, starts
 the Slack Socket Mode ingress service, starts the task worker, and serves the
-read-only operator dashboard at `http://localhost:8080`.
+read-only operator dashboard at `http://localhost:8080`. It also starts the
+local Temporal dev server and Temporal worker so durable-workflow wiring is
+available during normal development.
 
-This does not start optional observability services such as Phoenix, or the
-optional Temporal workflow backend.
+This does not start optional observability services such as Phoenix.
 
 The dashboard has a local bootstrap login backed by a signed session cookie.
 Use `DASHBOARD_USERNAME` and `DASHBOARD_PASSWORD` to sign in, and change
@@ -218,20 +219,20 @@ Generate the Basic Auth value with:
 printf 'pk-lf-...:sk-lf-...' | base64
 ```
 
-### Optional: run the Temporal workflow backend
+### Temporal workflow backend
 
-Kortny can also run an optional local Temporal dev server and Temporal worker:
+Kortny runs a local Temporal dev server and Temporal worker as part of the
+default Compose stack:
 
 ```
-make compose-up-workflow
+docker compose up -d --force-recreate
 ```
 
-This starts `temporal` and `temporal-worker` behind the `workflow` Compose
-profile. Temporal's local UI is available at `http://localhost:8233`.
+Temporal's local UI is available at `http://localhost:8233`.
 
-The default app path still runs without Temporal. `KORTNY_WORKFLOW_BACKEND`
-defaults to `inline`, and HIG-97 currently records durable-candidate handoff
-events before moving real Slack execution into Temporal workflows.
+`KORTNY_WORKFLOW_BACKEND` defaults to `temporal` in `.env.example`. HIG-97
+currently records durable-candidate handoff events and shadow-starts Temporal
+workflows before moving real Slack execution ownership into Temporal.
 
 ### 5. Invite your bot to a channel
 

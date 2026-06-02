@@ -33,13 +33,13 @@ downgrade:
 	uv run alembic downgrade base
 
 compose-up:
-	docker compose up
+	docker compose up -d
 
 compose-up-observability:
 	OTEL_EXPORTER_OTLP_ENDPOINT=http://phoenix:6006/v1/traces docker compose --profile observability up -d
 
 compose-up-workflow:
-	KORTNY_WORKFLOW_BACKEND=temporal docker compose --profile workflow up -d
+	docker compose up -d
 
 compose-down:
 	docker compose down
@@ -48,7 +48,7 @@ compose-down-observability:
 	docker compose --profile observability down
 
 compose-down-workflow:
-	docker compose --profile workflow down
+	docker compose down
 
 compose-down-observability-volumes:
 	docker compose --profile observability down -v
@@ -60,7 +60,7 @@ compose-logs-observability:
 	docker compose --profile observability logs -f app worker phoenix
 
 compose-logs-workflow:
-	docker compose --profile workflow logs -f app worker temporal temporal-worker
+	docker compose logs -f app worker temporal temporal-worker
 
 playground:
 	uv run adk web .

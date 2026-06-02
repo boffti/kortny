@@ -42,6 +42,10 @@ services:
     env_file:
       - .env
     environment:
+      KORTNY_WORKFLOW_BACKEND: ${KORTNY_WORKFLOW_BACKEND:-temporal}
+      TEMPORAL_ADDRESS: ${TEMPORAL_ADDRESS:-temporal:7233}
+      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-default}
+      TEMPORAL_TASK_QUEUE: ${TEMPORAL_TASK_QUEUE:-kortny-workflows}
       OBSERVABILITY_ENABLED: ${OBSERVABILITY_ENABLED:-true}
       OBSERVABILITY_CAPTURE_CONTENT: ${OBSERVABILITY_CAPTURE_CONTENT:-metadata}
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
@@ -66,6 +70,10 @@ services:
     env_file:
       - .env
     environment:
+      KORTNY_WORKFLOW_BACKEND: ${KORTNY_WORKFLOW_BACKEND:-temporal}
+      TEMPORAL_ADDRESS: ${TEMPORAL_ADDRESS:-temporal:7233}
+      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-default}
+      TEMPORAL_TASK_QUEUE: ${TEMPORAL_TASK_QUEUE:-kortny-workflows}
       OBSERVABILITY_ENABLED: ${OBSERVABILITY_ENABLED:-true}
       OBSERVABILITY_CAPTURE_CONTENT: ${OBSERVABILITY_CAPTURE_CONTENT:-metadata}
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
@@ -140,8 +148,6 @@ services:
 
   temporal:
     image: ${TEMPORAL_IMAGE:-temporalio/temporal:latest}
-    profiles:
-      - workflow
     command: ["server", "start-dev", "--ip", "0.0.0.0"]
     ports:
       - "${TEMPORAL_HOST_PORT:-7233}:7233"
@@ -149,8 +155,6 @@ services:
 
   temporal-worker:
     image: ghcr.io/astral-sh/uv:python3.11-bookworm-slim
-    profiles:
-      - workflow
     working_dir: /app
     command: ["uv", "run", "python", "-m", "kortny.workflow"]
     depends_on:

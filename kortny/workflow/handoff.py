@@ -1,8 +1,8 @@
 """Runtime handoff decisions before task execution.
 
-This is the observable boundary for HIG-97. It does not start Temporal yet; it
-classifies which tasks are likely to need a durable workflow backend once the
-Temporal adapter is present.
+This is the observable boundary for HIG-97. It classifies which tasks are
+likely to need a durable workflow backend; later slices can promote the shadow
+Temporal launch path into primary execution ownership.
 """
 
 from __future__ import annotations
@@ -86,7 +86,7 @@ def evaluate_runtime_handoff(
     selected_backend: WorkflowBackend = "inline"
     fallback_reason = None
     if recommended_backend == "temporal" and configured_backend == "temporal":
-        fallback_reason = "temporal_adapter_not_enabled_in_this_slice"
+        fallback_reason = "temporal_primary_execution_not_enabled"
     elif recommended_backend == "temporal":
         fallback_reason = "workflow_backend_inline"
 

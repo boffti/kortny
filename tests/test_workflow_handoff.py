@@ -75,6 +75,7 @@ def _settings(**overrides: Any) -> Settings:
         "LLM_API_KEY": "llm-key",
         "LLM_MODEL": "openai/gpt-4o",
         "POSTGRES_URL": "postgresql://kortny:kortny@localhost/kortny",
+        "KORTNY_WORKFLOW_BACKEND": "inline",
     }
     values.update(overrides)
     return Settings(**values)

@@ -85,6 +85,7 @@ from kortny.tools import (
     WebSearchTool,
 )
 from kortny.workflow.handoff import evaluate_runtime_handoff
+from kortny.workflow.planning_classifier import classify_planned_workflow
 
 GENERIC_FAILURE_TEXT = (
     "Something went wrong while I was working on this. Please try again soon."
@@ -315,6 +316,56 @@ class AgentTaskExecutor:
         task_service: TaskService,
         working_dir: Path,
     ) -> AgentRunResult:
+        try:
+            planned_workflow = classify_planned_workflow(
+                task=task,
+                events=_task_events(session, task),
+            )
+            task_service.append_event(
+                task,
+                TaskEventType.log,
+                planned_workflow.to_payload(),
+            )
+            log_observation(
+                logger,
+                "planned_workflow_classified",
+                task=task,
+                classifier="rules_plus_intent_metadata",
+                classifier_version="hig_179_slice_0",
+                behavior="observe_only",
+                route=planned_workflow.route.value,
+                planned_candidate=planned_workflow.planned_candidate,
+                confidence=planned_workflow.confidence,
+                estimated_subtask_count=planned_workflow.estimated_subtask_count,
+                reason_codes=list(planned_workflow.reason_codes),
+                detected_integrations=list(planned_workflow.detected_integrations),
+                likely_tools=list(planned_workflow.likely_tools),
+                needs_context=list(planned_workflow.needs_context),
+            )
+        except Exception as exc:
+            task_service.append_event(
+                task,
+                TaskEventType.error,
+                {
+                    "message": "planned_workflow_classifier_failed",
+                    "classifier": "rules_plus_intent_metadata",
+                    "classifier_version": "hig_179_slice_0",
+                    "behavior": "observe_only",
+                    "fallback_policy": "inline_on_low_confidence_or_classifier_failure",
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                },
+            )
+            log_observation(
+                logger,
+                "planned_workflow_classifier_failed",
+                task=task,
+                classifier="rules_plus_intent_metadata",
+                classifier_version="hig_179_slice_0",
+                behavior="observe_only",
+                error_type=type(exc).__name__,
+                error_summary=str(exc)[:500],
+            )
         handoff = evaluate_runtime_handoff(settings=settings, task=task)
         task_service.append_event(task, TaskEventType.log, handoff.to_payload())
         log_observation(

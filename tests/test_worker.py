@@ -713,6 +713,73 @@ def test_agent_executor_passes_routed_model_to_adk_runtime(
     )
 
 
+def test_agent_executor_records_planned_workflow_classifier_event_for_complex_task(
+    db_session: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = create_task(db_session, event_id="EvPlannedWorkflowClassified")
+    task.input = "Research best AI agents for trading and summarize the options."
+    db_session.commit()
+    task_service = TaskService(db_session)
+    settings = Settings.model_validate(
+        {
+            "SLACK_BOT_TOKEN": "xoxb-test",
+            "SLACK_APP_TOKEN": "xapp-test",
+            "SLACK_SIGNING_SECRET": "signing-secret",
+            "LLM_PROVIDER": SettingsLLMProvider.openrouter,
+            "LLM_API_KEY": "openrouter-key",
+            "LLM_MODEL": "anthropic/sonnet-default",
+            "LLM_CHEAP_MODEL": "deepseek/deepseek-v4-flash",
+            "LLM_ANALYSIS_MODEL": "anthropic/claude-sonnet-4.6",
+            "POSTGRES_URL": "postgresql://kortny:kortny@localhost/kortny",
+            "AGENT_RUNTIME": "adk",
+        }
+    )
+
+    class FakeAdkRuntime:
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+        def run(self, task_arg: Task) -> AgentRunResult:
+            return AgentRunResult(
+                task_id=task_arg.id,
+                result_summary="Complex task still executed by the current runtime.",
+                turns=1,
+                artifact_count=0,
+            )
+
+    monkeypatch.setattr(
+        "kortny.agent.adk_runtime.AdkAgentRuntime",
+        FakeAdkRuntime,
+    )
+
+    result = AgentTaskExecutor(settings=settings)._run_agent_runtime(
+        settings=settings,
+        session=db_session,
+        task=task,
+        task_service=task_service,
+        working_dir=tmp_path,
+    )
+
+    events = task_events(db_session, task)
+
+    assert result.result_summary == "Complex task still executed by the current runtime."
+    assert any(
+        event.payload.get("message") == "planned_workflow_classified"
+        and event.payload.get("behavior") == "observe_only"
+        and event.payload.get("route") == "planned_candidate"
+        and event.payload.get("planned_candidate") is True
+        and event.payload.get("estimated_subtask_count") >= 3
+        for event in events
+    )
+    assert any(
+        event.payload.get("message") == "runtime_handoff_evaluated"
+        and event.payload.get("selected_backend") == "inline"
+        for event in events
+    )
+
+
 def test_agent_executor_shadow_starts_temporal_workflow_for_durable_candidate(
     db_session: Session,
     tmp_path: Path,

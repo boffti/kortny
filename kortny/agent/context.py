@@ -17,7 +17,21 @@ from kortny.agent.thread_context import (
     ThreadTranscriptMessage,
     ThreadTranscriptProvider,
 )
-from kortny.db.models import Artifact, Task, TaskEvent, TaskEventType
+from kortny.db.models import (
+    Artifact,
+    SlackChannelMembership,
+    Task,
+    TaskEvent,
+    TaskEventType,
+)
+from kortny.knowledge_graph import (
+    DestinationSurface,
+    GraphContextPack,
+    GraphService,
+    RetrievedGraphEdge,
+    RetrievedGraphEntity,
+    VisibilityScope,
+)
 from kortny.llm import ChatMessage
 from kortny.memory import EpisodeService, Fact, RelevantEpisode, WorkspaceStateService
 from kortny.observability import observe_task_event, set_span_attributes, start_span
@@ -29,6 +43,9 @@ DEFAULT_THREAD_TRANSCRIPT_LIMIT = 30
 DEFAULT_KNOWN_FACTS_MAX_CHARS = 4_000
 DEFAULT_EPISODE_CONTEXT_MAX_CHARS = 4_000
 DEFAULT_EPISODE_CONTEXT_LIMIT = 5
+DEFAULT_GRAPH_CONTEXT_MAX_CHARS = 1_500
+DEFAULT_GRAPH_CONTEXT_MAX_ITEMS = 12
+DEFAULT_GRAPH_CONTEXT_MAX_HOPS = 2
 DEFAULT_CONTEXT_ENGINE_ID = "kortny.context_assembler"
 DEFAULT_CONTEXT_ENGINE_NAME = "ContextAssembler"
 IMMEDIATE_PRIOR_INPUT_MAX_CHARS = 500
@@ -87,6 +104,31 @@ class ContextArtifact:
 
 
 @dataclass(frozen=True, slots=True)
+class ContextGraphEntity:
+    """A graph entity selected for task context."""
+
+    entity_id: uuid.UUID
+    entity_type: str
+    canonical_key: str
+    visibility_scope_type: str
+    visibility_scope_id: str | None
+    evidence_ids: tuple[uuid.UUID, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ContextGraphEdge:
+    """A graph edge selected for task context."""
+
+    edge_id: uuid.UUID
+    relationship_type: str
+    source_entity_id: uuid.UUID
+    target_entity_id: uuid.UUID
+    visibility_scope_type: str
+    visibility_scope_id: str | None
+    evidence_ids: tuple[uuid.UUID, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class ContextAcknowledgement:
     """A visible Slack acknowledgement already posted for the task."""
 
@@ -108,6 +150,10 @@ class ContextBudget:
     episode_context_max_chars: int
     episode_context_chars: int
     episode_context_limit: int
+    graph_context_max_chars: int
+    graph_context_chars: int
+    graph_context_max_items: int
+    graph_context_max_hops: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,6 +174,8 @@ class ContextPackage:
     selected_prior_tasks: tuple[ContextTask, ...]
     selected_episodes: tuple[ContextEpisode, ...]
     selected_artifacts: tuple[ContextArtifact, ...]
+    selected_graph_entities: tuple[ContextGraphEntity, ...]
+    selected_graph_edges: tuple[ContextGraphEdge, ...]
     acknowledgement: ContextAcknowledgement | None
     budget: ContextBudget
     omissions: tuple[ContextOmission, ...]
@@ -157,6 +205,15 @@ class _EpisodeContext:
     omissions: tuple[ContextOmission, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class _GraphContext:
+    content: str | None
+    selected_entities: tuple[ContextGraphEntity, ...]
+    selected_edges: tuple[ContextGraphEdge, ...]
+    returned_scopes: tuple[VisibilityScope, ...]
+    omissions: tuple[ContextOmission, ...]
+
+
 class ContextAssembler:
     """Builds the LLM message context for a task."""
 
@@ -173,6 +230,9 @@ class ContextAssembler:
         known_facts_max_chars: int = DEFAULT_KNOWN_FACTS_MAX_CHARS,
         episode_context_max_chars: int = DEFAULT_EPISODE_CONTEXT_MAX_CHARS,
         episode_context_limit: int = DEFAULT_EPISODE_CONTEXT_LIMIT,
+        graph_context_max_chars: int = DEFAULT_GRAPH_CONTEXT_MAX_CHARS,
+        graph_context_max_items: int = DEFAULT_GRAPH_CONTEXT_MAX_ITEMS,
+        graph_context_max_hops: int = DEFAULT_GRAPH_CONTEXT_MAX_HOPS,
         context_engine_id: str = DEFAULT_CONTEXT_ENGINE_ID,
         context_engine_name: str = DEFAULT_CONTEXT_ENGINE_NAME,
     ) -> None:
@@ -188,6 +248,12 @@ class ContextAssembler:
             raise ValueError("episode_context_max_chars cannot be negative")
         if episode_context_limit < 0:
             raise ValueError("episode_context_limit cannot be negative")
+        if graph_context_max_chars < 0:
+            raise ValueError("graph_context_max_chars cannot be negative")
+        if graph_context_max_items < 0:
+            raise ValueError("graph_context_max_items cannot be negative")
+        if graph_context_max_hops < 0:
+            raise ValueError("graph_context_max_hops cannot be negative")
         if not context_engine_id:
             raise ValueError("context_engine_id must be non-empty")
         if not context_engine_name:
@@ -203,6 +269,9 @@ class ContextAssembler:
         self.known_facts_max_chars = known_facts_max_chars
         self.episode_context_max_chars = episode_context_max_chars
         self.episode_context_limit = episode_context_limit
+        self.graph_context_max_chars = graph_context_max_chars
+        self.graph_context_max_items = graph_context_max_items
+        self.graph_context_max_hops = graph_context_max_hops
         self.context_engine_id = context_engine_id
         self.context_engine_name = context_engine_name
         self.workspace_state_service = WorkspaceStateService(
@@ -249,6 +318,10 @@ class ContextAssembler:
         if episode_context.content:
             messages.append(ChatMessage(role="system", content=episode_context.content))
 
+        graph_context = self._graph_context(task)
+        if graph_context.content:
+            messages.append(ChatMessage(role="system", content=graph_context.content))
+
         messages.append(ChatMessage(role="user", content=task.input))
 
         package = ContextPackage(
@@ -257,6 +330,8 @@ class ContextAssembler:
             selected_prior_tasks=prior_context.selected_prior_tasks,
             selected_episodes=episode_context.selected_episodes,
             selected_artifacts=prior_context.selected_artifacts,
+            selected_graph_entities=graph_context.selected_entities,
+            selected_graph_edges=graph_context.selected_edges,
             acknowledgement=acknowledgement,
             budget=ContextBudget(
                 system_prompt_chars=len(self.system_prompt or ""),
@@ -269,11 +344,16 @@ class ContextAssembler:
                 episode_context_max_chars=self.episode_context_max_chars,
                 episode_context_chars=len(episode_context.content or ""),
                 episode_context_limit=self.episode_context_limit,
+                graph_context_max_chars=self.graph_context_max_chars,
+                graph_context_chars=len(graph_context.content or ""),
+                graph_context_max_items=self.graph_context_max_items,
+                graph_context_max_hops=self.graph_context_max_hops,
             ),
             omissions=(
                 known_facts.omissions
                 + prior_context.omissions
                 + episode_context.omissions
+                + graph_context.omissions
             ),
             context_engine_id=self.context_engine_id,
             context_engine_name=self.context_engine_name,
@@ -288,6 +368,10 @@ class ContextAssembler:
                 "context.selected_episode_count": len(package.selected_episodes),
                 "context.selected_prior_task_count": len(package.selected_prior_tasks),
                 "context.selected_artifact_count": len(package.selected_artifacts),
+                "context.selected_graph_entity_count": len(
+                    package.selected_graph_entities
+                ),
+                "context.selected_graph_edge_count": len(package.selected_graph_edges),
                 "context.acknowledgement_present": package.acknowledgement is not None,
                 "context.context_chars": _context_chars(package),
                 "context.omission_count": len(package.omissions),
@@ -324,6 +408,15 @@ class ContextAssembler:
             ],
             selected_artifact_ids=[
                 str(artifact.artifact_id) for artifact in package.selected_artifacts
+            ],
+            selected_graph_entity_ids=[
+                str(entity.entity_id) for entity in package.selected_graph_entities
+            ],
+            selected_graph_entity_keys=[
+                entity.canonical_key for entity in package.selected_graph_entities
+            ],
+            selected_graph_edge_ids=[
+                str(edge.edge_id) for edge in package.selected_graph_edges
             ],
             acknowledgement_present=package.acknowledgement is not None,
             acknowledgement_message_ts=package.acknowledgement.message_ts
@@ -552,6 +645,117 @@ class ContextAssembler:
             content=rendered,
             selected_episodes=tuple(_context_episode(item) for item in episodes),
             omissions=tuple(omissions),
+        )
+
+    def _graph_context(self, task: Task) -> _GraphContext:
+        if self.graph_context_max_chars == 0 or self.graph_context_max_items == 0:
+            return _GraphContext(
+                content=None,
+                selected_entities=(),
+                selected_edges=(),
+                returned_scopes=(),
+                omissions=(ContextOmission("knowledge_graph", "budget_disabled", 0),),
+            )
+
+        destination = _destination_surface_for_task(self.session, task)
+        anchor_keys = _graph_anchor_keys(task)
+        self.task_service.append_event(
+            task,
+            TaskEventType.log,
+            {
+                "message": "kg_retrieval_started",
+                "destination_surface_type": destination.surface_type,
+                "destination_surface_id": destination.surface_id,
+                "destination_user_id": destination.user_id,
+                "anchor_keys": list(anchor_keys),
+                "max_items": self.graph_context_max_items,
+                "max_hops": self.graph_context_max_hops,
+            },
+        )
+
+        pack = GraphService(self.session).retrieve_current_context(
+            installation_id=task.installation_id,
+            destination=destination,
+            anchor_keys=anchor_keys,
+            max_hops=self.graph_context_max_hops,
+            max_items=self.graph_context_max_items,
+        )
+        violations = GraphService.scope_guard_violations(pack, destination)
+        if violations:
+            self.task_service.append_event(
+                task,
+                TaskEventType.log,
+                {
+                    "message": "kg_scope_guard_failed",
+                    "destination_surface_type": destination.surface_type,
+                    "destination_surface_id": destination.surface_id,
+                    "violation_scopes": [_scope_payload(scope) for scope in violations],
+                },
+            )
+            return _GraphContext(
+                content=None,
+                selected_entities=(),
+                selected_edges=(),
+                returned_scopes=(),
+                omissions=(
+                    ContextOmission(
+                        "knowledge_graph",
+                        "scope_guard_failed",
+                        len(violations),
+                    ),
+                ),
+            )
+
+        rendered = _render_graph_context(pack)
+        omissions = list(pack.omitted_reasons)
+        if rendered and len(rendered) > self.graph_context_max_chars:
+            rendered = _fit_context_to_budget(
+                rendered,
+                self.graph_context_max_chars,
+                context_name="workspace_graph_context",
+            )
+            omissions.append("budget_compacted")
+
+        selected_entities = tuple(
+            _context_graph_entity(entity) for entity in pack.entities
+        )
+        selected_edges = tuple(_context_graph_edge(edge) for edge in pack.edges)
+        self.task_service.append_event(
+            task,
+            TaskEventType.log,
+            {
+                "message": "kg_retrieval_completed",
+                "destination_surface_type": destination.surface_type,
+                "destination_surface_id": destination.surface_id,
+                "anchor_keys": list(anchor_keys),
+                "entity_count": len(selected_entities),
+                "edge_count": len(selected_edges),
+                "returned_scopes": [
+                    _scope_payload(scope) for scope in pack.returned_scopes
+                ],
+                "omitted_count": pack.omitted_count,
+                "omitted_reasons": omissions,
+                "context_chars": len(rendered or ""),
+            },
+        )
+
+        if not rendered:
+            return _GraphContext(
+                content=None,
+                selected_entities=(),
+                selected_edges=(),
+                returned_scopes=pack.returned_scopes,
+                omissions=(),
+            )
+
+        return _GraphContext(
+            content=rendered,
+            selected_entities=selected_entities,
+            selected_edges=selected_edges,
+            returned_scopes=pack.returned_scopes,
+            omissions=tuple(
+                ContextOmission("knowledge_graph", reason, 1) for reason in omissions
+            ),
         )
 
     def _fetch_thread_transcript(
@@ -792,6 +996,67 @@ def _context_artifact(artifact: Artifact) -> ContextArtifact:
     )
 
 
+def _context_graph_entity(entity: RetrievedGraphEntity) -> ContextGraphEntity:
+    return ContextGraphEntity(
+        entity_id=entity.id,
+        entity_type=entity.entity_type,
+        canonical_key=entity.canonical_key,
+        visibility_scope_type=entity.visibility_scope.scope_type,
+        visibility_scope_id=entity.visibility_scope.scope_id,
+        evidence_ids=entity.evidence_ids,
+    )
+
+
+def _context_graph_edge(edge: RetrievedGraphEdge) -> ContextGraphEdge:
+    return ContextGraphEdge(
+        edge_id=edge.id,
+        relationship_type=edge.relationship_type,
+        source_entity_id=edge.source_entity_id,
+        target_entity_id=edge.target_entity_id,
+        visibility_scope_type=edge.visibility_scope.scope_type,
+        visibility_scope_id=edge.visibility_scope.scope_id,
+        evidence_ids=edge.evidence_ids,
+    )
+
+
+def _destination_surface_for_task(session: Session, task: Task) -> DestinationSurface:
+    if _is_dm_channel(task.slack_channel_id):
+        return DestinationSurface.dm(task.slack_channel_id, user_id=task.slack_user_id)
+
+    membership = session.scalar(
+        select(SlackChannelMembership).where(
+            SlackChannelMembership.installation_id == task.installation_id,
+            SlackChannelMembership.channel_id == task.slack_channel_id,
+        )
+    )
+    if _is_private_channel(task.slack_channel_id, membership):
+        return DestinationSurface.private_channel(task.slack_channel_id)
+    return DestinationSurface.channel(task.slack_channel_id)
+
+
+def _is_private_channel(
+    channel_id: str,
+    membership: SlackChannelMembership | None,
+) -> bool:
+    if channel_id.startswith("G"):
+        return True
+    channel_type = (membership.channel_type or "").lower() if membership else ""
+    return channel_type in {"group", "private_channel", "private"}
+
+
+def _graph_anchor_keys(task: Task) -> tuple[str, ...]:
+    keys = [f"slack_user:{task.slack_user_id}"]
+    if _is_dm_channel(task.slack_channel_id):
+        keys.insert(0, f"slack_dm:{task.slack_channel_id}")
+    else:
+        keys.insert(0, f"slack_channel:{task.slack_channel_id}")
+    return tuple(keys)
+
+
+def _scope_payload(scope: VisibilityScope) -> dict[str, str | None]:
+    return {"type": scope.scope_type, "id": scope.scope_id}
+
+
 def _context_chars(package: ContextPackage) -> int:
     return sum(len(message.content or "") for message in package.messages)
 
@@ -808,6 +1073,10 @@ def _context_budget_payload(budget: ContextBudget) -> dict[str, int]:
         "episode_context_max_chars": budget.episode_context_max_chars,
         "episode_context_chars": budget.episode_context_chars,
         "episode_context_limit": budget.episode_context_limit,
+        "graph_context_max_chars": budget.graph_context_max_chars,
+        "graph_context_chars": budget.graph_context_chars,
+        "graph_context_max_items": budget.graph_context_max_items,
+        "graph_context_max_hops": budget.graph_context_max_hops,
     }
 
 
@@ -892,6 +1161,68 @@ def _render_episode_context(episodes: Sequence[RelevantEpisode]) -> str:
             )
     lines.append("</recent_episodes>")
     return "\n".join(lines)
+
+
+def _render_graph_context(pack: GraphContextPack) -> str | None:
+    if not pack.entities and not pack.edges:
+        return None
+    lines = [
+        "<workspace_graph_context>",
+        "Scope-safe current workspace graph context. These rows were filtered "
+        "by the destination Slack surface before reaching the model. Use as "
+        "background context only; do not treat candidate or unlisted graph facts "
+        "as confirmed.",
+    ]
+    if pack.entities:
+        lines.append("")
+        lines.append("Entities:")
+        for index, entity in enumerate(pack.entities, start=1):
+            lines.append(_graph_entity_line(index, entity))
+    if pack.edges:
+        lines.append("")
+        lines.append("Relationships:")
+        for index, edge in enumerate(pack.edges, start=1):
+            lines.append(_graph_edge_line(index, edge))
+    lines.append("</workspace_graph_context>")
+    return "\n".join(lines)
+
+
+def _graph_entity_line(index: int, entity: RetrievedGraphEntity) -> str:
+    details = [
+        f"{index}.",
+        f"entity_id={entity.id}",
+        f"type={entity.entity_type}",
+        f"key={_quote(entity.canonical_key)}",
+        f"state={entity.lifecycle_state}",
+        f"scope={_scope_label(entity.visibility_scope)}",
+        f"confidence={entity.confidence_score}",
+        f"evidence_ids={_uuid_csv(entity.evidence_ids)}",
+    ]
+    if entity.display_name:
+        details.insert(4, f"name={_quote(entity.display_name)}")
+    return "- " + " ".join(details)
+
+
+def _graph_edge_line(index: int, edge: RetrievedGraphEdge) -> str:
+    return (
+        f"- {index}. edge_id={edge.id} relationship={edge.relationship_type} "
+        f"source_entity_id={edge.source_entity_id} "
+        f"target_entity_id={edge.target_entity_id} state={edge.lifecycle_state} "
+        f"scope={_scope_label(edge.visibility_scope)} "
+        f"confidence={edge.confidence_score} evidence_ids={_uuid_csv(edge.evidence_ids)}"
+    )
+
+
+def _scope_label(scope: VisibilityScope) -> str:
+    if scope.scope_id is None:
+        return scope.scope_type
+    return f"{scope.scope_type}:{scope.scope_id}"
+
+
+def _uuid_csv(values: Sequence[uuid.UUID]) -> str:
+    if not values:
+        return "none"
+    return ",".join(str(value) for value in values)
 
 
 def _episode_artifact_line(artifact: dict[str, object]) -> str:
@@ -1020,10 +1351,15 @@ def _transcript_line(message: ThreadTranscriptMessage) -> str:
     return f"- [{message.ts}] {speaker}: {_shorten(_single_line(message.text), max_chars=500)}"
 
 
-def _fit_context_to_budget(content: str, max_chars: int) -> str:
+def _fit_context_to_budget(
+    content: str,
+    max_chars: int,
+    *,
+    context_name: str = "prior_context",
+) -> str:
     if len(content) <= max_chars:
         return content
-    suffix = "\n[prior_context truncated at configured budget]\n</prior_context>"
+    suffix = f"\n[{context_name} truncated at configured budget]\n</{context_name}>"
     return content[: max(0, max_chars - len(suffix))].rstrip() + suffix
 
 

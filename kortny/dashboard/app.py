@@ -40,6 +40,7 @@ from kortny.dashboard.data import (
     get_composio_toolkit_detail,
     get_dashboard_overview,
     get_integration_dashboard,
+    get_knowledge_graph_dashboard,
     get_memory_dashboard,
     get_system_health,
     get_task_detail,
@@ -477,6 +478,40 @@ def register_routes(app: FastAPI) -> None:
                 "memory_actions_enabled": True,
                 "notice": notice,
                 "notice_tone": _notice_tone(notice_tone),
+            },
+        )
+
+    @app.get("/knowledge-graph", response_class=HTMLResponse)
+    def knowledge_graph(
+        request: Request,
+        principal: Annotated[DashboardPrincipal, Depends(require_admin)],
+        session: Annotated[Session, Depends(get_session)],
+        view: Annotated[str, Query()] = "entities",
+        q: Annotated[str | None, Query()] = None,
+        scope: Annotated[str, Query()] = "all",
+        state: Annotated[str, Query()] = "current",
+        kind: Annotated[str, Query()] = "all",
+        sort: Annotated[str | None, Query()] = None,
+        page: Annotated[int, Query(ge=1)] = 1,
+        page_size: Annotated[int, Query(ge=1, le=MAX_PAGE_SIZE)] = DEFAULT_PAGE_SIZE,
+    ) -> Response:
+        graph = get_knowledge_graph_dashboard(
+            session,
+            view=view,
+            query=q,
+            scope_filter=scope,
+            state_filter=state,
+            kind_filter=kind,
+            sort=sort,
+            page=page,
+            page_size=page_size,
+        )
+        return templates.TemplateResponse(
+            request=request,
+            name="knowledge_graph.html",
+            context={
+                **_dashboard_context(principal, active_page="knowledge_graph"),
+                "graph": graph,
             },
         )
 

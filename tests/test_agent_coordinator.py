@@ -33,8 +33,12 @@ from kortny.db.models import (
     EncryptedSecret,
     Episode,
     Installation,
+    KnowledgeGraphEdge,
+    KnowledgeGraphEntity,
+    KnowledgeGraphEvidence,
     LLMUsage,
     ModelPricing,
+    SlackChannelMembership,
     Task,
     TaskEvent,
     TaskEventType,
@@ -42,6 +46,7 @@ from kortny.db.models import (
     WorkspaceState,
 )
 from kortny.db.session import make_engine, make_session_factory, normalize_database_url
+from kortny.knowledge_graph import EvidenceInput, GraphService, VisibilityScope
 from kortny.llm import ChatMessage, Completion, TokenUsage, ToolCall
 from kortny.memory import EpisodeService
 from kortny.tasks import TaskService
@@ -118,6 +123,8 @@ class FakeContextEngine:
             selected_prior_tasks=(),
             selected_episodes=(),
             selected_artifacts=(),
+            selected_graph_entities=(),
+            selected_graph_edges=(),
             acknowledgement=None,
             budget=ContextBudget(
                 system_prompt_chars=0,
@@ -130,6 +137,10 @@ class FakeContextEngine:
                 episode_context_max_chars=0,
                 episode_context_chars=0,
                 episode_context_limit=0,
+                graph_context_max_chars=0,
+                graph_context_chars=0,
+                graph_context_max_items=0,
+                graph_context_max_hops=0,
             ),
             omissions=(),
             context_engine_id=self.info.id,
@@ -441,6 +452,8 @@ def test_coordinator_finishes_with_final_answer(db_session: Session) -> None:
     events = task_events(db_session, task)
     assert event_messages(events) == [
         "episode_retrieval_completed",
+        "kg_retrieval_started",
+        "kg_retrieval_completed",
         "context_assembled",
         "execution_plan_created",
         "execution_step_started",
@@ -1442,6 +1455,193 @@ def test_context_assembler_includes_relevant_episode_context(
         event for event in events if event.payload.get("message") == "context_assembled"
     )
     assert context_event.payload["selected_episode_ids"] == [str(episode.id)]
+
+
+def test_context_assembler_injects_scope_safe_graph_context(
+    db_session: Session,
+) -> None:
+    installation = create_installation(db_session)
+    task = create_task(
+        db_session,
+        installation=installation,
+        input_text="what do you know about this channel?",
+        slack_channel_id="CGraph",
+        slack_event_id="EvGraphContext",
+    )
+    db_session.add(
+        SlackChannelMembership(
+            installation_id=installation.id,
+            channel_id="CGraph",
+            channel_name="graph-test",
+            channel_type="public_channel",
+            membership_status="active",
+            discovered_via="member_joined_channel",
+            onboarding_status="posted",
+        )
+    )
+    graph = GraphService(db_session)
+    channel = graph.create_entity(
+        installation_id=installation.id,
+        entity_type="channel",
+        canonical_key="slack_channel:CGraph",
+        display_name="#graph-test",
+        visibility_scope=VisibilityScope.channel("CGraph"),
+        source_type="slack_authoritative",
+        lifecycle_state="active",
+        evidence=EvidenceInput(
+            source_type="slack_authoritative",
+            extracted_by="test",
+            source_task_id=task.id,
+            source_slack_channel_id="CGraph",
+            raw_snippet="Channel membership recorded.",
+        ),
+    )
+    graph.create_entity(
+        installation_id=installation.id,
+        entity_type="firm_fact",
+        canonical_key="channel_profile:CGraph",
+        display_name="Candidate profile",
+        visibility_scope=VisibilityScope.channel("CGraph"),
+        source_type="onboarding_scan",
+        lifecycle_state="candidate",
+        evidence=EvidenceInput(
+            source_type="onboarding_scan",
+            extracted_by="test",
+            source_task_id=task.id,
+            source_slack_channel_id="CGraph",
+            raw_snippet="Candidate summary should stay out of current context.",
+        ),
+    )
+    db_session.flush()
+
+    package = ContextAssembler(session=db_session).build_for_task(task)
+    graph_context = graph_context_message(package.messages)
+
+    assert "<workspace_graph_context>" in graph_context
+    assert "slack_channel:CGraph" in graph_context
+    assert "channel_profile:CGraph" not in graph_context
+    assert package.selected_graph_entities[0].entity_id == channel.id
+    assert package.selected_graph_entities[0].canonical_key == "slack_channel:CGraph"
+    assert package.selected_graph_edges == ()
+    assert package.budget.graph_context_chars == len(graph_context)
+
+    events = task_events(db_session, task)
+    assert "kg_retrieval_started" in event_messages(events)
+    retrieval_event = next(
+        event
+        for event in events
+        if event.payload.get("message") == "kg_retrieval_completed"
+    )
+    assert retrieval_event.payload["entity_count"] == 1
+    assert retrieval_event.payload["edge_count"] == 0
+    assert retrieval_event.payload["anchor_keys"] == [
+        "slack_channel:CGraph",
+        "slack_user:U123",
+    ]
+    context_event = next(
+        event for event in events if event.payload.get("message") == "context_assembled"
+    )
+    assert context_event.payload["selected_graph_entity_ids"] == [str(channel.id)]
+    assert context_event.payload["selected_graph_entity_keys"] == [
+        "slack_channel:CGraph"
+    ]
+
+
+def test_context_assembler_does_not_leak_private_graph_context_to_public_channel(
+    db_session: Session,
+) -> None:
+    installation = create_installation(db_session)
+    task = create_task(
+        db_session,
+        installation=installation,
+        input_text="what do you know here?",
+        slack_channel_id="CGraphPublic",
+        slack_event_id="EvGraphNoLeak",
+    )
+    db_session.add(
+        SlackChannelMembership(
+            installation_id=installation.id,
+            channel_id="CGraphPublic",
+            channel_name="public-graph",
+            channel_type="public_channel",
+            membership_status="active",
+            discovered_via="member_joined_channel",
+            onboarding_status="posted",
+        )
+    )
+    graph = GraphService(db_session)
+    public_channel = graph.create_entity(
+        installation_id=installation.id,
+        entity_type="channel",
+        canonical_key="slack_channel:CGraphPublic",
+        display_name="#public-graph",
+        visibility_scope=VisibilityScope.channel("CGraphPublic"),
+        source_type="slack_authoritative",
+        lifecycle_state="active",
+        evidence=EvidenceInput(
+            source_type="slack_authoritative",
+            extracted_by="test",
+            source_task_id=task.id,
+            source_slack_channel_id="CGraphPublic",
+            raw_snippet="Public channel membership recorded.",
+        ),
+    )
+    private_project = graph.create_entity(
+        installation_id=installation.id,
+        entity_type="project",
+        canonical_key="project:private-alpha",
+        display_name="Private Alpha",
+        visibility_scope=VisibilityScope.private_channel("GSecret"),
+        source_type="onboarding_scan",
+        lifecycle_state="active",
+        evidence=EvidenceInput(
+            source_type="onboarding_scan",
+            extracted_by="test",
+            source_task_id=task.id,
+            source_slack_channel_id="GSecret",
+            raw_snippet="Private project should not leak.",
+        ),
+    )
+    graph.create_edge(
+        installation_id=installation.id,
+        source_entity_id=public_channel.id,
+        target_entity_id=private_project.id,
+        relationship_type="relates_to",
+        visibility_scope=VisibilityScope.private_channel("GSecret"),
+        source_type="onboarding_scan",
+        lifecycle_state="active",
+        evidence=EvidenceInput(
+            source_type="onboarding_scan",
+            extracted_by="test",
+            source_task_id=task.id,
+            source_slack_channel_id="GSecret",
+            raw_snippet="Private edge should not leak.",
+        ),
+    )
+    db_session.flush()
+
+    package = ContextAssembler(session=db_session).build_for_task(task)
+    graph_context = graph_context_message(package.messages)
+
+    assert "slack_channel:CGraphPublic" in graph_context
+    assert "project:private-alpha" not in graph_context
+    assert "Private Alpha" not in graph_context
+    assert package.selected_graph_entities[0].entity_id == public_channel.id
+    assert package.selected_graph_edges == ()
+
+    events = task_events(db_session, task)
+    retrieval_event = next(
+        event
+        for event in events
+        if event.payload.get("message") == "kg_retrieval_completed"
+    )
+    assert retrieval_event.payload["entity_count"] == 1
+    assert retrieval_event.payload["edge_count"] == 0
+    assert not [
+        event
+        for event in events
+        if event.payload.get("message") == "kg_scope_guard_failed"
+    ]
 
 
 def test_coordinator_orders_three_turn_thread_context(db_session: Session) -> None:
@@ -2586,6 +2786,10 @@ def test_coordinator_raises_after_turn_limit(db_session: Session) -> None:
 def cleanup_database(session: Session) -> None:
     session.execute(update(WorkspaceState).values(superseded_by_id=None))
     for model in (
+        KnowledgeGraphEvidence,
+        KnowledgeGraphEdge,
+        KnowledgeGraphEntity,
+        SlackChannelMembership,
         WorkspaceState,
         Episode,
         Artifact,
@@ -2725,6 +2929,13 @@ def visible_acknowledgement_message(messages: Sequence[ChatMessage]) -> str:
         if message.content and "<visible_acknowledgement>" in message.content:
             return message.content
     raise AssertionError("No visible_acknowledgement message found")
+
+
+def graph_context_message(messages: Sequence[ChatMessage]) -> str:
+    for message in messages:
+        if message.content and "<workspace_graph_context>" in message.content:
+            return message.content
+    raise AssertionError("No workspace_graph_context message found")
 
 
 def task_events(session: Session, task: Task) -> list[TaskEvent]:

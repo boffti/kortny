@@ -15,7 +15,7 @@ from urllib.parse import urlencode, urlsplit, urlunsplit
 
 from sqlalchemy import Select, Text, case, cast, func, or_, select
 from sqlalchemy.engine import Row
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, aliased
 from sqlalchemy.sql.elements import ColumnElement
 
 from kortny.composio import (
@@ -32,6 +32,9 @@ from kortny.db.models import (
     Artifact,
     ComposioConnection,
     Episode,
+    KnowledgeGraphEdge,
+    KnowledgeGraphEntity,
+    KnowledgeGraphEvidence,
     LLMUsage,
     SlackIdentity,
     Task,
@@ -458,6 +461,99 @@ class MemoryDashboard:
     reset_url: str
     facts: tuple[MemoryFactRow, ...]
     episodes: tuple[MemoryEpisodeRow, ...]
+
+
+@dataclass(frozen=True)
+class KnowledgeGraphEvidencePreview:
+    evidence: KnowledgeGraphEvidence
+    source_label: str
+    snippet: str
+    confidence_label: str
+
+
+@dataclass(frozen=True)
+class KnowledgeGraphEntityRow:
+    entity: KnowledgeGraphEntity
+    scope: IdentityLabel
+    evidence_count: int
+    source_edge_count: int
+    target_edge_count: int
+    evidence: tuple[KnowledgeGraphEvidencePreview, ...]
+    tone: str
+    confidence_label: str
+    attrs_preview: str
+
+
+@dataclass(frozen=True)
+class KnowledgeGraphEdgeRow:
+    edge: KnowledgeGraphEdge
+    source_label: str
+    target_label: str
+    scope: IdentityLabel
+    evidence_count: int
+    evidence: tuple[KnowledgeGraphEvidencePreview, ...]
+    tone: str
+    confidence_label: str
+    attrs_preview: str
+
+
+@dataclass(frozen=True)
+class KnowledgeGraphPageInfo:
+    page: int
+    page_size: int
+    total_count: int
+    noun: str
+
+    @property
+    def total_pages(self) -> int:
+        if self.total_count == 0:
+            return 1
+        return math.ceil(self.total_count / self.page_size)
+
+    @property
+    def previous_page(self) -> int | None:
+        if self.page <= 1:
+            return None
+        return self.page - 1
+
+    @property
+    def next_page(self) -> int | None:
+        if self.page >= self.total_pages:
+            return None
+        return self.page + 1
+
+    @property
+    def first_item(self) -> int:
+        if self.total_count == 0:
+            return 0
+        return ((self.page - 1) * self.page_size) + 1
+
+    @property
+    def last_item(self) -> int:
+        return min(self.page * self.page_size, self.total_count)
+
+
+@dataclass(frozen=True)
+class KnowledgeGraphDashboard:
+    entity_count: int
+    current_entity_count: int
+    candidate_entity_count: int
+    edge_count: int
+    evidence_count: int
+    active_view: str
+    query: str
+    scope_filter: str
+    state_filter: str
+    kind_filter: str
+    sort: str
+    page: KnowledgeGraphPageInfo
+    previous_page_url: str | None
+    next_page_url: str | None
+    reset_url: str
+    entities_url: str
+    relationships_url: str
+    entities: tuple[KnowledgeGraphEntityRow, ...]
+    edges: tuple[KnowledgeGraphEdgeRow, ...]
 
 
 @dataclass(frozen=True)
@@ -1275,6 +1371,188 @@ def get_memory_dashboard(
         reset_url=f"{base_path}?view={active_view}",
         facts=facts,
         episodes=episodes,
+    )
+
+
+def get_knowledge_graph_dashboard(
+    session: Session,
+    *,
+    view: str = "entities",
+    query: str | None = None,
+    scope_filter: str = "all",
+    state_filter: str = "current",
+    kind_filter: str = "all",
+    sort: str | None = None,
+    page: int = 1,
+    page_size: int = DEFAULT_PAGE_SIZE,
+    installation_id: uuid.UUID | None = None,
+    base_path: str = "/knowledge-graph",
+) -> KnowledgeGraphDashboard:
+    """Return read-only workspace knowledge graph rows for the dashboard."""
+
+    active_view = "relationships" if view == "relationships" else "entities"
+    normalized_query = " ".join((query or "").split())
+    normalized_page = max(page, 1)
+    normalized_size = min(max(page_size, 1), MAX_PAGE_SIZE)
+    normalized_scope = scope_filter if scope_filter in _KG_SCOPES else "all"
+    normalized_state = state_filter if state_filter in _KG_STATES else "current"
+    normalized_kind = " ".join((kind_filter or "all").split()).lower() or "all"
+    normalized_sort = _normalize_kg_sort(active_view, sort)
+
+    entity_scope = _kg_installation_filter(KnowledgeGraphEntity, installation_id)
+    edge_scope = _kg_installation_filter(KnowledgeGraphEdge, installation_id)
+    evidence_scope = _kg_installation_filter(KnowledgeGraphEvidence, installation_id)
+    entity_count = (
+        session.scalar(
+            select(func.count()).select_from(KnowledgeGraphEntity).where(*entity_scope)
+        )
+        or 0
+    )
+    current_entity_count = (
+        session.scalar(
+            select(func.count())
+            .select_from(KnowledgeGraphEntity)
+            .where(
+                *entity_scope,
+                KnowledgeGraphEntity.is_current.is_(True),
+                KnowledgeGraphEntity.expired_at.is_(None),
+            )
+        )
+        or 0
+    )
+    candidate_entity_count = (
+        session.scalar(
+            select(func.count())
+            .select_from(KnowledgeGraphEntity)
+            .where(
+                *entity_scope,
+                KnowledgeGraphEntity.lifecycle_state == "candidate",
+                KnowledgeGraphEntity.is_current.is_(True),
+                KnowledgeGraphEntity.expired_at.is_(None),
+            )
+        )
+        or 0
+    )
+    edge_count = (
+        session.scalar(
+            select(func.count()).select_from(KnowledgeGraphEdge).where(*edge_scope)
+        )
+        or 0
+    )
+    evidence_count = (
+        session.scalar(
+            select(func.count())
+            .select_from(KnowledgeGraphEvidence)
+            .where(*evidence_scope)
+        )
+        or 0
+    )
+
+    entities: tuple[KnowledgeGraphEntityRow, ...] = ()
+    edges: tuple[KnowledgeGraphEdgeRow, ...] = ()
+    if active_view == "entities":
+        total_count, resolved_page, entities = _kg_entity_rows(
+            session,
+            query=normalized_query,
+            scope_filter=normalized_scope,
+            state_filter=normalized_state,
+            kind_filter=normalized_kind,
+            sort=normalized_sort,
+            page=normalized_page,
+            page_size=normalized_size,
+            installation_id=installation_id,
+        )
+        noun = "entities"
+    else:
+        total_count, resolved_page, edges = _kg_edge_rows(
+            session,
+            query=normalized_query,
+            scope_filter=normalized_scope,
+            state_filter=normalized_state,
+            kind_filter=normalized_kind,
+            sort=normalized_sort,
+            page=normalized_page,
+            page_size=normalized_size,
+            installation_id=installation_id,
+        )
+        noun = "relationships"
+
+    page_info = KnowledgeGraphPageInfo(
+        page=resolved_page,
+        page_size=normalized_size,
+        total_count=total_count,
+        noun=noun,
+    )
+    entities_url = _knowledge_graph_page_url(
+        view="entities",
+        query=normalized_query,
+        scope_filter=normalized_scope,
+        state_filter=normalized_state,
+        kind_filter=normalized_kind,
+        sort="updated_desc",
+        page=1,
+        page_size=normalized_size,
+        base_path=base_path,
+    )
+    relationships_url = _knowledge_graph_page_url(
+        view="relationships",
+        query=normalized_query,
+        scope_filter=normalized_scope,
+        state_filter=normalized_state,
+        kind_filter=normalized_kind,
+        sort="updated_desc",
+        page=1,
+        page_size=normalized_size,
+        base_path=base_path,
+    )
+    return KnowledgeGraphDashboard(
+        entity_count=int(entity_count),
+        current_entity_count=int(current_entity_count),
+        candidate_entity_count=int(candidate_entity_count),
+        edge_count=int(edge_count),
+        evidence_count=int(evidence_count),
+        active_view=active_view,
+        query=normalized_query,
+        scope_filter=normalized_scope,
+        state_filter=normalized_state,
+        kind_filter=normalized_kind,
+        sort=normalized_sort,
+        page=page_info,
+        previous_page_url=(
+            _knowledge_graph_page_url(
+                view=active_view,
+                query=normalized_query,
+                scope_filter=normalized_scope,
+                state_filter=normalized_state,
+                kind_filter=normalized_kind,
+                sort=normalized_sort,
+                page=page_info.previous_page,
+                page_size=normalized_size,
+                base_path=base_path,
+            )
+            if page_info.previous_page is not None
+            else None
+        ),
+        next_page_url=(
+            _knowledge_graph_page_url(
+                view=active_view,
+                query=normalized_query,
+                scope_filter=normalized_scope,
+                state_filter=normalized_state,
+                kind_filter=normalized_kind,
+                sort=normalized_sort,
+                page=page_info.next_page,
+                page_size=normalized_size,
+                base_path=base_path,
+            )
+            if page_info.next_page is not None
+            else None
+        ),
+        reset_url=f"{base_path}?view={active_view}",
+        entities_url=entities_url,
+        relationships_url=relationships_url,
+        entities=entities,
+        edges=edges,
     )
 
 
@@ -2981,12 +3259,523 @@ _MEMORY_STATUSES = frozenset(
 _MEMORY_OUTCOMES = frozenset({"all", "succeeded", "failed", "cancelled"})
 _MEMORY_FACT_SORTS = frozenset({"updated_desc", "created_desc", "key_asc", "scope_asc"})
 _MEMORY_EPISODE_SORTS = frozenset({"created_desc", "created_asc", "outcome_asc"})
+_KG_SCOPES = frozenset({"all", "workspace", "channel", "private_channel", "dm", "user"})
+_KG_STATES = frozenset(
+    {
+        "all",
+        "current",
+        "candidate",
+        "active",
+        "confirmed",
+        "stale",
+        "superseded",
+        "contradicted",
+        "archived",
+        "forgotten",
+    }
+)
+_KG_ENTITY_SORTS = frozenset(
+    {"updated_desc", "created_desc", "confidence_desc", "key_asc"}
+)
+_KG_EDGE_SORTS = frozenset(
+    {"updated_desc", "created_desc", "confidence_desc", "relationship_asc"}
+)
 
 
 def _normalize_memory_sort(view: str, sort: str | None) -> str:
     if view == "episodes":
         return sort if sort in _MEMORY_EPISODE_SORTS else "created_desc"
     return sort if sort in _MEMORY_FACT_SORTS else "updated_desc"
+
+
+def _normalize_kg_sort(view: str, sort: str | None) -> str:
+    if view == "relationships":
+        return sort if sort in _KG_EDGE_SORTS else "updated_desc"
+    return sort if sort in _KG_ENTITY_SORTS else "updated_desc"
+
+
+def _kg_installation_filter(
+    model: object,
+    installation_id: uuid.UUID | None,
+) -> list[ColumnElement[bool]]:
+    if installation_id is None:
+        return []
+    return [model.installation_id == installation_id]
+
+
+def _kg_entity_rows(
+    session: Session,
+    *,
+    query: str,
+    scope_filter: str,
+    state_filter: str,
+    kind_filter: str,
+    sort: str,
+    page: int,
+    page_size: int,
+    installation_id: uuid.UUID | None,
+) -> tuple[int, int, tuple[KnowledgeGraphEntityRow, ...]]:
+    filters = _kg_entity_filters(
+        query=query,
+        scope_filter=scope_filter,
+        state_filter=state_filter,
+        kind_filter=kind_filter,
+        installation_id=installation_id,
+    )
+    total_count = (
+        session.scalar(
+            select(func.count()).select_from(KnowledgeGraphEntity).where(*filters)
+        )
+        or 0
+    )
+    resolved_page = _resolved_page(
+        page=page, page_size=page_size, total_count=total_count
+    )
+    entities = tuple(
+        session.scalars(
+            select(KnowledgeGraphEntity)
+            .where(*filters)
+            .order_by(*_kg_entity_order(sort))
+            .offset((resolved_page - 1) * page_size)
+            .limit(page_size)
+        )
+    )
+    entity_ids = [entity.id for entity in entities]
+    evidence_counts = _kg_evidence_counts(session, "entity", entity_ids)
+    evidence_previews = _kg_evidence_previews(session, "entity", entity_ids)
+    source_edge_counts, target_edge_counts = _kg_edge_counts_by_entity(
+        session, entity_ids
+    )
+    identities = _identity_map_from_keys(
+        session,
+        tuple(
+            _kg_scope_identity_key(entity)
+            for entity in entities
+            if _kg_scope_identity_key(entity) is not None
+        ),
+    )
+    rows = tuple(
+        KnowledgeGraphEntityRow(
+            entity=entity,
+            scope=_kg_scope_label(
+                identities,
+                installation_id=entity.installation_id,
+                scope_type=entity.visibility_scope_type,
+                scope_id=entity.visibility_scope_id,
+            ),
+            evidence_count=evidence_counts.get(entity.id, 0),
+            source_edge_count=source_edge_counts.get(entity.id, 0),
+            target_edge_count=target_edge_counts.get(entity.id, 0),
+            evidence=evidence_previews.get(entity.id, ()),
+            tone=_kg_lifecycle_tone(entity.lifecycle_state),
+            confidence_label=_confidence_label(entity.confidence_score),
+            attrs_preview=_json_preview(entity.attrs_json),
+        )
+        for entity in entities
+    )
+    return int(total_count), resolved_page, rows
+
+
+def _kg_edge_rows(
+    session: Session,
+    *,
+    query: str,
+    scope_filter: str,
+    state_filter: str,
+    kind_filter: str,
+    sort: str,
+    page: int,
+    page_size: int,
+    installation_id: uuid.UUID | None,
+) -> tuple[int, int, tuple[KnowledgeGraphEdgeRow, ...]]:
+    source = aliased(KnowledgeGraphEntity)
+    target = aliased(KnowledgeGraphEntity)
+    filters = _kg_edge_filters(
+        source=source,
+        target=target,
+        query=query,
+        scope_filter=scope_filter,
+        state_filter=state_filter,
+        kind_filter=kind_filter,
+        installation_id=installation_id,
+    )
+    total_count = (
+        session.scalar(
+            select(func.count())
+            .select_from(KnowledgeGraphEdge)
+            .join(source, KnowledgeGraphEdge.source_entity_id == source.id)
+            .join(target, KnowledgeGraphEdge.target_entity_id == target.id)
+            .where(*filters)
+        )
+        or 0
+    )
+    resolved_page = _resolved_page(
+        page=page, page_size=page_size, total_count=total_count
+    )
+    edges = tuple(
+        session.scalars(
+            select(KnowledgeGraphEdge)
+            .join(source, KnowledgeGraphEdge.source_entity_id == source.id)
+            .join(target, KnowledgeGraphEdge.target_entity_id == target.id)
+            .where(*filters)
+            .order_by(*_kg_edge_order(sort))
+            .offset((resolved_page - 1) * page_size)
+            .limit(page_size)
+        )
+    )
+    edge_ids = [edge.id for edge in edges]
+    entity_ids = {
+        entity_id
+        for edge in edges
+        for entity_id in (edge.source_entity_id, edge.target_entity_id)
+    }
+    entities_by_id = _kg_entities_by_id(session, entity_ids)
+    evidence_counts = _kg_evidence_counts(session, "edge", edge_ids)
+    evidence_previews = _kg_evidence_previews(session, "edge", edge_ids)
+    identities = _identity_map_from_keys(
+        session,
+        tuple(
+            key for edge in edges if (key := _kg_scope_identity_key(edge)) is not None
+        ),
+    )
+    rows = tuple(
+        KnowledgeGraphEdgeRow(
+            edge=edge,
+            source_label=_kg_entity_label(entities_by_id.get(edge.source_entity_id)),
+            target_label=_kg_entity_label(entities_by_id.get(edge.target_entity_id)),
+            scope=_kg_scope_label(
+                identities,
+                installation_id=edge.installation_id,
+                scope_type=edge.visibility_scope_type,
+                scope_id=edge.visibility_scope_id,
+            ),
+            evidence_count=evidence_counts.get(edge.id, 0),
+            evidence=evidence_previews.get(edge.id, ()),
+            tone=_kg_lifecycle_tone(edge.lifecycle_state),
+            confidence_label=_confidence_label(edge.confidence_score),
+            attrs_preview=_json_preview(edge.attrs_json),
+        )
+        for edge in edges
+    )
+    return int(total_count), resolved_page, rows
+
+
+def _kg_entity_filters(
+    *,
+    query: str,
+    scope_filter: str,
+    state_filter: str,
+    kind_filter: str,
+    installation_id: uuid.UUID | None,
+) -> list[ColumnElement[bool]]:
+    filters = _kg_installation_filter(KnowledgeGraphEntity, installation_id)
+    filters.extend(_kg_state_filters(KnowledgeGraphEntity, state_filter))
+    if scope_filter != "all":
+        filters.append(KnowledgeGraphEntity.visibility_scope_type == scope_filter)
+    if kind_filter != "all":
+        filters.append(KnowledgeGraphEntity.entity_type == kind_filter)
+    if query:
+        pattern = f"%{query}%"
+        filters.append(
+            or_(
+                KnowledgeGraphEntity.canonical_key.ilike(pattern),
+                KnowledgeGraphEntity.display_name.ilike(pattern),
+                KnowledgeGraphEntity.entity_type.ilike(pattern),
+                KnowledgeGraphEntity.source_type.ilike(pattern),
+                KnowledgeGraphEntity.visibility_scope_id.ilike(pattern),
+                cast(KnowledgeGraphEntity.attrs_json, Text).ilike(pattern),
+            )
+        )
+    return filters
+
+
+def _kg_edge_filters(
+    *,
+    source: KnowledgeGraphEntity,
+    target: KnowledgeGraphEntity,
+    query: str,
+    scope_filter: str,
+    state_filter: str,
+    kind_filter: str,
+    installation_id: uuid.UUID | None,
+) -> list[ColumnElement[bool]]:
+    filters = _kg_installation_filter(KnowledgeGraphEdge, installation_id)
+    filters.extend(_kg_state_filters(KnowledgeGraphEdge, state_filter))
+    if scope_filter != "all":
+        filters.append(KnowledgeGraphEdge.visibility_scope_type == scope_filter)
+    if kind_filter != "all":
+        filters.append(KnowledgeGraphEdge.relationship_type == kind_filter)
+    if query:
+        pattern = f"%{query}%"
+        filters.append(
+            or_(
+                KnowledgeGraphEdge.relationship_type.ilike(pattern),
+                KnowledgeGraphEdge.source_type.ilike(pattern),
+                KnowledgeGraphEdge.visibility_scope_id.ilike(pattern),
+                cast(KnowledgeGraphEdge.attrs_json, Text).ilike(pattern),
+                source.canonical_key.ilike(pattern),
+                source.display_name.ilike(pattern),
+                target.canonical_key.ilike(pattern),
+                target.display_name.ilike(pattern),
+            )
+        )
+    return filters
+
+
+def _kg_state_filters(model: object, state_filter: str) -> list[ColumnElement[bool]]:
+    if state_filter == "all":
+        return []
+    if state_filter == "current":
+        return [model.is_current.is_(True), model.expired_at.is_(None)]
+    return [model.lifecycle_state == state_filter]
+
+
+def _kg_entity_order(sort: str):
+    if sort == "created_desc":
+        return (KnowledgeGraphEntity.created_at.desc(), KnowledgeGraphEntity.id.desc())
+    if sort == "confidence_desc":
+        return (
+            KnowledgeGraphEntity.confidence_score.desc(),
+            KnowledgeGraphEntity.updated_at.desc(),
+            KnowledgeGraphEntity.id.desc(),
+        )
+    if sort == "key_asc":
+        return (KnowledgeGraphEntity.canonical_key.asc(), KnowledgeGraphEntity.id.asc())
+    return (KnowledgeGraphEntity.updated_at.desc(), KnowledgeGraphEntity.id.desc())
+
+
+def _kg_edge_order(sort: str):
+    if sort == "created_desc":
+        return (KnowledgeGraphEdge.created_at.desc(), KnowledgeGraphEdge.id.desc())
+    if sort == "confidence_desc":
+        return (
+            KnowledgeGraphEdge.confidence_score.desc(),
+            KnowledgeGraphEdge.updated_at.desc(),
+            KnowledgeGraphEdge.id.desc(),
+        )
+    if sort == "relationship_asc":
+        return (
+            KnowledgeGraphEdge.relationship_type.asc(),
+            KnowledgeGraphEdge.updated_at.desc(),
+            KnowledgeGraphEdge.id.desc(),
+        )
+    return (KnowledgeGraphEdge.updated_at.desc(), KnowledgeGraphEdge.id.desc())
+
+
+def _kg_evidence_counts(
+    session: Session,
+    target_kind: str,
+    target_ids: Sequence[uuid.UUID],
+) -> dict[uuid.UUID, int]:
+    if not target_ids:
+        return {}
+    rows = session.execute(
+        select(KnowledgeGraphEvidence.target_id, func.count())
+        .where(
+            KnowledgeGraphEvidence.target_kind == target_kind,
+            KnowledgeGraphEvidence.target_id.in_(target_ids),
+        )
+        .group_by(KnowledgeGraphEvidence.target_id)
+    )
+    return {target_id: int(count) for target_id, count in rows}
+
+
+def _kg_evidence_previews(
+    session: Session,
+    target_kind: str,
+    target_ids: Sequence[uuid.UUID],
+    *,
+    limit_per_target: int = 2,
+) -> dict[uuid.UUID, tuple[KnowledgeGraphEvidencePreview, ...]]:
+    if not target_ids:
+        return {}
+    grouped: dict[uuid.UUID, list[KnowledgeGraphEvidencePreview]] = defaultdict(list)
+    rows = session.scalars(
+        select(KnowledgeGraphEvidence)
+        .where(
+            KnowledgeGraphEvidence.target_kind == target_kind,
+            KnowledgeGraphEvidence.target_id.in_(target_ids),
+        )
+        .order_by(
+            KnowledgeGraphEvidence.created_at.desc(), KnowledgeGraphEvidence.id.desc()
+        )
+    )
+    for evidence in rows:
+        previews = grouped[evidence.target_id]
+        if len(previews) >= limit_per_target:
+            continue
+        previews.append(
+            KnowledgeGraphEvidencePreview(
+                evidence=evidence,
+                source_label=_kg_evidence_source_label(evidence),
+                snippet=_kg_evidence_snippet(evidence),
+                confidence_label=_confidence_label(evidence.confidence_score),
+            )
+        )
+    return {target_id: tuple(previews) for target_id, previews in grouped.items()}
+
+
+def _kg_edge_counts_by_entity(
+    session: Session,
+    entity_ids: Sequence[uuid.UUID],
+) -> tuple[dict[uuid.UUID, int], dict[uuid.UUID, int]]:
+    if not entity_ids:
+        return {}, {}
+    source_rows = session.execute(
+        select(KnowledgeGraphEdge.source_entity_id, func.count())
+        .where(KnowledgeGraphEdge.source_entity_id.in_(entity_ids))
+        .group_by(KnowledgeGraphEdge.source_entity_id)
+    )
+    target_rows = session.execute(
+        select(KnowledgeGraphEdge.target_entity_id, func.count())
+        .where(KnowledgeGraphEdge.target_entity_id.in_(entity_ids))
+        .group_by(KnowledgeGraphEdge.target_entity_id)
+    )
+    return (
+        {entity_id: int(count) for entity_id, count in source_rows},
+        {entity_id: int(count) for entity_id, count in target_rows},
+    )
+
+
+def _kg_entities_by_id(
+    session: Session,
+    entity_ids: Iterable[uuid.UUID],
+) -> dict[uuid.UUID, KnowledgeGraphEntity]:
+    ids = tuple(entity_ids)
+    if not ids:
+        return {}
+    return {
+        entity.id: entity
+        for entity in session.scalars(
+            select(KnowledgeGraphEntity).where(KnowledgeGraphEntity.id.in_(ids))
+        )
+    }
+
+
+def _kg_scope_identity_key(model: object) -> IdentityKey | None:
+    scope_type = model.visibility_scope_type
+    scope_id = model.visibility_scope_id
+    if not scope_id:
+        return None
+    if scope_type in {"channel", "private_channel"}:
+        return (model.installation_id, "channel", scope_id)
+    if scope_type == "user":
+        return (model.installation_id, "user", scope_id)
+    return None
+
+
+def _kg_scope_label(
+    identities: dict[IdentityKey, SlackIdentity],
+    *,
+    installation_id: uuid.UUID,
+    scope_type: str,
+    scope_id: str | None,
+) -> IdentityLabel:
+    if scope_type == "workspace":
+        return IdentityLabel(name="Workspace", slack_id="workspace", found=True)
+    if scope_id is None:
+        return IdentityLabel(name=scope_type, slack_id=scope_type, found=False)
+    if scope_type in {"channel", "private_channel"}:
+        return _identity_label(
+            identities,
+            installation_id=installation_id,
+            kind="channel",
+            slack_id=scope_id,
+        )
+    if scope_type == "user":
+        return _identity_label(
+            identities,
+            installation_id=installation_id,
+            kind="user",
+            slack_id=scope_id,
+        )
+    return IdentityLabel(
+        name=f"{scope_type}:{scope_id}", slack_id=scope_id, found=False
+    )
+
+
+def _kg_entity_label(entity: KnowledgeGraphEntity | None) -> str:
+    if entity is None:
+        return "Unknown entity"
+    if entity.display_name:
+        return f"{entity.display_name} ({entity.canonical_key})"
+    return entity.canonical_key
+
+
+def _kg_evidence_source_label(evidence: KnowledgeGraphEvidence) -> str:
+    if evidence.source_task_id:
+        return f"Task {evidence.source_task_id}"
+    if evidence.source_observation_id:
+        return f"Observation {evidence.source_observation_id}"
+    if evidence.source_episode_id:
+        return f"Episode {evidence.source_episode_id}"
+    if evidence.source_slack_channel_id:
+        return f"Slack {evidence.source_slack_channel_id}"
+    if evidence.source_slack_file_id:
+        return f"Slack file {evidence.source_slack_file_id}"
+    if evidence.source_url:
+        return evidence.source_url
+    return evidence.source_type
+
+
+def _kg_evidence_snippet(evidence: KnowledgeGraphEvidence) -> str:
+    if evidence.raw_snippet:
+        return _truncate(evidence.raw_snippet, 220)
+    if evidence.confidence_reason:
+        return _truncate(evidence.confidence_reason, 220)
+    if evidence.source_url:
+        return _truncate(evidence.source_url, 220)
+    return "No snippet recorded."
+
+
+def _kg_lifecycle_tone(state: str) -> str:
+    if state in {"active", "confirmed"}:
+        return "success"
+    if state in {"candidate", "stale"}:
+        return "warning"
+    if state in {"contradicted", "forgotten"}:
+        return "danger"
+    return "neutral"
+
+
+def _confidence_label(value: Decimal | None) -> str:
+    if value is None:
+        return "-"
+    return f"{int((value * Decimal('100')).quantize(Decimal('1')))}%"
+
+
+def _json_preview(payload: dict | None) -> str:
+    if not payload:
+        return "No attributes"
+    return _truncate(json.dumps(payload, sort_keys=True, default=str), 180)
+
+
+def _knowledge_graph_page_url(
+    *,
+    view: str,
+    query: str,
+    scope_filter: str,
+    state_filter: str,
+    kind_filter: str,
+    sort: str,
+    page: int | None,
+    page_size: int,
+    base_path: str = "/knowledge-graph",
+) -> str:
+    params: dict[str, str | int] = {
+        "view": view,
+        "state": state_filter,
+        "sort": sort,
+        "page": page or 1,
+        "page_size": page_size,
+    }
+    if query:
+        params["q"] = query
+    if scope_filter != "all":
+        params["scope"] = scope_filter
+    if kind_filter != "all":
+        params["kind"] = kind_filter
+    return f"{base_path}?{urlencode(params)}"
 
 
 def _memory_fact_rows(

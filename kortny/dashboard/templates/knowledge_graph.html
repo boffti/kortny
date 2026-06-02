@@ -1,0 +1,219 @@
+{% extends "base.html" %}
+
+{% block title %}Knowledge Graph - Kortny Dashboard{% endblock %}
+
+{% block content %}
+  <section class="page-heading">
+    <div>
+      <h1>Knowledge Graph</h1>
+      <p>Inspect scoped workspace entities, relationships, and the evidence Kortny uses for runtime context.</p>
+    </div>
+    <a class="btn-ghost" href="/memory">View Memory</a>
+  </section>
+
+  <section class="summary-grid graph-summary" aria-label="Knowledge graph overview">
+    <div class="card metric-card metric-success">
+      <span>Entities</span>
+      <strong>{{ graph.entity_count|number }}</strong>
+      <small>{{ graph.current_entity_count|number }} current rows</small>
+    </div>
+    <div class="card metric-card metric-warning">
+      <span>Candidates</span>
+      <strong>{{ graph.candidate_entity_count|number }}</strong>
+      <small>Visible to operators, withheld from runtime context</small>
+    </div>
+    <div class="card metric-card">
+      <span>Relationships</span>
+      <strong>{{ graph.edge_count|number }}</strong>
+      <small>Scoped links between graph entities</small>
+    </div>
+    <div class="card metric-card">
+      <span>Evidence</span>
+      <strong>{{ graph.evidence_count|number }}</strong>
+      <small>Traceable source rows backing the graph</small>
+    </div>
+  </section>
+
+  <section class="memory-toolbar graph-toolbar" aria-label="Knowledge graph view selector">
+    <nav class="segmented-nav">
+      <a class="segmented-item {{ 'active' if graph.active_view == 'entities' else '' }}" href="{{ graph.entities_url }}" {% if graph.active_view == 'entities' %}aria-current="page"{% endif %}>Entities</a>
+      <a class="segmented-item {{ 'active' if graph.active_view == 'relationships' else '' }}" href="{{ graph.relationships_url }}" {% if graph.active_view == 'relationships' %}aria-current="page"{% endif %}>Relationships</a>
+    </nav>
+    <p>
+      Showing {{ graph.page.first_item|number }}-{{ graph.page.last_item|number }}
+      of {{ graph.page.total_count|number }} {{ graph.page.noun }}.
+    </p>
+  </section>
+
+  <section class="card detail-section">
+    <header>
+      <h2>{{ "Entities" if graph.active_view == "entities" else "Relationships" }}</h2>
+      <p>Filter by scope, lifecycle state, type, or text found in keys, labels, attributes, and relationship endpoints.</p>
+    </header>
+
+    <form class="filters panel-filters graph-filters" method="get" action="/knowledge-graph">
+      <input type="hidden" name="view" value="{{ graph.active_view }}">
+      <label>
+        Search
+        <input class="input" type="search" name="q" value="{{ graph.query }}" placeholder="channel, project, relationship, source">
+      </label>
+      <label>
+        Scope
+        <select class="input" name="scope">
+          <option value="all" {{ "selected" if graph.scope_filter == "all" else "" }}>All scopes</option>
+          <option value="workspace" {{ "selected" if graph.scope_filter == "workspace" else "" }}>Workspace</option>
+          <option value="channel" {{ "selected" if graph.scope_filter == "channel" else "" }}>Channel</option>
+          <option value="private_channel" {{ "selected" if graph.scope_filter == "private_channel" else "" }}>Private channel</option>
+          <option value="dm" {{ "selected" if graph.scope_filter == "dm" else "" }}>DM</option>
+          <option value="user" {{ "selected" if graph.scope_filter == "user" else "" }}>User</option>
+        </select>
+      </label>
+      <label>
+        State
+        <select class="input" name="state">
+          <option value="current" {{ "selected" if graph.state_filter == "current" else "" }}>Current</option>
+          <option value="all" {{ "selected" if graph.state_filter == "all" else "" }}>All states</option>
+          <option value="candidate" {{ "selected" if graph.state_filter == "candidate" else "" }}>Candidate</option>
+          <option value="active" {{ "selected" if graph.state_filter == "active" else "" }}>Active</option>
+          <option value="confirmed" {{ "selected" if graph.state_filter == "confirmed" else "" }}>Confirmed</option>
+          <option value="stale" {{ "selected" if graph.state_filter == "stale" else "" }}>Stale</option>
+          <option value="superseded" {{ "selected" if graph.state_filter == "superseded" else "" }}>Superseded</option>
+          <option value="contradicted" {{ "selected" if graph.state_filter == "contradicted" else "" }}>Contradicted</option>
+          <option value="archived" {{ "selected" if graph.state_filter == "archived" else "" }}>Archived</option>
+          <option value="forgotten" {{ "selected" if graph.state_filter == "forgotten" else "" }}>Forgotten</option>
+        </select>
+      </label>
+      <label>
+        {{ "Entity type" if graph.active_view == "entities" else "Relationship" }}
+        <input class="input" type="text" name="kind" value="{{ '' if graph.kind_filter == 'all' else graph.kind_filter }}" placeholder="{{ 'channel, project, firm_fact' if graph.active_view == 'entities' else 'relates_to, maps_to' }}">
+      </label>
+      <label>
+        Sort
+        <select class="input" name="sort">
+          <option value="updated_desc" {{ "selected" if graph.sort == "updated_desc" else "" }}>Recently updated</option>
+          <option value="created_desc" {{ "selected" if graph.sort == "created_desc" else "" }}>Recently created</option>
+          <option value="confidence_desc" {{ "selected" if graph.sort == "confidence_desc" else "" }}>Confidence</option>
+          {% if graph.active_view == "entities" %}
+            <option value="key_asc" {{ "selected" if graph.sort == "key_asc" else "" }}>Key A-Z</option>
+          {% else %}
+            <option value="relationship_asc" {{ "selected" if graph.sort == "relationship_asc" else "" }}>Relationship A-Z</option>
+          {% endif %}
+        </select>
+      </label>
+      <button class="btn" type="submit">Apply</button>
+      <a class="btn-ghost" href="{{ graph.reset_url }}">Reset</a>
+    </form>
+
+    {% if graph.active_view == "entities" %}
+      <div class="graph-list" role="list" aria-label="Knowledge graph entities">
+        {% for row in graph.entities %}
+          <article class="graph-row" role="listitem">
+            <div class="graph-main">
+              <div class="graph-title">
+                <code class="inline-code">{{ row.entity.canonical_key }}</code>
+                <span class="badge badge-accent">{{ row.entity.entity_type }}</span>
+                <span class="badge badge-{{ row.tone }}">{{ row.entity.lifecycle_state }}</span>
+                {% if not row.entity.is_current %}
+                  <span class="badge badge-neutral">not current</span>
+                {% endif %}
+              </div>
+              {% if row.entity.display_name %}
+                <p class="graph-label">{{ row.entity.display_name }}</p>
+              {% endif %}
+              <div class="graph-meta">
+                <span>{{ row.scope.name }}{% if row.scope.secondary %} - {{ row.scope.secondary }}{% endif %}</span>
+                <span>{{ row.entity.visibility_scope_type }}</span>
+                <span>{{ row.entity.source_type }}</span>
+                <span>{{ row.confidence_label }} confidence</span>
+                <span>Updated {{ row.entity.updated_at|datetime }}</span>
+              </div>
+              <p class="graph-attrs">{{ row.attrs_preview }}</p>
+            </div>
+            <aside class="graph-side">
+              <section class="graph-panel">
+                <h3>Evidence</h3>
+                <strong>{{ row.evidence_count|number }} rows</strong>
+                {% for evidence in row.evidence %}
+                  <div class="graph-evidence">
+                    <span>{{ evidence.source_label }}</span>
+                    <p>{{ evidence.snippet }}</p>
+                  </div>
+                {% else %}
+                  <span class="identity-id">No evidence rows loaded</span>
+                {% endfor %}
+              </section>
+              <section class="graph-panel">
+                <h3>Connections</h3>
+                <div class="graph-connection-grid">
+                  <span>{{ row.source_edge_count|number }} outgoing</span>
+                  <span>{{ row.target_edge_count|number }} incoming</span>
+                </div>
+              </section>
+            </aside>
+          </article>
+        {% else %}
+          <p class="empty attention-empty">No graph entities match these filters.</p>
+        {% endfor %}
+      </div>
+    {% else %}
+      <div class="graph-list" role="list" aria-label="Knowledge graph relationships">
+        {% for row in graph.edges %}
+          <article class="graph-row" role="listitem">
+            <div class="graph-main">
+              <div class="graph-title">
+                <code class="inline-code">{{ row.edge.relationship_type }}</code>
+                <span class="badge badge-{{ row.tone }}">{{ row.edge.lifecycle_state }}</span>
+                {% if not row.edge.is_current %}
+                  <span class="badge badge-neutral">not current</span>
+                {% endif %}
+              </div>
+              <div class="graph-edge-line">
+                <span>{{ row.source_label }}</span>
+                <span aria-hidden="true">-&gt;</span>
+                <span>{{ row.target_label }}</span>
+              </div>
+              <div class="graph-meta">
+                <span>{{ row.scope.name }}{% if row.scope.secondary %} - {{ row.scope.secondary }}{% endif %}</span>
+                <span>{{ row.edge.visibility_scope_type }}</span>
+                <span>{{ row.edge.source_type }}</span>
+                <span>{{ row.confidence_label }} confidence</span>
+                <span>Updated {{ row.edge.updated_at|datetime }}</span>
+              </div>
+              <p class="graph-attrs">{{ row.attrs_preview }}</p>
+            </div>
+            <aside class="graph-side">
+              <section class="graph-panel">
+                <h3>Evidence</h3>
+                <strong>{{ row.evidence_count|number }} rows</strong>
+                {% for evidence in row.evidence %}
+                  <div class="graph-evidence">
+                    <span>{{ evidence.source_label }}</span>
+                    <p>{{ evidence.snippet }}</p>
+                  </div>
+                {% else %}
+                  <span class="identity-id">No evidence rows loaded</span>
+                {% endfor %}
+              </section>
+            </aside>
+          </article>
+        {% else %}
+          <p class="empty attention-empty">No graph relationships match these filters.</p>
+        {% endfor %}
+      </div>
+    {% endif %}
+  </section>
+
+  <nav class="pager" role="navigation" aria-label="Knowledge graph pages">
+    {% if graph.previous_page_url %}
+      <a class="btn-ghost" href="{{ graph.previous_page_url }}">Previous</a>
+    {% else %}
+      <span class="btn-ghost disabled" aria-disabled="true">Previous</span>
+    {% endif %}
+    <strong>Page {{ graph.page.page|number }} of {{ graph.page.total_pages|number }}</strong>
+    {% if graph.next_page_url %}
+      <a class="btn-ghost" href="{{ graph.next_page_url }}">Next</a>
+    {% else %}
+      <span class="btn-ghost disabled" aria-disabled="true">Next</span>
+    {% endif %}
+  </nav>
+{% endblock %}

@@ -55,6 +55,7 @@ from kortny.knowledge_graph import (
     KG_CHANNEL_REFRESH_SEMANTIC_FALLBACK_MESSAGE,
     KG_REFRESH_SOURCE,
     KG_RUNTIME_CONTEXT_REINFORCED_MESSAGE,
+    KG_TASK_SUMMARY_PROJECTED_MESSAGE,
     DestinationSurface,
     EvidenceInput,
     GraphService,
@@ -2034,6 +2035,158 @@ def test_agent_executor_reinforces_graph_rows_used_in_delivered_answer(
     assert profile_evidence.source_slack_message_ts == message_event.payload["message_ts"]
     assert "Runtime graph context was used" in (profile_evidence.raw_snippet or "")
     assert edge_evidence is not None
+
+
+def test_agent_executor_projects_task_summary_into_graph(
+    db_session: Session,
+    worker_session_factory: sessionmaker[Session],
+    tmp_path: Path,
+) -> None:
+    claim_time = datetime(2026, 6, 3, 10, 35, tzinfo=UTC)
+    task = create_task(db_session, event_id="EvTaskSummaryGraphProjection")
+    task.input = (
+        "summarize the last few decisions in this channel and call out "
+        "anything unresolved"
+    )
+    task.available_at = claim_time - timedelta(seconds=1)
+    db_session.add(
+        ModelPricing(
+            provider=LLMProvider.openrouter,
+            model="openai/gpt-4o-mini",
+            input_price_per_mtok=Decimal("1.000000"),
+            output_price_per_mtok=Decimal("2.000000"),
+            effective_from=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+    )
+    db_session.commit()
+
+    raw_answer = (
+        "Decisions / recommendations:\n"
+        "- Use Langfuse as the default AI observability pilot for Kortny "
+        "before adding another observability platform.\n"
+        "- Keep Arize Phoenix as the second tool to revisit after the first "
+        "observability baseline is working.\n\n"
+        "Open / unresolved:\n"
+        "- API key cleanup needs an owner before the integration docs are "
+        "published.\n\n"
+        "Commitments:\n"
+        "- Weekly observability review cadence should continue until the pilot "
+        "is stable."
+    )
+    humanized_answer = (
+        "Short version: use Langfuse for the first observability pilot, keep "
+        "Arize Phoenix as the next tool to revisit, and do not publish the "
+        "integration docs until API key cleanup has an owner."
+    )
+    slack_client = FakeSlackClient()
+    provider = FakeAgentProvider(
+        [
+            Completion(
+                content=raw_answer,
+                tool_calls=(),
+                usage=TokenUsage(input_tokens=320, output_tokens=120),
+                model="openai/gpt-4o-mini",
+            ),
+            Completion(
+                content=humanized_answer,
+                tool_calls=(),
+                usage=TokenUsage(input_tokens=440, output_tokens=80),
+                model="openai/gpt-4o-mini",
+            ),
+        ]
+    )
+
+    result = TaskWorker(
+        session_factory=worker_session_factory,
+        worker_id="agent-worker-test",
+        executor=AgentTaskExecutor(
+            settings=make_settings(),
+            llm_provider=provider,
+            provider_name=LLMProvider.openrouter,
+            slack_client=slack_client,
+            workspace_base_dir=tmp_path,
+        ),
+    ).run_once(now=claim_time)
+
+    db_session.refresh(task)
+    events = task_events(db_session, task)
+    projection_event = next(
+        event
+        for event in events
+        if event.payload.get("message") == KG_TASK_SUMMARY_PROJECTED_MESSAGE
+    )
+    message_event = next(
+        event
+        for event in events
+        if event.type is TaskEventType.message_posted
+        and event.payload.get("purpose") == "result"
+    )
+    decision_entity = db_session.scalar(
+        select(KnowledgeGraphEntity).where(
+            KnowledgeGraphEntity.installation_id == task.installation_id,
+            KnowledgeGraphEntity.entity_type == "decision",
+            KnowledgeGraphEntity.source_type == "task_summary",
+            KnowledgeGraphEntity.lifecycle_state == "active",
+            KnowledgeGraphEntity.display_name.ilike("%Langfuse%"),
+            KnowledgeGraphEntity.is_current.is_(True),
+            KnowledgeGraphEntity.expired_at.is_(None),
+        )
+    )
+    open_question = db_session.scalar(
+        select(KnowledgeGraphEntity).where(
+            KnowledgeGraphEntity.installation_id == task.installation_id,
+            KnowledgeGraphEntity.entity_type == "open_question",
+            KnowledgeGraphEntity.source_type == "task_summary",
+            KnowledgeGraphEntity.lifecycle_state == "candidate",
+            KnowledgeGraphEntity.display_name.ilike("%API key cleanup%"),
+            KnowledgeGraphEntity.is_current.is_(True),
+            KnowledgeGraphEntity.expired_at.is_(None),
+        )
+    )
+
+    assert result.status == TaskStatus.succeeded.value, task.error
+    assert slack_client.messages == [
+        {
+            "channel": "C123",
+            "text": humanized_answer,
+            "thread_ts": "EvTaskSummaryGraphProjection",
+        }
+    ]
+    assert projection_event.payload["active_count"] >= 3
+    assert projection_event.payload["candidate_count"] == 1
+    assert projection_event.payload["evidence_count"] >= 5
+    assert projection_event.payload["message_event_id"] == message_event.id
+    assert decision_entity is not None
+    assert decision_entity.visibility_scope_type == "channel"
+    assert decision_entity.visibility_scope_id == "C123"
+    assert decision_entity.attrs_json["review_status"] == "auto"
+    assert open_question is not None
+    assert open_question.attrs_json["review_status"] == "needs_review"
+    assert (
+        open_question.attrs_json["review_reason"]
+        == "sensitive_or_high_impact_language"
+    )
+    decision_evidence = db_session.scalar(
+        select(KnowledgeGraphEvidence).where(
+            KnowledgeGraphEvidence.target_kind == "entity",
+            KnowledgeGraphEvidence.target_id == decision_entity.id,
+            KnowledgeGraphEvidence.source_type == "task_summary",
+            KnowledgeGraphEvidence.source_task_id == task.id,
+        )
+    )
+    assert decision_evidence is not None
+    assert decision_evidence.source_task_event_id == message_event.id
+    assert decision_evidence.source_slack_message_ts == message_event.payload["message_ts"]
+    graph_context = GraphService(db_session).retrieve_current_context(
+        installation_id=task.installation_id,
+        destination=DestinationSurface.channel("C123"),
+        anchor_keys=("slack_channel:C123",),
+        max_hops=2,
+        max_items=20,
+    )
+    graph_context_keys = {entity.canonical_key for entity in graph_context.entities}
+    assert decision_entity.canonical_key in graph_context_keys
+    assert open_question.canonical_key not in graph_context_keys
 
 
 def test_agent_executor_removes_ack_reaction_after_success(

@@ -28,6 +28,11 @@ from kortny.knowledge_graph.service import (
     RetrievedGraphEdge,
     RetrievedGraphEntity,
 )
+from kortny.knowledge_graph.task_summary import (
+    KG_TASK_SUMMARY_PROJECTED_MESSAGE,
+    TaskSummaryGraphExtractionService,
+    TaskSummaryGraphProjectionResult,
+)
 
 _LAZY_EXPORTS = {
     "GRAPH_REFRESH_HISTORY_LIMIT": "kortny.knowledge_graph.channel_refresh",
@@ -67,6 +72,7 @@ __all__ = [
     "KG_CHANNEL_PROFILE_PROJECTED_MESSAGE",
     "KG_REFRESH_SOURCE",
     "KG_RUNTIME_CONTEXT_REINFORCED_MESSAGE",
+    "KG_TASK_SUMMARY_PROJECTED_MESSAGE",
     "ChannelGraphRefreshPipeline",
     "ChannelGraphRefreshPipelineResult",
     "KnowledgeGraphRefreshResult",
@@ -78,6 +84,8 @@ __all__ = [
     "RetrievedGraphEntity",
     "RuntimeGraphReinforcementResult",
     "RuntimeGraphReinforcementService",
+    "TaskSummaryGraphExtractionService",
+    "TaskSummaryGraphProjectionResult",
     "VisibilityScope",
     "compatible_scope_predicate",
     "is_dashboard_graph_refresh_task",

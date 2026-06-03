@@ -29,9 +29,11 @@ from kortny.execution import task_workspace
 from kortny.knowledge_graph import (
     KG_CHANNEL_PROFILE_PROJECTED_MESSAGE,
     KG_RUNTIME_CONTEXT_REINFORCED_MESSAGE,
+    KG_TASK_SUMMARY_PROJECTED_MESSAGE,
     ChannelGraphRefreshPipeline,
     KnowledgeGraphExtractionService,
     RuntimeGraphReinforcementService,
+    TaskSummaryGraphExtractionService,
     is_dashboard_graph_refresh_task,
 )
 from kortny.llm import LLMProvider, LLMService, ModelRouter, create_llm_provider
@@ -204,6 +206,12 @@ class AgentTaskExecutor:
                     session=session,
                     task=task,
                     task_service=task_service,
+                )
+                self._project_task_summary_graph_context(
+                    session=session,
+                    task=task,
+                    task_service=task_service,
+                    result_summary=agent_result.result_summary,
                 )
                 self._mark_channel_assessment_completed(
                     session=session,
@@ -1272,6 +1280,55 @@ class AgentTaskExecutor:
             edge_count=result.edge_count,
             evidence_count=result.evidence_count,
             duplicate_count=result.duplicate_count,
+        )
+
+    def _project_task_summary_graph_context(
+        self,
+        *,
+        session: Session,
+        task: Task,
+        task_service: TaskService,
+        result_summary: str,
+    ) -> None:
+        """Best-effort graph growth from a successful task answer."""
+
+        try:
+            result = TaskSummaryGraphExtractionService(session).project_task_summary(
+                task=task,
+                result_summary=result_summary,
+            )
+        except Exception as exc:
+            task_service.append_event(
+                task,
+                TaskEventType.error,
+                {
+                    "message": "kg_task_summary_projection_failed",
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                },
+            )
+            log_observation(
+                logger,
+                "kg_task_summary_projection_failed",
+                level=logging.WARNING,
+                task=task,
+                error_type=type(exc).__name__,
+                error_summary=str(exc)[:500],
+            )
+            return
+
+        if result.projected_count <= 0:
+            return
+        task_service.append_event(task, TaskEventType.log, result.to_payload())
+        log_observation(
+            logger,
+            KG_TASK_SUMMARY_PROJECTED_MESSAGE,
+            task=task,
+            entity_count=result.entity_count,
+            edge_count=result.edge_count,
+            evidence_count=result.evidence_count,
+            active_count=result.active_count,
+            candidate_count=result.candidate_count,
         )
 
     def _mark_channel_assessment_failed(

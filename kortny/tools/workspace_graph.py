@@ -87,7 +87,9 @@ class QueryWorkspaceGraphTool:
             inferred_anchor = _default_anchor_key(self.task)
             if inferred_anchor is not None:
                 anchor_keys = (inferred_anchor,)
-        max_hops = _bounded_int(args.get("max_hops", 1), default=1, minimum=0, maximum=3)
+        max_hops = _bounded_int(
+            args.get("max_hops", 1), default=1, minimum=0, maximum=3
+        )
         limit = _bounded_int(args.get("limit", 20), default=20, minimum=1, maximum=50)
         include_evidence = _optional_bool(args.get("include_evidence", True))
 
@@ -285,10 +287,7 @@ def _entity_labels(
     rows = session.scalars(
         select(KnowledgeGraphEntity).where(KnowledgeGraphEntity.id.in_(ids))
     )
-    return {
-        row.id: row.display_name or row.canonical_key
-        for row in rows
-    }
+    return {row.id: row.display_name or row.canonical_key for row in rows}
 
 
 def _evidence_by_id(

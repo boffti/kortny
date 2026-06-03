@@ -1,0 +1,671 @@
+{% extends "base.html" %}
+
+{% block title %}Playground - Kortny Dashboard{% endblock %}
+
+{% block content %}
+  <section class="page-heading">
+    <div>
+      <h1>Agent Playground</h1>
+      <p>Test Kortny's coordination, tools, and memory in a live, sandboxed environment without sending Slack notifications.</p>
+    </div>
+  </section>
+
+  <div class="playground-layout-grid">
+    <!-- Main Console & Run Input -->
+    <div class="playground-main-panel">
+      <!-- Prompt Form -->
+      <article class="card pg-form-card">
+        <form id="playground-form" class="pg-form">
+          <div class="form-group">
+            <label for="prompt">Sandbox Prompt</label>
+            <textarea 
+              id="prompt" 
+              name="prompt" 
+              rows="4" 
+              placeholder="Ask Kortny to do something, e.g.: 'What facts do you remember about my workspace?' or 'Search the web for the latest weather in San Francisco and generate a PDF summary.'"
+              required
+            ></textarea>
+          </div>
+          <div class="form-actions">
+            <button type="submit" id="run-btn" class="btn">
+              <span>Run Agent</span>
+            </button>
+            <button type="button" id="clear-console-btn" class="btn-ghost">Clear Console</button>
+          </div>
+        </form>
+      </article>
+
+      <!-- Active Stats Bar -->
+      <section class="playground-stats-bar card" id="stats-bar" style="display: none;">
+        <div class="stat-item">
+          <span>Status</span>
+          <strong id="stat-status" class="status-pill status-idle">Idle</strong>
+        </div>
+        <div class="stat-item">
+          <span>Run Cost</span>
+          <strong id="stat-cost">$0.000000</strong>
+        </div>
+        <div class="stat-item">
+          <span>Input Tokens</span>
+          <strong id="stat-input-tokens">0</strong>
+        </div>
+        <div class="stat-item">
+          <span>Output Tokens</span>
+          <strong id="stat-output-tokens">0</strong>
+        </div>
+        <div class="stat-item">
+          <span>Elapsed Time</span>
+          <strong id="stat-timer">0.0s</strong>
+        </div>
+      </section>
+
+      <!-- Sandbox Console Terminal -->
+      <article class="card pg-console-card">
+        <header class="console-header">
+          <div class="console-controls">
+            <span class="dot red"></span>
+            <span class="dot yellow"></span>
+            <span class="dot green"></span>
+          </div>
+          <span class="console-title">Interactive Log Stream</span>
+          <div class="console-meta" id="active-task-id">No active session</div>
+        </header>
+        <div class="console-body" id="console-output">
+          <div class="console-line system-line">[SYSTEM] Ready. Enter a prompt above to start a live agent execution.</div>
+        </div>
+      </article>
+    </div>
+
+    <!-- History Sidebar -->
+    <aside class="playground-history-panel card">
+      <header>
+        <h2>Sandbox History</h2>
+        <p>Recent manual and playground runs.</p>
+      </header>
+      <div class="history-list" id="history-items">
+        {% for task in tasks %}
+          <div class="history-card" data-task-id="{{ task.id }}" data-prompt="{{ task.input }}">
+            <div class="history-card-header">
+              <span class="status-chip badge-{{ 'success' if task.status.value == 'succeeded' else 'danger' if task.status.value == 'failed' else 'warning' if task.status.value == 'cancelled' else 'neutral' }}">{{ task.status.value }}</span>
+              <small>{{ task.created_at|datetime }}</small>
+            </div>
+            <p class="history-prompt-preview">{{ task.input }}</p>
+            <div class="history-card-footer">
+              <span>Cost: ${{ task.total_cost_usd|money }}</span>
+              <button class="btn-ghost load-history-btn" data-task-id="{{ task.id }}" data-prompt="{{ task.input }}">Load Logs</button>
+            </div>
+          </div>
+        {% else %}
+          <p class="empty">No past playground runs found.</p>
+        {% endfor %}
+      </div>
+    </aside>
+  </div>
+
+  <style>
+    /* Playground Grid Layout */
+    .playground-layout-grid {
+      display: grid;
+      grid-template-columns: 1fr 340px;
+      gap: 24px;
+      align-items: start;
+      margin-top: 24px;
+    }
+
+    @media (max-width: 1024px) {
+      .playground-layout-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .playground-main-panel {
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+
+    /* Form Card Styles */
+    .pg-form-card {
+      padding: 24px;
+    }
+    
+    .pg-form {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    .pg-form label {
+      font-weight: 600;
+      margin-bottom: 8px;
+      display: block;
+      font-size: 0.95rem;
+    }
+
+    .pg-form textarea {
+      width: 100%;
+      min-height: 100px;
+      padding: 12px 16px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: var(--card);
+      color: var(--foreground);
+      font-family: inherit;
+      font-size: 0.95rem;
+      line-height: 1.5;
+      resize: vertical;
+      transition: border-color 0.2s, box-shadow 0.2s;
+    }
+
+    .pg-form textarea:focus {
+      outline: none;
+      border-color: var(--ring);
+      box-shadow: 0 0 0 2px var(--accent-bg);
+    }
+
+    .form-actions {
+      display: flex;
+      gap: 12px;
+      justify-content: flex-end;
+    }
+
+    /* Active Stats Bar Styles */
+    .playground-stats-bar {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      padding: 16px 20px;
+      gap: 16px;
+      text-align: center;
+      background: var(--glass-bg);
+      backdrop-filter: var(--glass-blur);
+      border: 1px solid var(--glass-border);
+    }
+
+    @media (max-width: 640px) {
+      .playground-stats-bar {
+        grid-template-columns: repeat(2, 1fr);
+      }
+    }
+
+    .stat-item {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .stat-item span {
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--muted-foreground);
+    }
+
+    .stat-item strong {
+      font-size: 1rem;
+      font-family: monospace;
+    }
+
+    .status-pill {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 9999px;
+      font-size: 0.8rem;
+    }
+    
+    .status-idle { background: var(--muted); color: var(--muted-foreground); }
+    .status-pending { background: var(--warning-bg); color: var(--warning); }
+    .status-running { background: var(--accent-bg); color: var(--accent); }
+    .status-succeeded { background: var(--success-bg); color: var(--success); }
+    .status-failed { background: var(--destructive-bg); color: var(--destructive); }
+
+    /* Console Terminal Card Styles */
+    .pg-console-card {
+      display: flex;
+      flex-direction: column;
+      background: #111416 !important;
+      border: 1px solid rgba(255, 255, 255, 0.1) !important;
+      border-radius: var(--radius);
+      overflow: hidden;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.25);
+    }
+
+    .console-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 16px;
+      background: #1a1e21;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    }
+
+    .console-controls {
+      display: flex;
+      gap: 6px;
+    }
+
+    .console-controls .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+    }
+
+    .console-controls .dot.red { background: #ff5f56; }
+    .console-controls .dot.yellow { background: #ffbd2e; }
+    .console-controls .dot.green { background: #27c93f; }
+
+    .console-title {
+      font-size: 0.8rem;
+      color: #94a3b8;
+      font-weight: 600;
+      font-family: monospace;
+    }
+
+    .console-meta {
+      font-size: 0.75rem;
+      color: #64748b;
+      font-family: monospace;
+    }
+
+    .console-body {
+      padding: 16px;
+      min-height: 380px;
+      max-height: 600px;
+      overflow-y: auto;
+      font-family: 'Fira Code', 'Courier New', Courier, monospace;
+      font-size: 0.85rem;
+      line-height: 1.6;
+      color: #e2e8f0;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    /* Console Line Styling */
+    .console-line {
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .system-line { color: #38bdf8; }
+    .log-line { color: #94a3b8; }
+    .llm-line { color: #c084fc; }
+    .tool-call-line { color: #fbbf24; }
+    .tool-result-line { color: #34d399; }
+    .artifact-line { color: #2dd4bf; }
+    .output-line { color: #f472b6; font-weight: 500; }
+    .error-line { color: #f87171; background: rgba(248, 113, 113, 0.1); padding: 4px 8px; border-radius: 4px; }
+    .status-line { color: #fb7185; }
+
+    /* History Sidebar Styles */
+    .playground-history-panel {
+      padding: 20px;
+      max-height: 800px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    .playground-history-panel header h2 {
+      font-size: 1.1rem;
+      margin-bottom: 4px;
+    }
+
+    .playground-history-panel header p {
+      font-size: 0.8rem;
+      color: var(--muted-foreground);
+    }
+
+    .history-list {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      overflow-y: auto;
+      flex: 1;
+    }
+
+    .history-card {
+      padding: 12px 14px;
+      border: 1px solid var(--border);
+      border-radius: calc(var(--radius) - 2px);
+      background: var(--card);
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      transition: transform 0.2s, box-shadow 0.2s;
+    }
+
+    .history-card:hover {
+      transform: translateY(-2px);
+      box-shadow: var(--shadow);
+    }
+
+    .history-card.active-history {
+      border-color: var(--ring);
+      box-shadow: 0 0 0 2px var(--accent-bg);
+    }
+
+    .history-card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .history-card-header small {
+      font-size: 0.75rem;
+      color: var(--muted-foreground);
+    }
+
+    .history-prompt-preview {
+      font-size: 0.85rem;
+      color: var(--foreground);
+      line-height: 1.4;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+      margin: 0;
+    }
+
+    .history-card-footer {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-top: 4px;
+    }
+
+    .history-card-footer span {
+      font-size: 0.8rem;
+      color: var(--muted-foreground);
+      font-family: monospace;
+    }
+
+    .load-history-btn {
+      font-size: 0.75rem !important;
+      padding: 4px 8px !important;
+      height: auto !important;
+    }
+  </style>
+
+  <script>
+    (function() {
+      const form = document.getElementById('playground-form');
+      const promptInput = document.getElementById('prompt');
+      const runBtn = document.getElementById('run-btn');
+      const clearBtn = document.getElementById('clear-console-btn');
+      const consoleOutput = document.getElementById('console-output');
+      const statsBar = document.getElementById('stats-bar');
+      const activeTaskIdSpan = document.getElementById('active-task-id');
+
+      const statStatus = document.getElementById('stat-status');
+      const statCost = document.getElementById('stat-cost');
+      const statInputTokens = document.getElementById('stat-input-tokens');
+      const statOutputTokens = document.getElementById('stat-output-tokens');
+      const statTimer = document.getElementById('stat-timer');
+
+      let eventSource = null;
+      let timerInterval = null;
+      let startTime = null;
+
+      function startTimer() {
+        startTime = Date.now();
+        clearInterval(timerInterval);
+        timerInterval = setInterval(() => {
+          const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+          statTimer.textContent = `${elapsed}s`;
+        }, 100);
+      }
+
+      function stopTimer() {
+        clearInterval(timerInterval);
+      }
+
+      function appendConsoleLine(text, typeClass) {
+        const line = document.createElement('div');
+        line.className = `console-line ${typeClass}`;
+        line.textContent = text;
+        consoleOutput.appendChild(line);
+        consoleOutput.scrollTop = consoleOutput.scrollHeight;
+      }
+
+      function updateStats(data) {
+        if (data.status) {
+          statStatus.textContent = data.status.charAt(0).toUpperCase() + data.status.slice(1);
+          statStatus.className = `status-pill status-${data.status}`;
+        }
+        if (data.cost !== undefined) {
+          statCost.textContent = `$${parseFloat(data.cost).toFixed(6)}`;
+        }
+        if (data.input_tokens !== undefined) {
+          statInputTokens.textContent = data.input_tokens;
+        }
+        if (data.output_tokens !== undefined) {
+          statOutputTokens.textContent = data.output_tokens;
+        }
+      }
+
+      function closeEventStream() {
+        if (eventSource) {
+          eventSource.close();
+          eventSource = null;
+        }
+        stopTimer();
+      }
+
+      function renderEvent(event) {
+        const payload = event.payload || {};
+        const timestamp = new Date(event.created_at).toLocaleTimeString();
+        const prefix = `[${timestamp}] `;
+
+        switch (event.type) {
+          case 'task_created':
+            appendConsoleLine(`${prefix}[SYSTEM] Task created. Queued for background worker.`, 'system-line');
+            break;
+          case 'status_changed':
+            appendConsoleLine(`${prefix}[STATUS] Transitioned to ${payload.to}`, 'status-line');
+            break;
+          case 'llm_call':
+            const costText = payload.cost_usd ? ` ($${parseFloat(payload.cost_usd).toFixed(6)})` : '';
+            appendConsoleLine(`${prefix}[LLM CALL] Model: ${payload.model} | Input: ${payload.input_tokens} | Output: ${payload.output_tokens}${costText}`, 'llm-line');
+            break;
+          case 'tool_call':
+            appendConsoleLine(`${prefix}[TOOL CALL] Invoking tool '${payload.tool_name}' with arguments: ${JSON.stringify(payload.arguments)}`, 'tool-call-line');
+            break;
+          case 'tool_result':
+            appendConsoleLine(`${prefix}[TOOL RESULT] Tool '${payload.tool_name}' returned status: ${payload.status}`, 'tool-result-line');
+            break;
+          case 'artifact_created':
+            appendConsoleLine(`${prefix}[ARTIFACT] Generated file '${payload.filename}' (${payload.size_bytes} bytes). Path: ${payload.storage_path}`, 'artifact-line');
+            break;
+          case 'message_posted':
+            if (payload.purpose === 'result') {
+              appendConsoleLine(`\n=== AGENT RESPONSE ===\n${payload.text}\n======================\n`, 'output-line');
+            } else {
+              appendConsoleLine(`${prefix}[SLACK POST] (${payload.purpose}) ${payload.text || '(file upload)'}`, 'output-line');
+            }
+            break;
+          case 'error':
+            appendConsoleLine(`${prefix}[ERROR] ${payload.message || JSON.stringify(payload)}`, 'error-line');
+            break;
+          case 'log':
+            if (payload.message === 'task_executor_started') {
+              appendConsoleLine(`${prefix}[SYSTEM] Leased by worker: ${payload.worker_id}`, 'system-line');
+            } else if (payload.message === 'model_route_selected') {
+              appendConsoleLine(`${prefix}[ROUTING] Selected route tier: ${payload.tier} | Model: ${payload.model}`, 'system-line');
+            } else if (payload.message === 'tool_selection_completed') {
+              const names = (payload.selected_tools || []).map(t => t.registry_name).join(', ') || 'none';
+              appendConsoleLine(`${prefix}[COORDINATOR] Candidate tools approved: [${names}]`, 'system-line');
+            } else {
+              appendConsoleLine(`${prefix}[LOG] ${payload.message || JSON.stringify(payload)}`, 'log-line');
+            }
+            break;
+          default:
+            appendConsoleLine(`${prefix}[EVENT: ${event.type}] ${JSON.stringify(payload)}`, 'log-line');
+        }
+      }
+
+      function startStream(taskId) {
+        closeEventStream();
+        consoleOutput.innerHTML = '';
+        activeTaskIdSpan.textContent = `Task: ${taskId}`;
+        statsBar.style.display = 'grid';
+        runBtn.disabled = true;
+        runBtn.querySelector('span').textContent = 'Running...';
+        
+        statStatus.textContent = 'Pending';
+        statStatus.className = 'status-pill status-pending';
+        statCost.textContent = '$0.000000';
+        statInputTokens.textContent = '0';
+        statOutputTokens.textContent = '0';
+        
+        startTimer();
+        appendConsoleLine(`[SYSTEM] Connecting to event stream for Task ID: ${taskId}...`, 'system-line');
+
+        eventSource = new EventSource(`/playground/${taskId}/stream`);
+
+        eventSource.onmessage = function(e) {
+          try {
+            const data = JSON.parse(e.data);
+            
+            if (data.message === 'connected') {
+              appendConsoleLine(`[SYSTEM] SSE connection established. Watching logs...`, 'system-line');
+            }
+            
+            if (data.event) {
+              renderEvent(data.event);
+            }
+            
+            if (data.status !== undefined) {
+              updateStats(data);
+            }
+            
+            if (data.finished) {
+              appendConsoleLine(`\n[SYSTEM] Run complete. Final Status: ${data.status.toUpperCase()}`, 'system-line');
+              closeEventStream();
+              runBtn.disabled = false;
+              runBtn.querySelector('span').textContent = 'Run Agent';
+              
+              // Trigger historical items refresh or load dynamically
+              addNewHistoryItem(taskId, promptInput.value, data.status, data.cost);
+            }
+
+            if (data.error) {
+              appendConsoleLine(`[STREAM ERROR] ${data.error}`, 'error-line');
+              closeEventStream();
+              runBtn.disabled = false;
+              runBtn.querySelector('span').textContent = 'Run Agent';
+            }
+          } catch (err) {
+            console.error('Failed to parse SSE data:', err);
+          }
+        };
+
+        eventSource.onerror = function(err) {
+          appendConsoleLine(`[SYSTEM] EventSource lost connection. Closed.`, 'system-line');
+          closeEventStream();
+          runBtn.disabled = false;
+          runBtn.querySelector('span').textContent = 'Run Agent';
+        };
+      }
+
+      function addNewHistoryItem(taskId, prompt, status, cost) {
+        // Check if item already exists in history panel
+        const existingCard = document.querySelector(`.history-card[data-task-id="${taskId}"]`);
+        if (existingCard) {
+          // Update status badge and cost
+          const chip = existingCard.querySelector('.status-chip');
+          chip.textContent = status;
+          chip.className = `status-chip badge-${status === 'succeeded' ? 'success' : status === 'failed' ? 'danger' : status === 'cancelled' ? 'warning' : 'neutral'}`;
+          existingCard.querySelector('.history-card-footer span').textContent = `Cost: $${parseFloat(cost).toFixed(4)}`;
+          return;
+        }
+
+        // Add new card at top of history list
+        const historyContainer = document.getElementById('history-items');
+        const emptyMsg = historyContainer.querySelector('.empty');
+        if (emptyMsg) emptyMsg.remove();
+
+        const card = document.createElement('div');
+        card.className = 'history-card';
+        card.setAttribute('data-task-id', taskId);
+        card.setAttribute('data-prompt', prompt);
+
+        const statusClass = status === 'succeeded' ? 'success' : status === 'failed' ? 'danger' : status === 'cancelled' ? 'warning' : 'neutral';
+        const formattedCost = parseFloat(cost).toFixed(4);
+
+        card.innerHTML = `
+          <div class="history-card-header">
+            <span class="status-chip badge-${statusClass}">${status}</span>
+            <small>Just now</small>
+          </div>
+          <p class="history-prompt-preview">${prompt}</p>
+          <div class="history-card-footer">
+            <span>Cost: $${formattedCost}</span>
+            <button class="btn-ghost load-history-btn" data-task-id="${taskId}" data-prompt="${prompt}">Load Logs</button>
+          </div>
+        `;
+
+        historyContainer.insertBefore(card, historyContainer.firstChild);
+        attachHistoryCardListeners(card);
+      }
+
+      // Handle Form Submission
+      form.addEventListener('submit', function(e) {
+        e.preventDefault();
+        const prompt = promptInput.value.trim();
+        if (!prompt) return;
+
+        runBtn.disabled = true;
+        runBtn.querySelector('span').textContent = 'Initializing...';
+
+        fetch('/playground/run', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+          },
+          body: new URLSearchParams({ prompt })
+        })
+        .then(res => {
+          if (!res.ok) throw new Error(`HTTP Error ${res.status}`);
+          return res.json();
+        })
+        .then(data => {
+          if (data.task_id) {
+            startStream(data.task_id);
+          } else {
+            throw new Error("No task_id returned from server");
+          }
+        })
+        .catch(err => {
+          appendConsoleLine(`[SYSTEM ERROR] Failed to start run: ${err.message}`, 'error-line');
+          runBtn.disabled = false;
+          runBtn.querySelector('span').textContent = 'Run Agent';
+        });
+      });
+
+      // Clear Console
+      clearBtn.addEventListener('click', () => {
+        consoleOutput.innerHTML = '<div class="console-line system-line">[SYSTEM] Console cleared.</div>';
+      });
+
+      // History items listener setup
+      function attachHistoryCardListeners(card) {
+        const loadBtn = card.querySelector('.load-history-btn');
+        loadBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const taskId = loadBtn.getAttribute('data-task-id');
+          const prompt = loadBtn.getAttribute('data-prompt');
+          
+          document.querySelectorAll('.history-card').forEach(c => c.classList.remove('active-history'));
+          card.classList.add('active-history');
+
+          promptInput.value = prompt;
+          startStream(taskId);
+        });
+      }
+
+      document.querySelectorAll('.history-card').forEach(card => {
+        attachHistoryCardListeners(card);
+      });
+    })();
+  </script>
+{% endblock %}

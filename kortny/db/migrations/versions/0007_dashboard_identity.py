@@ -125,7 +125,5 @@ def downgrade() -> None:
     op.drop_table("dashboard_oauth_states")
     op.drop_index("idx_dashboard_users_email_unique", table_name="dashboard_users")
     op.drop_index("idx_dashboard_users_status", table_name="dashboard_users")
-    op.drop_index(
-        "idx_dashboard_users_installation_role", table_name="dashboard_users"
-    )
+    op.drop_index("idx_dashboard_users_installation_role", table_name="dashboard_users")
     op.drop_table("dashboard_users")

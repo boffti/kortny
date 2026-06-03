@@ -413,7 +413,9 @@ def test_query_workspace_graph_tool_returns_scope_safe_provenance_and_evidence(
     assert "project:alpha" in entity_keys_output
     assert "project:private-alpha" not in entity_keys_output
     project_output = next(
-        row for row in result.output["entities"] if row["canonical_key"] == "project:alpha"
+        row
+        for row in result.output["entities"]
+        if row["canonical_key"] == "project:alpha"
     )
     assert project_output["provenance"]["extraction_kind"] == "extracted"
     assert project_output["provenance"]["review_status"] == "auto"

@@ -88,7 +88,9 @@ class SlackChannelMembershipService:
                     event_id=event_id,
                     metadata=metadata,
                 )
-                return self._result(current, created=False, discovered_via=discovered_via)
+                return self._result(
+                    current, created=False, discovered_via=discovered_via
+                )
 
             return self._result(
                 membership,

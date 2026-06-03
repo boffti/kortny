@@ -30,7 +30,9 @@ def test_build_temporal_workflow_input_from_task() -> None:
     }
 
 
-def test_start_temporal_task_workflow_uses_stable_id_and_safe_duplicate_policy() -> None:
+def test_start_temporal_task_workflow_uses_stable_id_and_safe_duplicate_policy() -> (
+    None
+):
     task = _task(input_text="Compare Linear, Notion, and docs.")
     settings = _settings()
     client = FakeTemporalClient()

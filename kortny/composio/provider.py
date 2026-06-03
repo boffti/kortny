@@ -79,7 +79,9 @@ class ComposioExternalToolProvider:
             return self._catalog
 
         entries: list[_ToolkitCatalog] = []
-        for connection in _best_connections_by_toolkit(self.resolver.allowed_connections()):
+        for connection in _best_connections_by_toolkit(
+            self.resolver.allowed_connections()
+        ):
             try:
                 raw_tools = self.client.list_tools(
                     toolkit_slug=connection.toolkit_slug,
@@ -91,7 +93,8 @@ class ComposioExternalToolProvider:
                     limit=self.per_toolkit_limit,
                 )
                 allowed_tools = tuple(
-                    tool for tool in _merge_tools(raw_tools, fallback_tools)
+                    tool
+                    for tool in _merge_tools(raw_tools, fallback_tools)
                     if _is_read_only(tool)
                 )
             except ComposioCatalogError as exc:
@@ -107,7 +110,9 @@ class ComposioExternalToolProvider:
                 continue
 
             if allowed_tools:
-                entries.append(_ToolkitCatalog(connection=connection, tools=allowed_tools))
+                entries.append(
+                    _ToolkitCatalog(connection=connection, tools=allowed_tools)
+                )
 
         self._catalog = tuple(entries)
         log_observation(

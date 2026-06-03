@@ -1518,12 +1518,12 @@ def _latest_payload_event(
 
 
 def _should_suppress_slack_post(session: Session, task: Task) -> bool:
+    if task.slack_channel_id == "playground" or task.identity_kind == "manual":
+        return True
     request_event = channel_assessment_request_event(session, task)
     if request_event is None:
         return False
-    return (
-        request_event.payload.get(CHANNEL_ASSESSMENT_SUPPRESS_SLACK_POST_KEY) is True
-    )
+    return request_event.payload.get(CHANNEL_ASSESSMENT_SUPPRESS_SLACK_POST_KEY) is True
 
 
 def _external_tool_skip_reason(

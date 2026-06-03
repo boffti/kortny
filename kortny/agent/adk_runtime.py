@@ -276,7 +276,9 @@ class AdkAgentRuntime:
         self.registry = registry
         self.registry_factory = registry_factory
         self.model_route = model_route
-        self.model = model if model is not None else model_route.model if model_route else None
+        self.model = (
+            model if model is not None else model_route.model if model_route else None
+        )
         self.system_prompt = system_prompt
         self.thread_transcript_provider = thread_transcript_provider
         self.context_assembler = context_assembler
@@ -566,9 +568,7 @@ class AdkAgentRuntime:
                 max_parallel_branches=(
                     self.settings.planned_workflow_max_parallel_branches
                 ),
-                cost_ceiling_usd=str(
-                    self.settings.planned_workflow_cost_ceiling_usd
-                ),
+                cost_ceiling_usd=str(self.settings.planned_workflow_cost_ceiling_usd),
             )
         return SequentialAgent(
             name="kortny_planned_workflow",
@@ -928,9 +928,7 @@ class AdkAgentRuntime:
                     "I can respond here directly, but I do not have the "
                     "drafted text from that Slack posting tool call."
                 )
-            kept_parts.append(
-                genai_types.Part.from_text(text=text)
-            )
+            kept_parts.append(genai_types.Part.from_text(text=text))
 
         task = self._task_from_callback_context(callback_context)
         if task is not None:
@@ -972,7 +970,10 @@ class AdkAgentRuntime:
         if not self.settings.planned_workflows_enabled:
             return
         planned_payload = self._planned_workflow_payload(task)
-        if planned_payload is None or planned_payload.get("planned_candidate") is not True:
+        if (
+            planned_payload is None
+            or planned_payload.get("planned_candidate") is not True
+        ):
             return
         ceiling = Decimal(str(self.settings.planned_workflow_cost_ceiling_usd))
         cumulative_cost = self.session.scalar(

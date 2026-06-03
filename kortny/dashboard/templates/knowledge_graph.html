@@ -84,24 +84,27 @@
       <p class="empty attention-empty">No graph nodes match these filters yet.</p>
     {% else %}
       <div class="graph-map-layout">
-        <div class="graph-map-canvas">
-          <svg class="kg-map-svg" viewBox="0 0 920 420" role="img" aria-labelledby="kg-map-title kg-map-desc">
-            <title id="kg-map-title">Knowledge graph topology</title>
-            <desc id="kg-map-desc">A bounded visual map of currently filtered Kortny knowledge graph nodes and relationships.</desc>
-            {% for edge in graph.map.edges %}
-              <g class="kg-map-edge-group" data-kg-edge="{{ edge.id }}" data-kg-source="{{ edge.source_id }}" data-kg-target="{{ edge.target_id }}">
-                <line class="kg-map-edge kg-map-edge-{{ edge.tone }}" x1="{{ edge.x1 }}" y1="{{ edge.y1 }}" x2="{{ edge.x2 }}" y2="{{ edge.y2 }}"></line>
-                <text class="kg-map-edge-label" x="{{ edge.label_x }}" y="{{ edge.label_y }}">{{ edge.label }}</text>
-              </g>
-            {% endfor %}
+        <div class="graph-map-canvas" style="position: relative;">
+          <div id="kg-network-canvas" style="height: 420px; width: 100%;"></div>
+
+          <div hidden>
             {% for node in graph.map.nodes %}
-              <g class="kg-map-node kg-map-node-{{ node.tone }}" tabindex="0" role="button" data-kg-map-node="{{ node.id }}" aria-label="{{ node.label }} {{ node.entity_type }} {{ node.lifecycle_state }}">
-                <circle cx="{{ node.x }}" cy="{{ node.y }}" r="{{ node.radius }}"></circle>
-                <text class="kg-map-node-label" x="{{ node.x }}" y="{{ node.y + node.radius + 18 }}" text-anchor="middle">{{ node.label }}</text>
-                <text class="kg-map-node-kind" x="{{ node.x }}" y="{{ node.y + node.radius + 33 }}" text-anchor="middle">{{ node.entity_type }}</text>
-              </g>
+              <div class="kg-data-node" 
+                   data-id="{{ node.id }}" 
+                   data-label="{{ node.label }}" 
+                   data-type="{{ node.entity_type }}" 
+                   data-state="{{ node.lifecycle_state }}"
+                   data-tone="{{ node.tone }}"></div>
             {% endfor %}
-          </svg>
+            {% for edge in graph.map.edges %}
+              <div class="kg-data-edge" 
+                   data-id="{{ edge.id }}" 
+                   data-source="{{ edge.source_id }}" 
+                   data-target="{{ edge.target_id }}"
+                   data-label="{{ edge.label }}"
+                   data-tone="{{ edge.tone }}"></div>
+            {% endfor %}
+          </div>
         </div>
 
         <aside class="graph-map-inspector" aria-live="polite">
@@ -385,11 +388,15 @@
     {% endif %}
   </nav>
 
+  <script src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
   <script>
     (() => {
-      const nodes = Array.from(document.querySelectorAll("[data-kg-map-node]"));
+      const container = document.getElementById('kg-network-canvas');
+      const domNodes = Array.from(document.querySelectorAll(".kg-data-node"));
+      const domEdges = Array.from(document.querySelectorAll(".kg-data-edge"));
       const selected = document.querySelector("[data-kg-selected]");
-      if (!nodes.length || !selected) {
+      
+      if (!domNodes.length || !container || !selected) {
         return;
       }
 
@@ -399,33 +406,185 @@
           detail.innerHTML,
         ])
       );
-      const edges = Array.from(document.querySelectorAll("[data-kg-edge]"));
+
+      // Style helper matching dashboard theme variables
+      const isDark = document.documentElement.dataset.theme === 'dark';
+      
+      const colors = {
+        success: {
+          background: isDark ? '#1c2021' : '#ffffff',
+          border: isDark ? '#39b98b' : '#198567',
+          highlight: {
+            background: isDark ? '#24262a' : '#f5f7f4',
+            border: isDark ? '#78d9aa' : '#116c52'
+          }
+        },
+        warning: {
+          background: isDark ? '#1c2021' : '#ffffff',
+          border: isDark ? '#f2c66d' : '#926315',
+          highlight: {
+            background: isDark ? '#24262a' : '#f5f7f4',
+            border: isDark ? '#f6d89b' : '#765011'
+          }
+        },
+        danger: {
+          background: isDark ? '#1c2021' : '#ffffff',
+          border: isDark ? '#ff8a80' : '#b42318',
+          highlight: {
+            background: isDark ? '#24262a' : '#f5f7f4',
+            border: isDark ? '#ffb3ac' : '#901c13'
+          }
+        },
+        neutral: {
+          background: isDark ? '#1c2021' : '#ffffff',
+          border: isDark ? '#343a3a' : '#d8ded8',
+          highlight: {
+            background: isDark ? '#24262a' : '#f5f7f4',
+            border: isDark ? '#47504d' : '#c8d2ca'
+          }
+        }
+      };
+
+      const nodes = domNodes.map(el => {
+        const tone = el.dataset.tone || 'neutral';
+        const colorScheme = colors[tone] || colors.neutral;
+        
+        return {
+          id: el.dataset.id,
+          label: el.dataset.label,
+          title: `${el.dataset.label} (${el.dataset.type})`,
+          shape: 'dot',
+          size: el.dataset.type === 'channel' ? 24 : 16,
+          color: {
+            background: colorScheme.background,
+            border: colorScheme.border,
+            highlight: colorScheme.highlight
+          },
+          font: {
+            color: isDark ? '#f3f6f3' : '#15181a',
+            face: 'Plus Jakarta Sans, ui-sans-serif, sans-serif',
+            size: 13,
+            bold: el.dataset.type === 'channel' ? 'bold' : 'normal'
+          },
+          borderWidth: 2,
+          borderWidthSelected: 3
+        };
+      });
+
+      const edges = domEdges.map(el => {
+        const tone = el.dataset.tone || 'neutral';
+        const edgeColor = isDark ? '#47504d' : '#c8d2ca';
+        
+        return {
+          id: el.dataset.id,
+          from: el.dataset.source,
+          to: el.dataset.target,
+          label: el.dataset.label,
+          arrows: 'to',
+          color: {
+            color: edgeColor,
+            highlight: isDark ? '#39b98b' : '#198567',
+            hover: isDark ? '#39b98b' : '#198567'
+          },
+          font: {
+            color: isDark ? '#a9b3ad' : '#5f6861',
+            face: 'Plus Jakarta Sans, ui-sans-serif, sans-serif',
+            size: 11,
+            align: 'middle'
+          },
+          width: 1.5,
+          selectionWidth: 2.5
+        };
+      });
+
+      const data = { nodes: new vis.DataSet(nodes), edges: new vis.DataSet(edges) };
+      
+      const options = {
+        nodes: {
+          scaling: {
+            min: 10,
+            max: 30
+          }
+        },
+        edges: {
+          smooth: {
+            type: 'cubicBezier',
+            forceDirection: 'none',
+            roundness: 0.3
+          }
+        },
+        physics: {
+          forceAtlas2Based: {
+            gravitationalConstant: -50,
+            centralGravity: 0.01,
+            springLength: 100,
+            springConstant: 0.08
+          },
+          maxVelocity: 50,
+          solver: 'forceAtlas2Based',
+          timestep: 0.35,
+          stabilization: {
+            iterations: 150,
+            updateInterval: 25
+          }
+        },
+        interaction: {
+          hover: true,
+          tooltipDelay: 200
+        }
+      };
+
+      const network = new vis.Network(container, data, options);
 
       function selectNode(nodeId) {
-        nodes.forEach((node) => {
-          node.classList.toggle("active", node.dataset.kgMapNode === nodeId);
-        });
-        edges.forEach((edge) => {
-          edge.classList.toggle(
-            "active",
-            edge.dataset.kgSource === nodeId || edge.dataset.kgTarget === nodeId
-          );
-        });
         selected.innerHTML = details.get(nodeId) || "<p>No node detail available.</p>";
       }
 
-      nodes.forEach((node) => {
-        node.addEventListener("click", () => selectNode(node.dataset.kgMapNode));
-        node.addEventListener("keydown", (event) => {
-          if (event.key !== "Enter" && event.key !== " ") {
-            return;
-          }
-          event.preventDefault();
-          selectNode(node.dataset.kgMapNode);
-        });
+      network.on("selectNode", function (params) {
+        if (params.nodes.length > 0) {
+          selectNode(params.nodes[0]);
+        }
       });
 
-      selectNode(nodes[0].dataset.kgMapNode);
+      // Select the first node on load
+      if (nodes.length > 0) {
+        selectNode(nodes[0].id);
+        network.selectNodes([nodes[0].id]);
+      }
+
+      // Adjust network styling when theme changes dynamically
+      const observer = new MutationObserver(() => {
+        const isDarkNow = document.documentElement.dataset.theme === 'dark';
+        const textColor = isDarkNow ? '#f3f6f3' : '#15181a';
+        const subtextColor = isDarkNow ? '#a9b3ad' : '#5f6861';
+        const edgeColorNow = isDarkNow ? '#47504d' : '#c8d2ca';
+        
+        // Update node fonts and edge lines
+        const nodeUpdates = nodes.map(n => {
+          const tone = domNodes.find(dn => dn.dataset.id === n.id)?.dataset.tone || 'neutral';
+          const cs = colors[tone] || colors.neutral;
+          return {
+            id: n.id,
+            color: {
+              background: cs.background,
+              border: cs.border,
+              highlight: cs.highlight
+            },
+            font: { color: textColor }
+          };
+        });
+        
+        const edgeUpdates = edges.map(e => ({
+          id: e.id,
+          color: { color: edgeColorNow },
+          font: { color: subtextColor }
+        }));
+        
+        data.nodes.update(nodeUpdates);
+        data.edges.update(edgeUpdates);
+      });
+      
+      observer.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
     })();
   </script>
 {% endblock %}

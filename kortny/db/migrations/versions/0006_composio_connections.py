@@ -107,9 +107,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_index(
-        "idx_composio_connections_toolkit", table_name="composio_connections"
-    )
+    op.drop_index("idx_composio_connections_toolkit", table_name="composio_connections")
     op.drop_index("idx_composio_connections_owner", table_name="composio_connections")
     op.drop_index(
         "idx_composio_connections_allowed_lookup", table_name="composio_connections"

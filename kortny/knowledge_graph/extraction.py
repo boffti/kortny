@@ -144,12 +144,14 @@ class KnowledgeGraphExtractionService:
                 for user_id in (membership.added_by_user_id,)
                 if user_id
             }
-            | {observation.user_id for observation in observations if observation.user_id},
+            | {
+                observation.user_id
+                for observation in observations
+                if observation.user_id
+            },
         )
 
-        channel_entities: dict[
-            tuple[uuid.UUID, str], KnowledgeGraphEntity
-        ] = {}
+        channel_entities: dict[tuple[uuid.UUID, str], KnowledgeGraphEntity] = {}
         channel_count = 0
         person_count = 0
         artifact_count = 0
@@ -450,8 +452,7 @@ class KnowledgeGraphExtractionService:
             )
         )
         return {
-            (identity.installation_id, identity.slack_id): identity
-            for identity in rows
+            (identity.installation_id, identity.slack_id): identity for identity in rows
         }
 
     def _upsert_deterministic_channel_entity(
@@ -1236,7 +1237,9 @@ def _semantic_extraction(profile: ObserveChannelProfile) -> dict[str, Any] | Non
         )
     if not isinstance(candidates, dict):
         return None
-    if not any(_semantic_values(candidates.get(field)) for field, *_ in SEMANTIC_ENTITY_SPECS):
+    if not any(
+        _semantic_values(candidates.get(field)) for field, *_ in SEMANTIC_ENTITY_SPECS
+    ):
         return None
     return candidates
 
@@ -1338,9 +1341,9 @@ def _semantic_evidence(
         source_slack_message_ts=task.slack_message_ts,
         raw_snippet=f"{semantic_kind}: {value}",
         confidence_score=_semantic_confidence_score(
-            (profile.profile_json or {}).get("semantic_extraction", {}).get(
-                "confidence"
-            )
+            (profile.profile_json or {})
+            .get("semantic_extraction", {})
+            .get("confidence")
             if isinstance(profile.profile_json, dict)
             else None,
             profile.confidence_score,

@@ -2161,11 +2161,15 @@ def test_worker_runs_dashboard_graph_refresh_without_agent_runtime(
     ]
     assert "investment operations" in profile.summary.lower()
     assert "blotter" in profile.summary.lower()
-    assert next(
-        event.payload["synthesis"]
-        for event in events
-        if event.payload.get("message") == KG_CHANNEL_REFRESH_PROFILE_SYNTHESIZED_MESSAGE
-    ) == "semantic_llm"
+    assert (
+        next(
+            event.payload["synthesis"]
+            for event in events
+            if event.payload.get("message")
+            == KG_CHANNEL_REFRESH_PROFILE_SYNTHESIZED_MESSAGE
+        )
+        == "semantic_llm"
+    )
     assert "adk" not in profile.summary.lower()
     assert "branch outputs" not in profile.summary.lower()
     assert profile_entity is not None
@@ -2189,21 +2193,30 @@ def test_worker_runs_dashboard_graph_refresh_without_agent_runtime(
         for entity in semantic_entities
         if entity.attrs_json.get("kind") == "channel_semantic_projection"
     }
-    assert {"topic", "workflow", "important_entity", "assumption", "help_opportunity"} <= (
-        semantic_kinds
-    )
+    assert {
+        "topic",
+        "workflow",
+        "important_entity",
+        "assumption",
+        "help_opportunity",
+    } <= (semantic_kinds)
     assert any(
         edge.relationship_type == "maps_to"
         and edge.attrs_json.get("kind") == "channel_semantic_projection"
         for edge in semantic_edges
     )
-    semantic_rows_by_key = {entity.canonical_key: entity for entity in semantic_entities}
+    semantic_rows_by_key = {
+        entity.canonical_key: entity for entity in semantic_entities
+    }
     sensitive_help = semantic_rows_by_key[
         "channel_help:CGraph:share-the-private-api-key-cleanup-plan"
     ]
     assert sensitive_help.lifecycle_state == "candidate"
     assert sensitive_help.attrs_json["review_status"] == "needs_review"
-    assert sensitive_help.attrs_json["review_reason"] == "sensitive_or_high_impact_language"
+    assert (
+        sensitive_help.attrs_json["review_reason"]
+        == "sensitive_or_high_impact_language"
+    )
     active_semantic_rows = [
         entity
         for entity in semantic_entities
@@ -2249,7 +2262,9 @@ def test_worker_runs_dashboard_graph_refresh_without_agent_runtime(
     profile.metadata_json = {"synthesis": "semantic_llm"}
     db_session.flush()
 
-    second_projection = KnowledgeGraphExtractionService(db_session).project_channel_profile(
+    second_projection = KnowledgeGraphExtractionService(
+        db_session
+    ).project_channel_profile(
         task=task,
         membership=membership,
         profile=profile,
@@ -2398,11 +2413,15 @@ def test_worker_dashboard_graph_refresh_falls_back_on_bad_semantic_output(
     assert len(provider.calls) == 1
     assert KG_CHANNEL_REFRESH_SEMANTIC_FALLBACK_MESSAGE in event_messages
     assert KG_CHANNEL_REFRESH_SEMANTIC_EXTRACTED_MESSAGE not in event_messages
-    assert next(
-        event.payload["synthesis"]
-        for event in events
-        if event.payload.get("message") == KG_CHANNEL_REFRESH_PROFILE_SYNTHESIZED_MESSAGE
-    ) == "deterministic"
+    assert (
+        next(
+            event.payload["synthesis"]
+            for event in events
+            if event.payload.get("message")
+            == KG_CHANNEL_REFRESH_PROFILE_SYNTHESIZED_MESSAGE
+        )
+        == "deterministic"
+    )
     assert profile is not None
     assert profile.metadata_json["synthesis"] == "deterministic"
     assert "product" in profile.summary.lower()

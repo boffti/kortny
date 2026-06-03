@@ -37,7 +37,9 @@ def test_handoff_classifies_multi_integration_research_as_durable_candidate() ->
     assert decision.fallback_reason == "workflow_backend_inline"
 
 
-def test_handoff_records_temporal_configured_but_primary_execution_not_enabled() -> None:
+def test_handoff_records_temporal_configured_but_primary_execution_not_enabled() -> (
+    None
+):
     decision = evaluate_runtime_handoff(
         settings=_settings(KORTNY_WORKFLOW_BACKEND="temporal"),
         task=_task("Use Firecrawl to crawl the whole website and summarize it."),

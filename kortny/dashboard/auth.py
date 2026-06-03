@@ -145,9 +145,9 @@ def upsert_dashboard_user(
     if user is None:
         user_count = int(
             session.scalar(
-                select(func.count()).select_from(DashboardUser).where(
-                    DashboardUser.installation_id == installation.id
-                )
+                select(func.count())
+                .select_from(DashboardUser)
+                .where(DashboardUser.installation_id == installation.id)
             )
             or 0
         )
@@ -185,7 +185,9 @@ def _dashboard_installation_for_profile(
     if installation is not None:
         return installation
 
-    installation_count = int(session.scalar(select(func.count()).select_from(Installation)) or 0)
+    installation_count = int(
+        session.scalar(select(func.count()).select_from(Installation)) or 0
+    )
     if installation_count > 0:
         raise DashboardAuthError(
             "This Slack workspace is not connected to this Kortny instance."

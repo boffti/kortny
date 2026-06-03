@@ -141,9 +141,7 @@ Revise an existing document as a continuation of the same artifact.
         slug="slack-formatting",
         name="Slack Formatting",
         version="1.0.0",
-        description=(
-            "Use when converting generic Markdown into Slack-native mrkdwn."
-        ),
+        description=("Use when converting generic Markdown into Slack-native mrkdwn."),
         intent_tags=("slack", "formatting", "mrkdwn"),
         response_modes=(
             "quick_answer",

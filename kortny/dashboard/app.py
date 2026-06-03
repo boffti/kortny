@@ -4,16 +4,16 @@ from __future__ import annotations
 
 import json
 import secrets
-from collections.abc import Iterator, Mapping
+from collections.abc import AsyncIterator, Iterator, Mapping
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Annotated, cast
+from typing import Annotated, Any, cast
 from urllib.parse import parse_qs, parse_qsl, quote, urlencode, urlsplit, urlunsplit
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
-from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import func, select
@@ -68,6 +68,8 @@ from kortny.db.models import (
     DashboardUser,
     Installation,
     SlackIdentity,
+    Task,
+    TaskEvent,
     TaskStatus,
 )
 from kortny.db.session import make_session_factory
@@ -1705,6 +1707,175 @@ def register_routes(app: FastAPI) -> None:
                 "system": system_health,
             },
         )
+
+    @app.get("/playground", response_class=HTMLResponse)
+    def playground(
+        request: Request,
+        principal: Annotated[DashboardPrincipal, Depends(require_admin)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> Response:
+        tasks = list(
+            session.scalars(
+                select(Task)
+                .where(
+                    Task.slack_channel_id == "playground",
+                    Task.identity_kind == "manual",
+                )
+                .order_by(Task.created_at.desc())
+                .limit(20)
+            ).all()
+        )
+        return templates.TemplateResponse(
+            request=request,
+            name="playground.html",
+            context={
+                **_dashboard_context(principal, active_page="playground"),
+                "tasks": tasks,
+            },
+        )
+
+    @app.post("/playground/run")
+    async def playground_run(
+        request: Request,
+        principal: Annotated[DashboardPrincipal, Depends(require_admin)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> Response:
+        body_bytes = await request.body()
+        body_str = body_bytes.decode("utf-8")
+        params = parse_qs(body_str)
+        prompt = params.get("prompt", [None])[0]
+        if not prompt or not isinstance(prompt, str) or not prompt.strip():
+            try:
+                json_data = json.loads(body_str)
+                prompt = json_data.get("prompt")
+            except Exception:
+                pass
+
+        if not prompt or not isinstance(prompt, str) or not prompt.strip():
+            raise HTTPException(status_code=400, detail="Prompt is required")
+
+        prompt = prompt.strip()
+
+        installation_id = principal.installation_id
+        if installation_id is None:
+            installation_id = session.scalar(
+                select(Installation.id)
+                .order_by(Installation.created_at.desc())
+                .limit(1)
+            )
+            if installation_id is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="No workspace installation found in database. Please register Kortny to a Slack workspace first.",
+                )
+
+        slack_user_id = (
+            principal.slack_user_id or _default_slack_owner_id(session) or "U00000000"
+        )
+
+        from kortny.tasks.repository import TaskRepository
+
+        task_repo = TaskRepository(session, commit_after_write=True)
+        task = task_repo.create_task(
+            installation_id=installation_id,
+            slack_channel_id="playground",
+            slack_user_id=slack_user_id,
+            input=prompt,
+            slack_event_id=None,
+            slack_thread_ts=None,
+            slack_message_ts=None,
+            source_surface="playground",
+        )
+
+        return JSONResponse(content={"task_id": str(task.id)})
+
+    @app.get("/playground/{task_id}/stream")
+    def playground_stream(
+        task_id: UUID,
+        request: Request,
+        principal: Annotated[DashboardPrincipal, Depends(require_admin)],
+    ) -> Response:
+        import asyncio
+
+        from fastapi.responses import StreamingResponse
+
+        async def event_generator() -> AsyncIterator[str]:
+            session_factory = request.app.state.session_factory
+            last_seq = 0
+            done = False
+
+            yield f"data: {json.dumps({'message': 'connected'})}\n\n"
+
+            while not done:
+
+                def query_events(
+                    current_last_seq: int,
+                ) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+                    with session_factory() as session:
+                        task = session.get(Task, task_id)
+                        if not task:
+                            return None, []
+
+                        events = list(
+                            session.scalars(
+                                select(TaskEvent)
+                                .where(
+                                    TaskEvent.task_id == task_id,
+                                    TaskEvent.seq > current_last_seq,
+                                )
+                                .order_by(TaskEvent.seq.asc())
+                            ).all()
+                        )
+                        event_data = [
+                            {
+                                "seq": event.seq,
+                                "type": event.type.value,
+                                "payload": event.payload,
+                                "created_at": event.created_at.isoformat(),
+                            }
+                            for event in events
+                        ]
+                        return {
+                            "status": task.status.value,
+                            "total_cost": str(task.total_cost_usd),
+                            "total_input_tokens": task.total_input_tokens,
+                            "total_output_tokens": task.total_output_tokens,
+                        }, event_data
+
+                try:
+                    task_info, new_events = await asyncio.to_thread(
+                        query_events, last_seq
+                    )
+                except Exception as exc:
+                    yield f"data: {json.dumps({'error': str(exc)})}\n\n"
+                    break
+
+                if task_info is None:
+                    yield f"data: {json.dumps({'error': 'Task not found'})}\n\n"
+                    break
+
+                for ev in new_events:
+                    yield f"data: {json.dumps({'event': ev})}\n\n"
+                    last_seq = ev["seq"]
+
+                status = task_info["status"]
+                if status in {"succeeded", "failed", "cancelled"}:
+                    try:
+                        _, final_events = await asyncio.to_thread(
+                            query_events, last_seq
+                        )
+                        for ev in final_events:
+                            yield f"data: {json.dumps({'event': ev})}\n\n"
+                    except Exception:
+                        pass
+
+                    yield f"data: {json.dumps({'status': status, 'finished': True, 'cost': task_info['total_cost'], 'input_tokens': task_info['total_input_tokens'], 'output_tokens': task_info['total_output_tokens']})}\n\n"
+                    done = True
+                else:
+                    yield f"data: {json.dumps({'status': status, 'finished': False, 'cost': task_info['total_cost'], 'input_tokens': task_info['total_input_tokens'], 'output_tokens': task_info['total_output_tokens']})}\n\n"
+                    await asyncio.sleep(0.5)
+
+        return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
 def require_principal(

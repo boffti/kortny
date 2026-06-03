@@ -144,9 +144,7 @@ class ChannelGraphRefreshPipeline:
         request_event = channel_assessment_request_event(self.session, task)
         request_payload = request_event.payload if request_event is not None else {}
         channel_id = (
-            request_payload_channel_id(request_payload)
-            or task.slack_channel_id
-            or ""
+            request_payload_channel_id(request_payload) or task.slack_channel_id or ""
         )
         if not channel_id:
             raise ValueError("channel graph refresh requires a Slack channel ID")

@@ -102,7 +102,9 @@ def test_skill_registry_selects_analyst_skill_for_audit_shape(
 
     events = list(
         db_session.scalars(
-            select(TaskEvent).where(TaskEvent.task_id == task.id).order_by(TaskEvent.seq)
+            select(TaskEvent)
+            .where(TaskEvent.task_id == task.id)
+            .order_by(TaskEvent.seq)
         )
     )
     invocations = list(
@@ -150,7 +152,9 @@ def test_skill_registry_selects_and_records_humanizer_skill(
 
     events = list(
         db_session.scalars(
-            select(TaskEvent).where(TaskEvent.task_id == task.id).order_by(TaskEvent.seq)
+            select(TaskEvent)
+            .where(TaskEvent.task_id == task.id)
+            .order_by(TaskEvent.seq)
         )
     )
     invocations = list(

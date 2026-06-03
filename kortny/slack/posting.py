@@ -98,6 +98,25 @@ class SlackPoster:
 
         post_thread_ts = _post_thread_ts(thread)
         slack_text = normalize_slack_mrkdwn(text)
+        if thread.channel_id == "playground":
+            import uuid
+
+            message_ts = f"1710000000.{uuid.uuid4().hex[:6]}"
+            if thread.task_id is not None:
+                self.task_service.append_event(
+                    thread.task_id,
+                    TaskEventType.message_posted,
+                    {
+                        "channel": thread.channel_id,
+                        "thread_ts": post_thread_ts,
+                        "message_ts": message_ts,
+                        "text": slack_text,
+                        "purpose": purpose,
+                        "slack_side_effect_id": "dummy",
+                        "idempotency_key": "dummy",
+                    },
+                )
+            return message_ts
         with start_span(
             "slack.post_message",
             attributes={
@@ -193,6 +212,29 @@ class SlackPoster:
         task = self._resolve_task(task_id)
 
         artifact_obj = self._resolve_or_create_artifact(thread, file_path, artifact)
+        if thread.channel_id == "playground":
+            import uuid
+
+            slack_file_id = f"F_dummy_{uuid.uuid4().hex[:8]}"
+            artifact_obj.slack_file_id = slack_file_id
+            artifact_obj.posted_at = now or datetime.now(UTC)
+            self.session.flush()
+            self.task_service.append_event(
+                task_id,
+                TaskEventType.message_posted,
+                {
+                    "channel": thread.channel_id,
+                    "thread_ts": _post_thread_ts(thread),
+                    "slack_file_id": slack_file_id,
+                    "artifact_id": str(artifact_obj.id),
+                    "filename": artifact_obj.filename,
+                    "purpose": "file_upload",
+                    "slack_side_effect_id": "dummy",
+                    "idempotency_key": "dummy",
+                },
+            )
+            return slack_file_id
+
         if artifact_obj.posted_at is not None:
             if artifact_obj.slack_file_id:
                 return artifact_obj.slack_file_id

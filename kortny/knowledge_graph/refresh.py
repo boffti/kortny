@@ -81,11 +81,9 @@ class KnowledgeGraphRefreshService:
         memberships = self._active_memberships(installation_id=installation_id)
         from kortny.knowledge_graph.extraction import KnowledgeGraphExtractionService
 
-        deterministic_projection = (
-            KnowledgeGraphExtractionService(
-                self.session
-            ).project_deterministic_workspace_facts(installation_id=installation_id)
-        )
+        deterministic_projection = KnowledgeGraphExtractionService(
+            self.session
+        ).project_deterministic_workspace_facts(installation_id=installation_id)
 
         for membership in memberships:
             skip_reason = self._skip_reason(membership, now=requested_at)

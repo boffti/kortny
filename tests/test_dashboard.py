@@ -2067,9 +2067,8 @@ def test_dashboard_knowledge_graph_refresh_queues_channel_assessment_tasks(
             TaskEvent.task_id == queued_task_id,
             TaskEvent.payload["message"].as_string()
             == CHANNEL_ASSESSMENT_REQUESTED_MESSAGE,
-            TaskEvent.payload[
-                CHANNEL_ASSESSMENT_SUPPRESS_SLACK_POST_KEY
-            ].as_boolean()
+            TaskEvent.payload[CHANNEL_ASSESSMENT_SUPPRESS_SLACK_POST_KEY]
+            .as_boolean()
             .is_(True),
         )
     )
@@ -2098,9 +2097,9 @@ def test_dashboard_knowledge_graph_refresh_queues_channel_assessment_tasks(
     )
 
     assert duplicate_response.status_code == 303
-    assert "Queued+0+graph+refresh+assessments" in duplicate_response.headers[
-        "location"
-    ]
+    assert (
+        "Queued+0+graph+refresh+assessments" in duplicate_response.headers["location"]
+    )
     assert session.scalar(select(func.count()).select_from(Task)) == 2
 
 
@@ -2619,6 +2618,55 @@ def create_dashboard_memory_fact(
     session.add(fact)
     session.commit()
     return fact
+
+
+def test_dashboard_playground_routes(
+    client: tuple[TestClient, Session],
+) -> None:
+    test_client, session = client
+    login(test_client)
+
+    # 1. GET /playground should render successfully
+    response = test_client.get("/playground")
+    assert response.status_code == 200
+    assert "Agent Playground" in response.text
+    assert "Sandbox Prompt" in response.text
+
+    # Seed an installation so task creation succeeds
+    installation = Installation(
+        slack_team_id="TPlayground", team_name="Playground Team"
+    )
+    session.add(installation)
+    session.commit()
+
+    # 2. POST /playground/run should create a task
+    run_response = test_client.post(
+        "/playground/run",
+        data={"prompt": "Hello Sandbox!"},
+    )
+    assert run_response.status_code == 200
+    data = run_response.json()
+    assert "task_id" in data
+    task_id = data["task_id"]
+
+    # Verify task was created in DB
+    task = session.get(Task, uuid.UUID(task_id))
+    assert task is not None
+    assert task.input == "Hello Sandbox!"
+    assert task.slack_channel_id == "playground"
+    assert task.identity_kind == "manual"
+    assert task.status == TaskStatus.pending
+
+    # 3. GET /playground/{task_id}/stream should return SSE stream
+    stream_response = test_client.get(f"/playground/{task_id}/stream")
+    assert stream_response.status_code == 200
+    assert "text/event-stream" in stream_response.headers["content-type"]
+
+    # Read first chunk
+    lines = stream_response.text.split("\n\n")
+    assert len(lines) > 0
+    # First line should be connection message
+    assert "connected" in lines[0]
 
 
 def cleanup_database(session: Session) -> None:

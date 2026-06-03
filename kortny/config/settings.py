@@ -83,6 +83,10 @@ class Settings(BaseSettings):
         default=8,
         validation_alias="KORTNY_PLANNED_WORKFLOW_MAX_BRANCH_TOOL_CALLS",
     )
+    planned_workflow_progress_updates_enabled: bool = Field(
+        default=True,
+        validation_alias="KORTNY_PLANNED_WORKFLOW_PROGRESS_UPDATES_ENABLED",
+    )
     temporal_address: str = Field(
         default="temporal:7233",
         validation_alias="TEMPORAL_ADDRESS",

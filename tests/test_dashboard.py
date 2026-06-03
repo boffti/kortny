@@ -1610,6 +1610,23 @@ def test_dashboard_task_list_shows_cost_models_and_turns(
 ) -> None:
     test_client, session = client
     task = create_dashboard_task(session)
+    session.add(
+        TaskEvent(
+            task_id=task.id,
+            seq=7,
+            type=TaskEventType.log,
+            payload={
+                "message": "planned_task_budget_reached",
+                "runtime": "adk",
+                "phase": "budget_reached",
+                "branch": "research",
+                "budget_type": "tool_calls",
+                "limit": 8,
+                "observed": 9,
+            },
+        )
+    )
+    session.commit()
     login(test_client)
 
     response = test_client.get("/tasks")
@@ -1659,6 +1676,9 @@ def test_dashboard_task_detail_shows_events_usage_and_artifacts(
     assert "{&#x27;source&#x27;: &#x27;test&#x27;}" not in response.text
     assert "dashboard_report.pdf" in response.text
     assert "analysis" in response.text
+    assert "Planned budget reached" in response.text
+    assert "A planned branch reached its budget" in response.text
+    assert "tool calls" in response.text
     assert 'class="card metric-card"' in response.text
     assert 'class="timeline"' in response.text
 

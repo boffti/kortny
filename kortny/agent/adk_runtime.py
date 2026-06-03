@@ -82,6 +82,7 @@ ADK_BRANCH_BUDGET_BLOCKED_PREFIX = "adk_budget_blocked:"
 ADK_BRANCH_MODEL_CALLS_PREFIX = "adk_model_calls:"
 ADK_BRANCH_TOOL_CALLS_PREFIX = "adk_tool_calls:"
 ADK_BRANCH_BUDGET_EVENT_PREFIX = "adk_budget_event_recorded:"
+ADK_PHASE_EVENT_PREFIX = "adk_phase_event_recorded:"
 ADK_SINGLE_PERSONA_PROMPT = """User-facing identity rules:
 - Speak as Kortny, a single Slack-native coworker. Use first person when
   describing capabilities or limitations.
@@ -781,6 +782,7 @@ class AdkAgentRuntime:
             description=description,
             tools=tools,
             output_key=output_key,
+            before_agent_callback=self._record_planned_agent_started,
             before_model_callback=self._guard_planned_model_request,
             after_model_callback=self._record_and_guard_adk_model_response,
             before_tool_callback=self._guard_planned_tool_call,
@@ -1027,6 +1029,22 @@ class AdkAgentRuntime:
         if tool_name is not None:
             payload["tool"] = tool_name
         self.task_service.append_event(task, TaskEventType.log, payload)
+        self.task_service.append_event(
+            task,
+            TaskEventType.log,
+            {
+                "message": "planned_task_budget_reached",
+                "runtime": "adk",
+                "phase": "budget_reached",
+                "adk_agent_name": agent_name,
+                "adk_invocation_id": callback_context.invocation_id,
+                "budget_type": budget_type,
+                "reason": reason,
+                "limit": limit,
+                "observed": observed,
+                **({"tool": tool_name} if tool_name is not None else {}),
+            },
+        )
         log_observation(
             logger,
             "adk_planned_branch_budget_exceeded",
@@ -1039,6 +1057,58 @@ class AdkAgentRuntime:
             observed=observed,
             tool=tool_name,
         )
+        log_observation(
+            logger,
+            "planned_task_budget_reached",
+            task=task,
+            runtime="adk",
+            phase="budget_reached",
+            adk_agent_name=agent_name,
+            budget_type=budget_type,
+            reason=reason,
+            limit=limit,
+            observed=observed,
+            tool=tool_name,
+        )
+
+    def _record_planned_agent_started(
+        self,
+        callback_context: CallbackContext,
+    ) -> None:
+        agent_name = callback_context.agent_name
+        phase = _planned_agent_start_phase(agent_name)
+        message = _planned_agent_start_message(agent_name)
+        if phase is None or message is None:
+            return None
+
+        event_key = f"{ADK_PHASE_EVENT_PREFIX}{message}:{agent_name}"
+        if callback_context.state.get(event_key):
+            return None
+        callback_context.state[event_key] = True
+        task = self._task_from_callback_context(callback_context)
+        if task is None:
+            return None
+        payload: dict[str, Any] = {
+            "message": message,
+            "runtime": "adk",
+            "phase": phase,
+            "adk_agent_name": agent_name,
+            "adk_invocation_id": callback_context.invocation_id,
+        }
+        branch = _planned_branch_name(agent_name)
+        if branch is not None:
+            payload["branch"] = branch
+        self.task_service.append_event(task, TaskEventType.log, payload)
+        log_observation(
+            logger,
+            message,
+            task=task,
+            runtime="adk",
+            phase=phase,
+            adk_agent_name=agent_name,
+            branch=branch,
+        )
+        return None
 
     def _record_and_guard_adk_model_response(
         self,
@@ -1394,17 +1464,62 @@ class AdkAgentRuntime:
         return task_obj
 
     def _record_adk_event(self, task: Task, *, event: Any, event_count: int) -> None:
+        author = _string_or_none(getattr(event, "author", None))
         payload: dict[str, Any] = {
             "message": "adk_event_recorded",
             "runtime": "adk",
             "event_index": event_count,
             "event_id": _string_or_none(getattr(event, "id", None)),
             "invocation_id": _string_or_none(getattr(event, "invocation_id", None)),
-            "author": _string_or_none(getattr(event, "author", None)),
+            "author": author,
             "is_final_response": bool(event.is_final_response()),
             "text_chars": len(_event_text(event)),
         }
         self.task_service.append_event(task, TaskEventType.log, payload)
+        self._record_planned_phase_from_adk_event(
+            task,
+            author=author,
+            event=event,
+            event_count=event_count,
+        )
+
+    def _record_planned_phase_from_adk_event(
+        self,
+        task: Task,
+        *,
+        author: str | None,
+        event: Any,
+        event_count: int,
+    ) -> None:
+        if author is None or not event.is_final_response():
+            return
+        phase = _planned_agent_final_phase(author)
+        message = _planned_agent_final_message(author)
+        if phase is None or message is None:
+            return
+        payload: dict[str, Any] = {
+            "message": message,
+            "runtime": "adk",
+            "phase": phase,
+            "adk_agent_name": author,
+            "event_index": event_count,
+            "text_chars": len(_event_text(event)),
+        }
+        branch = _planned_branch_name(author)
+        if branch is not None:
+            payload["branch"] = branch
+        self.task_service.append_event(task, TaskEventType.log, payload)
+        log_observation(
+            logger,
+            message,
+            task=task,
+            runtime="adk",
+            phase=phase,
+            adk_agent_name=author,
+            branch=branch,
+            event_index=event_count,
+            text_chars=payload["text_chars"],
+        )
 
 
 def adk_litellm_model_name(settings: Settings, *, model: str | None = None) -> str:
@@ -1623,6 +1738,56 @@ def _planned_branch_budget_response(*, agent_name: str, reason: str) -> LlmRespo
             parts=[genai_types.Part.from_text(text=text)],
         )
     )
+
+
+def _planned_agent_start_phase(agent_name: str) -> str | None:
+    if agent_name == "planned_workflow_planner":
+        return "planning"
+    if agent_name in ADK_PLANNED_BRANCH_AGENT_NAMES:
+        return "branch_started"
+    if agent_name == "planned_workflow_merger":
+        return "merging"
+    return None
+
+
+def _planned_agent_start_message(agent_name: str) -> str | None:
+    if agent_name == "planned_workflow_planner":
+        return "planned_task_planning_started"
+    if agent_name in ADK_PLANNED_BRANCH_AGENT_NAMES:
+        return "planned_task_branch_started"
+    if agent_name == "planned_workflow_merger":
+        return "planned_task_merging"
+    return None
+
+
+def _planned_agent_final_phase(agent_name: str) -> str | None:
+    if agent_name == "planned_workflow_planner":
+        return "plan_ready"
+    if agent_name in ADK_PLANNED_BRANCH_AGENT_NAMES:
+        return "branch_completed"
+    if agent_name == "planned_workflow_merger":
+        return "completed"
+    return None
+
+
+def _planned_agent_final_message(agent_name: str) -> str | None:
+    if agent_name == "planned_workflow_planner":
+        return "planned_task_plan_ready"
+    if agent_name in ADK_PLANNED_BRANCH_AGENT_NAMES:
+        return "planned_task_branch_completed"
+    if agent_name == "planned_workflow_merger":
+        return "planned_task_completed"
+    return None
+
+
+def _planned_branch_name(agent_name: str) -> str | None:
+    if agent_name == "planned_research_worker":
+        return "research"
+    if agent_name == "planned_workspace_worker":
+        return "workspace"
+    if agent_name == "planned_integration_worker":
+        return "integration"
+    return None
 
 
 def _string_or_none(value: object) -> str | None:

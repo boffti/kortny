@@ -113,6 +113,9 @@ def test_settings_loads_optional_environment(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setenv("KORTNY_PLANNED_WORKFLOWS_ENABLED", "false")
     monkeypatch.setenv("KORTNY_PLANNED_WORKFLOW_MAX_PARALLEL_BRANCHES", "4")
     monkeypatch.setenv("KORTNY_PLANNED_WORKFLOW_COST_CEILING_USD", "1.25")
+    monkeypatch.setenv("KORTNY_PLANNED_WORKFLOW_MAX_BRANCH_MODEL_CALLS", "5")
+    monkeypatch.setenv("KORTNY_PLANNED_WORKFLOW_MAX_BRANCH_TOOL_CALLS", "13")
+    monkeypatch.setenv("KORTNY_PLANNED_WORKFLOW_PROGRESS_UPDATES_ENABLED", "false")
     monkeypatch.setenv("KORTNY_WORKFLOW_BACKEND", "temporal")
     monkeypatch.setenv("TEMPORAL_ADDRESS", "temporal.example:7233")
     monkeypatch.setenv("TEMPORAL_NAMESPACE", "kortny-dev")
@@ -148,6 +151,9 @@ def test_settings_loads_optional_environment(monkeypatch: pytest.MonkeyPatch) ->
     assert settings.planned_workflows_enabled is False
     assert settings.planned_workflow_max_parallel_branches == 4
     assert settings.planned_workflow_cost_ceiling_usd == 1.25
+    assert settings.planned_workflow_max_branch_model_calls == 5
+    assert settings.planned_workflow_max_branch_tool_calls == 13
+    assert settings.planned_workflow_progress_updates_enabled is False
     assert settings.workflow_backend == "temporal"
     assert settings.temporal_address == "temporal.example:7233"
     assert settings.temporal_namespace == "kortny-dev"

@@ -683,6 +683,7 @@ def test_agent_executor_passes_routed_model_to_adk_runtime(
             "LLM_STANDARD_MODEL": "openai/gpt-5.4-mini",
             "POSTGRES_URL": "postgresql://kortny:kortny@localhost/kortny",
             "AGENT_RUNTIME": "adk",
+            "KORTNY_PLANNED_WORKFLOW_PROGRESS_UPDATES_ENABLED": False,
         }
     )
     captured: dict[str, Any] = {}
@@ -823,6 +824,7 @@ def test_agent_executor_records_planned_workflow_classifier_event_for_complex_ta
             "LLM_ANALYSIS_MODEL": "anthropic/claude-sonnet-4.6",
             "POSTGRES_URL": "postgresql://kortny:kortny@localhost/kortny",
             "AGENT_RUNTIME": "adk",
+            "KORTNY_PLANNED_WORKFLOW_PROGRESS_UPDATES_ENABLED": False,
         }
     )
 
@@ -871,6 +873,84 @@ def test_agent_executor_records_planned_workflow_classifier_event_for_complex_ta
     )
 
 
+def test_agent_executor_posts_planned_workflow_progress_update(
+    db_session: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = create_task(db_session, event_id="EvPlannedWorkflowProgress")
+    task.input = "Research best AI agents for trading and summarize the options."
+    db_session.commit()
+    task_service = TaskService(db_session)
+    settings = Settings.model_validate(
+        {
+            "SLACK_BOT_TOKEN": "xoxb-test",
+            "SLACK_APP_TOKEN": "xapp-test",
+            "SLACK_SIGNING_SECRET": "signing-secret",
+            "LLM_PROVIDER": SettingsLLMProvider.openrouter,
+            "LLM_API_KEY": "openrouter-key",
+            "LLM_MODEL": "anthropic/sonnet-default",
+            "LLM_CHEAP_MODEL": "deepseek/deepseek-v4-flash",
+            "LLM_ANALYSIS_MODEL": "anthropic/claude-sonnet-4.6",
+            "POSTGRES_URL": "postgresql://kortny:kortny@localhost/kortny",
+            "AGENT_RUNTIME": "adk",
+            "KORTNY_PLANNED_WORKFLOW_PROGRESS_UPDATES_ENABLED": True,
+        }
+    )
+    slack_client = FakeSlackClient()
+
+    class FakeAdkRuntime:
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+        def run(self, task_arg: Task) -> AgentRunResult:
+            return AgentRunResult(
+                task_id=task_arg.id,
+                result_summary="Complex task still executed by the current runtime.",
+                turns=1,
+                artifact_count=0,
+            )
+
+    monkeypatch.setattr(
+        "kortny.agent.adk_runtime.AdkAgentRuntime",
+        FakeAdkRuntime,
+    )
+
+    result = AgentTaskExecutor(
+        settings=settings,
+        slack_client=slack_client,
+    )._run_agent_runtime(
+        settings=settings,
+        session=db_session,
+        task=task,
+        task_service=task_service,
+        working_dir=tmp_path,
+    )
+
+    events = task_events(db_session, task)
+
+    assert result.result_summary == "Complex task still executed by the current runtime."
+    assert len(slack_client.messages) == 1
+    assert slack_client.messages[0]["channel"] == "C123"
+    assert slack_client.messages[0]["thread_ts"] == "EvPlannedWorkflowProgress"
+    assert "split this into a few workstreams" in slack_client.messages[0]["text"]
+    assert any(
+        event.payload.get("message") == "planned_task_started"
+        and event.payload.get("progress_updates_enabled") is True
+        for event in events
+    )
+    assert any(
+        event.type is TaskEventType.message_posted
+        and event.payload.get("purpose") == "planned_progress_start"
+        for event in events
+    )
+    assert any(
+        event.payload.get("message") == "planned_task_progress_posted"
+        and event.payload.get("purpose") == "planned_progress_start"
+        for event in events
+    )
+
+
 def test_agent_executor_shadow_starts_temporal_for_planned_candidate(
     db_session: Session,
     tmp_path: Path,
@@ -892,6 +972,7 @@ def test_agent_executor_shadow_starts_temporal_for_planned_candidate(
             "POSTGRES_URL": "postgresql://kortny:kortny@localhost/kortny",
             "AGENT_RUNTIME": "adk",
             "KORTNY_WORKFLOW_BACKEND": "temporal",
+            "KORTNY_PLANNED_WORKFLOW_PROGRESS_UPDATES_ENABLED": False,
         }
     )
     launch_calls: list[str] = []
@@ -989,6 +1070,7 @@ def test_agent_executor_shadow_starts_temporal_workflow_for_durable_candidate(
             "POSTGRES_URL": "postgresql://kortny:kortny@localhost/kortny",
             "AGENT_RUNTIME": "adk",
             "KORTNY_WORKFLOW_BACKEND": "temporal",
+            "KORTNY_PLANNED_WORKFLOW_PROGRESS_UPDATES_ENABLED": False,
         }
     )
     launch_calls: list[str] = []

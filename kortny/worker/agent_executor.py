@@ -105,6 +105,11 @@ GENERIC_FAILURE_TEXT = (
     "Something went wrong while I was working on this. Please try again soon."
 )
 MEMORY_CONFIRMATION_PURPOSE = "memory_confirmation"
+PLANNED_WORKFLOW_PROGRESS_PURPOSE = "planned_progress_start"
+PLANNED_WORKFLOW_PROGRESS_TEXT = (
+    "I'm going to split this into a few workstreams, check the most useful "
+    "sources/tools, and then pull it back into a concise answer."
+)
 ADK_QUICK_FINAL_AUTHORS = frozenset(
     {
         "quick_response_agent",
@@ -493,6 +498,20 @@ class AgentTaskExecutor:
         )
         if settings.agent_runtime == "adk":
             from kortny.agent.adk_runtime import AdkAgentRuntime
+
+            if planned_workflow_candidate and settings.planned_workflows_enabled:
+                self._record_planned_task_started(
+                    task=task,
+                    task_service=task_service,
+                    progress_enabled=settings.planned_workflow_progress_updates_enabled,
+                )
+                if settings.planned_workflow_progress_updates_enabled:
+                    self._post_planned_workflow_progress(
+                        settings=settings,
+                        session=session,
+                        task=task,
+                        task_service=task_service,
+                    )
 
             model_route = ModelRouter(settings).route_for_task(
                 task,
@@ -1187,6 +1206,107 @@ class AgentTaskExecutor:
             SlackThread.from_task(task),
             approval_prompt_text(approval.request),
             purpose=TOOL_APPROVAL_PROMPT_PURPOSE,
+        )
+
+    def _record_planned_task_started(
+        self,
+        *,
+        task: Task,
+        task_service: TaskService,
+        progress_enabled: bool,
+    ) -> None:
+        task_service.append_event(
+            task,
+            TaskEventType.log,
+            {
+                "message": "planned_task_started",
+                "runtime": "adk",
+                "phase": "started",
+                "progress_updates_enabled": progress_enabled,
+            },
+        )
+        log_observation(
+            logger,
+            "planned_task_started",
+            task=task,
+            runtime="adk",
+            phase="started",
+            progress_updates_enabled=progress_enabled,
+        )
+
+    def _post_planned_workflow_progress(
+        self,
+        *,
+        settings: Settings,
+        session: Session,
+        task: Task,
+        task_service: TaskService,
+    ) -> None:
+        client = self.slack_client
+        if client is None:
+            client = cast(
+                SlackPostingClient,
+                WebClient(token=settings.slack_bot_token),
+            )
+        try:
+            message_ts = SlackPoster(
+                session=session,
+                client=client,
+                task_service=task_service,
+            ).post_message(
+                SlackThread.from_task(task),
+                PLANNED_WORKFLOW_PROGRESS_TEXT,
+                purpose=PLANNED_WORKFLOW_PROGRESS_PURPOSE,
+            )
+        except Exception as exc:
+            task_service.append_event(
+                task,
+                TaskEventType.error,
+                {
+                    "message": "planned_task_progress_post_failed",
+                    "runtime": "adk",
+                    "phase": "started",
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                },
+            )
+            log_observation(
+                logger,
+                "planned_task_progress_post_failed",
+                task=task,
+                runtime="adk",
+                phase="started",
+                error_type=type(exc).__name__,
+                error_summary=str(exc)[:500],
+            )
+            logger.warning(
+                "planned workflow progress post failed task_id=%s",
+                task.id,
+                exc_info=True,
+            )
+            return
+
+        task_service.append_event(
+            task,
+            TaskEventType.log,
+            {
+                "message": "planned_task_progress_posted",
+                "runtime": "adk",
+                "phase": "started",
+                "purpose": PLANNED_WORKFLOW_PROGRESS_PURPOSE,
+                "message_ts": message_ts,
+                "text_chars": len(PLANNED_WORKFLOW_PROGRESS_TEXT),
+            },
+        )
+        log_observation(
+            logger,
+            "planned_task_progress_posted",
+            task=task,
+            runtime="adk",
+            phase="started",
+            purpose=PLANNED_WORKFLOW_PROGRESS_PURPOSE,
+            message_ts=message_ts,
+            text_chars=len(PLANNED_WORKFLOW_PROGRESS_TEXT),
         )
 
     def _mark_channel_assessment_completed(

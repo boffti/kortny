@@ -430,6 +430,90 @@ def test_adk_runtime_planned_branch_tool_budget_blocks_tool_and_next_model(
             "tool": "composio_exa_search",
         }
     ]
+    planned_budget_events = [
+        payload
+        for _, payload in task_service.events
+        if payload.get("message") == "planned_task_budget_reached"
+    ]
+    assert planned_budget_events == [
+        {
+            "message": "planned_task_budget_reached",
+            "runtime": "adk",
+            "phase": "budget_reached",
+            "adk_agent_name": "planned_research_worker",
+            "adk_invocation_id": "inv-tool-budget",
+            "budget_type": "tool_calls",
+            "reason": "max_branch_tool_calls_exceeded",
+            "limit": 1,
+            "observed": 2,
+            "tool": "composio_exa_search",
+        }
+    ]
+
+
+def test_adk_runtime_records_planned_phase_events(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    set_required_settings_env(monkeypatch)
+    settings = load_settings(env_file=None)
+    task = Task(
+        id=uuid.UUID("cc53f4e1-9d72-468d-ab18-5021d9e15dad"),
+        installation_id=uuid.UUID("1c53f4e1-9d72-468d-ab18-5021d9e15dad"),
+        slack_channel_id="C123",
+        slack_thread_ts="123.456",
+        slack_user_id="U123",
+        input="Research the top James Bond movies.",
+    )
+    task_service = _FakeTaskService()
+    task_service.tasks[task.id] = task
+    runtime = AdkAgentRuntime(
+        settings=settings,
+        session=cast(Any, _FakeScalarSession([])),
+        task_service=cast(Any, task_service),
+    )
+    callback_context = SimpleNamespace(
+        agent_name="planned_research_worker",
+        invocation_id="inv-phase",
+        state={"task_id": str(task.id)},
+    )
+
+    runtime._record_planned_agent_started(cast(Any, callback_context))
+    runtime._record_adk_event(
+        task,
+        event=_FakeAdkEvent(
+            author="planned_research_worker",
+            event_id="event-branch-final",
+            invocation_id="inv-phase",
+            text="Research branch summary.",
+            final=True,
+        ),
+        event_count=9,
+    )
+
+    payloads = [payload for _, payload in task_service.events]
+    assert {
+        payload["message"]
+        for payload in payloads
+        if payload["message"].startswith("planned_task_")
+    } == {
+        "planned_task_branch_started",
+        "planned_task_branch_completed",
+    }
+    started = next(
+        payload
+        for payload in payloads
+        if payload["message"] == "planned_task_branch_started"
+    )
+    completed = next(
+        payload
+        for payload in payloads
+        if payload["message"] == "planned_task_branch_completed"
+    )
+    assert started["phase"] == "branch_started"
+    assert started["branch"] == "research"
+    assert completed["phase"] == "branch_completed"
+    assert completed["event_index"] == 9
+    assert completed["text_chars"] == len("Research branch summary.")
 
 
 def test_adk_runtime_uses_cheaper_models_for_lightweight_specialists(
@@ -718,6 +802,29 @@ class _FakeScalarSession:
         return self.rows.pop(0)
 
 
+class _FakeAdkEvent:
+    def __init__(
+        self,
+        *,
+        author: str,
+        event_id: str,
+        invocation_id: str,
+        text: str,
+        final: bool,
+    ) -> None:
+        self.author = author
+        self.id = event_id
+        self.invocation_id = invocation_id
+        self.content = genai_types.Content(
+            role="model",
+            parts=[genai_types.Part.from_text(text=text)],
+        )
+        self._final = final
+
+    def is_final_response(self) -> bool:
+        return self._final
+
+
 def set_required_settings_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in (
         "SLACK_BOT_TOKEN",
@@ -734,6 +841,7 @@ def set_required_settings_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "KORTNY_PLANNED_WORKFLOW_COST_CEILING_USD",
         "KORTNY_PLANNED_WORKFLOW_MAX_BRANCH_MODEL_CALLS",
         "KORTNY_PLANNED_WORKFLOW_MAX_BRANCH_TOOL_CALLS",
+        "KORTNY_PLANNED_WORKFLOW_PROGRESS_UPDATES_ENABLED",
         "POSTGRES_URL",
     ):
         monkeypatch.delenv(name, raising=False)

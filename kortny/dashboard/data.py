@@ -4964,6 +4964,15 @@ def _message_title(message: str) -> str:
         "memory_confirmation_posted": "Memory confirmation posted",
         "memory_write_confirmed": "Memory saved",
         "memory_write_skipped": "Memory skipped",
+        "planned_task_branch_completed": "Planned branch completed",
+        "planned_task_branch_started": "Planned branch started",
+        "planned_task_budget_reached": "Planned budget reached",
+        "planned_task_completed": "Planned task completed",
+        "planned_task_merging": "Merging planned work",
+        "planned_task_plan_ready": "Plan ready",
+        "planned_task_planning_started": "Planning started",
+        "planned_task_progress_posted": "Progress posted",
+        "planned_task_started": "Planned task started",
         "task_executor_started": "Worker started task",
         "tool_call_completed": "Tool call completed",
         "tool_call_failed": "Tool call failed",
@@ -5050,6 +5059,18 @@ def _event_summary(event_type: str, payload: dict[str, Any], message: str) -> st
         if prompt:
             return f"Started {model} with prompt {prompt}."
         return f"Started {model}."
+    if message in {
+        "planned_task_started",
+        "planned_task_planning_started",
+        "planned_task_plan_ready",
+        "planned_task_branch_started",
+        "planned_task_branch_completed",
+        "planned_task_budget_reached",
+        "planned_task_merging",
+        "planned_task_completed",
+        "planned_task_progress_posted",
+    }:
+        return _planned_task_event_summary(payload, message)
     if message:
         return _humanize_slug(message) + "."
     return "Recorded execution metadata."
@@ -5068,9 +5089,48 @@ def _summary_from_fields(
     return f"{prefix}: {', '.join(fields)}."
 
 
+def _planned_task_event_summary(payload: dict[str, Any], message: str) -> str:
+    branch = _payload_string(payload, "branch")
+    budget_type = _payload_string(payload, "budget_type")
+    limit = _payload_string(payload, "limit")
+    observed = _payload_string(payload, "observed")
+    if message == "planned_task_started":
+        return "Kortny marked this as planned work."
+    if message == "planned_task_progress_posted":
+        return "Posted a lightweight progress update in Slack."
+    if message == "planned_task_planning_started":
+        return "Started building the execution plan."
+    if message == "planned_task_plan_ready":
+        return "The planner produced a working plan."
+    if message == "planned_task_branch_started":
+        if branch:
+            return f"Started the {branch} branch."
+        return "Started a planned branch."
+    if message == "planned_task_branch_completed":
+        if branch:
+            return f"Completed the {branch} branch."
+        return "Completed a planned branch."
+    if message == "planned_task_budget_reached":
+        pieces = ["A planned branch reached its budget"]
+        if budget_type:
+            pieces.append(budget_type.replace("_", " "))
+        if observed and limit:
+            pieces.append(f"{observed}/{limit}")
+        return ". ".join(pieces) + "."
+    if message == "planned_task_merging":
+        return "Started merging planned branch findings."
+    if message == "planned_task_completed":
+        return "Completed the planned workflow result."
+    return _humanize_slug(message) + "."
+
+
 def _event_tone(event_type: str, message: str) -> str:
     if event_type == "error" or message.endswith("_failed"):
         return "danger"
+    if message == "planned_task_budget_reached":
+        return "warning"
+    if message.startswith("planned_task_"):
+        return "accent"
     if event_type in {"llm_call", "tool_call", "tool_result"}:
         return "accent"
     if event_type in {"artifact_created", "message_posted"}:
@@ -5092,6 +5152,9 @@ def _event_badges(
         ("tool", "accent"),
         ("status", "warning"),
         ("to", "warning"),
+        ("phase", "accent"),
+        ("branch", "accent"),
+        ("budget_type", "warning"),
         ("purpose", "neutral"),
         ("error_type", "danger"),
     ):
@@ -5125,6 +5188,11 @@ def _event_metrics(
         "thread_ts",
         "message_ts",
         "phase",
+        "branch",
+        "budget_type",
+        "reason",
+        "limit",
+        "observed",
     )
     metrics: list[TimelineMetric] = []
     for key in keys:
@@ -5173,6 +5241,8 @@ _NUMERIC_PAYLOAD_KEYS = frozenset(
         "selected_count",
         "size_bytes",
         "turn",
+        "limit",
+        "observed",
     }
 )
 

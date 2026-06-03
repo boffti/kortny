@@ -36,6 +36,9 @@ from kortny.db.models import (
     KnowledgeGraphEntity,
     KnowledgeGraphEvidence,
     LLMUsage,
+    ObserveChannelProfile,
+    ProceduralSkillInvocation,
+    ProceduralSkillVersion,
     SlackChannelMembership,
     SlackIdentity,
     Task,
@@ -390,6 +393,24 @@ class DashboardOverview:
     system_health: SystemHealth
     window_label: str
     refreshed_at: datetime
+    active_facts: tuple[MemoryFactRow, ...]
+    skill_usage: tuple[OverviewSkillUsageRow, ...]
+    channel_profiles: tuple[OverviewChannelProfileRow, ...]
+
+
+@dataclass(frozen=True)
+class OverviewChannelProfileRow:
+    channel: IdentityLabel
+    summary: str | None
+    message_count: int
+    updated_at: datetime
+
+
+@dataclass(frozen=True)
+class OverviewSkillUsageRow:
+    name: str
+    description: str | None
+    invocation_count: int
 
 
 @dataclass(frozen=True)
@@ -1283,6 +1304,69 @@ def get_dashboard_overview(
     )
     recent_tasks = list_tasks(session, page=1, page_size=10)
 
+    # 1. Fetch top 5 active facts
+    _, _, active_facts = _memory_fact_rows(
+        session,
+        query="",
+        scope_filter="all",
+        status_filter="active",
+        sort="newest",
+        page=1,
+        page_size=5,
+    )
+
+    # 2. Fetch active channel profiles
+    profiles = tuple(
+        session.scalars(
+            select(ObserveChannelProfile)
+            .where(ObserveChannelProfile.profile_status == "active")
+            .order_by(ObserveChannelProfile.updated_at.desc())
+            .limit(5)
+        )
+    )
+    profile_identities = _identity_map_from_keys(
+        session,
+        ((cp.installation_id, "channel", cp.channel_id) for cp in profiles),
+    )
+    channel_profiles = tuple(
+        OverviewChannelProfileRow(
+            channel=_identity_label(
+                profile_identities,
+                installation_id=cp.installation_id,
+                kind="channel",
+                slack_id=cp.channel_id,
+            ),
+            summary=cp.summary,
+            message_count=cp.message_count,
+            updated_at=cp.updated_at,
+        )
+        for cp in profiles
+    )
+
+    # 3. Fetch skill usage stats
+    skill_rows = session.execute(
+        select(
+            ProceduralSkillVersion.name,
+            ProceduralSkillVersion.description,
+            func.count(ProceduralSkillInvocation.id).label("count"),
+        )
+        .join(
+            ProceduralSkillVersion,
+            ProceduralSkillVersion.id == ProceduralSkillInvocation.skill_version_id,
+        )
+        .group_by(ProceduralSkillVersion.name, ProceduralSkillVersion.description)
+        .order_by(func.count(ProceduralSkillInvocation.id).desc())
+        .limit(5)
+    ).all()
+    skill_usage = tuple(
+        OverviewSkillUsageRow(
+            name=row[0],
+            description=row[1],
+            invocation_count=int(row[2]),
+        )
+        for row in skill_rows
+    )
+
     return DashboardOverview(
         metrics=metrics,
         attention_items=attention_items,
@@ -1294,6 +1378,9 @@ def get_dashboard_overview(
         system_health=system_health,
         window_label="Last 7 days",
         refreshed_at=current,
+        active_facts=active_facts,
+        skill_usage=skill_usage,
+        channel_profiles=channel_profiles,
     )
 
 
@@ -3710,7 +3797,9 @@ def _kg_graph_map(
         )
 
     if not entities:
-        return KnowledgeGraphMap(nodes=(), edges=(), empty=True, node_count=0, edge_count=0)
+        return KnowledgeGraphMap(
+            nodes=(), edges=(), empty=True, node_count=0, edge_count=0
+        )
 
     positions = _kg_graph_positions(len(entities))
     entity_ids = [entity.id for entity in entities]
@@ -3843,7 +3932,9 @@ def _kg_graph_from_entity_filters(
         session.scalars(
             select(KnowledgeGraphEdge)
             .where(*edge_filters)
-            .order_by(KnowledgeGraphEdge.updated_at.desc(), KnowledgeGraphEdge.id.desc())
+            .order_by(
+                KnowledgeGraphEdge.updated_at.desc(), KnowledgeGraphEdge.id.desc()
+            )
             .limit(KG_GRAPH_EDGE_LIMIT)
         )
     )
@@ -3856,7 +3947,9 @@ def _kg_graph_from_entity_filters(
                 continue
             entity_ids.append(entity_id)
     entities_by_id = _kg_entities_by_id(session, entity_ids)
-    entities = tuple(entity for entity_id in entity_ids if (entity := entities_by_id.get(entity_id)))
+    entities = tuple(
+        entity for entity_id in entity_ids if (entity := entities_by_id.get(entity_id))
+    )
     return entities, tuple(edges)
 
 
@@ -3900,7 +3993,9 @@ def _kg_graph_from_relationship_filters(
                 continue
             entity_ids.append(entity_id)
     entities_by_id = _kg_entities_by_id(session, entity_ids)
-    entities = tuple(entity for entity_id in entity_ids if (entity := entities_by_id.get(entity_id)))
+    entities = tuple(
+        entity for entity_id in entity_ids if (entity := entities_by_id.get(entity_id))
+    )
     return entities, tuple(edges)
 
 
@@ -3915,8 +4010,14 @@ def _kg_graph_positions(count: int) -> tuple[tuple[int, int], ...]:
     radius_y = 150 if count > 8 else 128
     return tuple(
         (
-            int(center_x + math.cos((-math.pi / 2) + ((2 * math.pi * index) / count)) * radius_x),
-            int(center_y + math.sin((-math.pi / 2) + ((2 * math.pi * index) / count)) * radius_y),
+            int(
+                center_x
+                + math.cos((-math.pi / 2) + ((2 * math.pi * index) / count)) * radius_x
+            ),
+            int(
+                center_y
+                + math.sin((-math.pi / 2) + ((2 * math.pi * index) / count)) * radius_y
+            ),
         )
         for index in range(count)
     )

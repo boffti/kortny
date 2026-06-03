@@ -1,3 +1,5 @@
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:ital,wght@0,300..800;1,300..800&display=swap');
+
 :root {
   color-scheme: light;
   --background: #f5f7f4;
@@ -21,8 +23,9 @@
   --warning-bg: #fff2cf;
   --destructive: #b42318;
   --destructive-bg: #ffe4e2;
-  --radius: 8px;
-  --shadow: 0 1px 2px rgb(21 24 26 / 8%);
+  --radius: 12px;
+  --shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.04), 0 1px 2px -1px rgba(0, 0, 0, 0.04), 0 4px 6px -1px rgba(0, 0, 0, 0.02);
+  --card-border: rgba(0, 0, 0, 0.06);
   --primary-hover: #24262a;
   --table-row-hover: #f9fbf8;
   --code-background: #15181a;
@@ -44,6 +47,9 @@
   --pill-category-bg: rgb(14 116 144 / 10%);
   --pill-category-border: rgb(14 116 144 / 24%);
   --login-glow: rgb(25 133 103 / 10%);
+  --glass-bg: rgba(255, 255, 255, 0.72);
+  --glass-border: rgba(0, 0, 0, 0.06);
+  --glass-blur: blur(16px);
 }
 
 [data-theme="dark"] {
@@ -69,7 +75,8 @@
   --warning-bg: rgb(242 198 109 / 16%);
   --destructive: #ff8a80;
   --destructive-bg: rgb(255 138 128 / 16%);
-  --shadow: 0 1px 2px rgb(0 0 0 / 28%);
+  --shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px -1px rgba(0, 0, 0, 0.1), 0 4px 6px -1px rgba(0, 0, 0, 0.05);
+  --card-border: rgba(255, 255, 255, 0.06);
   --primary-hover: #dfd9cf;
   --table-row-hover: #1f1d1a;
   --code-background: #090908;
@@ -91,6 +98,9 @@
   --pill-category-bg: rgb(103 232 249 / 12%);
   --pill-category-border: rgb(103 232 249 / 26%);
   --login-glow: rgb(57 185 139 / 12%);
+  --glass-bg: rgba(28, 32, 33, 0.75);
+  --glass-border: rgba(255, 255, 255, 0.05);
+  --glass-blur: blur(16px);
 }
 
 * {
@@ -105,7 +115,7 @@ body {
   margin: 0;
   background: var(--background);
   color: var(--foreground);
-  font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font: 14px/1.5 "Plus Jakarta Sans", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   text-rendering: optimizeLegibility;
 }
 
@@ -162,8 +172,10 @@ caption {
 }
 
 .sidebar {
-  background: color-mix(in srgb, var(--card) 94%, transparent);
-  border-right: 1px solid var(--border);
+  background: var(--glass-bg);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  border-right: 1px solid var(--glass-border);
   display: flex;
   flex-direction: column;
   height: 100dvh;
@@ -212,14 +224,17 @@ caption {
 }
 
 .nav-item {
-  border-radius: 6px;
+  border-radius: 8px;
   color: var(--muted-foreground);
   display: flex;
   font-weight: 500;
   min-height: 36px;
   place-items: center start;
   padding: 8px 10px;
-  transition: background-color 160ms ease, color 160ms ease;
+  transition: background-color 0.2s cubic-bezier(0.4, 0, 0.2, 1), color 0.2s cubic-bezier(0.4, 0, 0.2, 1), transform 0.15s ease;
+}
+.nav-item:active {
+  transform: scale(0.98);
 }
 
 .nav-item:hover,
@@ -323,8 +338,9 @@ caption {
 
 .shell {
   margin: 0 auto;
-  max-width: 1180px;
-  padding: 28px 24px 48px;
+  max-width: 1600px;
+  width: 100%;
+  padding: 32px clamp(20px, 4vw, 48px) 64px;
 }
 
 .page-heading {
@@ -377,7 +393,7 @@ p {
 .btn,
 .btn-ghost {
   align-items: center;
-  border-radius: 6px;
+  border-radius: 8px;
   cursor: pointer;
   display: inline-flex;
   font: inherit;
@@ -385,8 +401,12 @@ p {
   justify-content: center;
   min-height: 36px;
   padding: 8px 12px;
-  transition: background-color 160ms ease, border-color 160ms ease, color 160ms ease;
+  transition: background-color 0.2s cubic-bezier(0.4, 0, 0.2, 1), border-color 0.2s cubic-bezier(0.4, 0, 0.2, 1), color 0.2s cubic-bezier(0.4, 0, 0.2, 1), transform 0.15s ease;
   white-space: nowrap;
+}
+.btn:active,
+.btn-ghost:active {
+  transform: scale(0.97);
 }
 
 .btn {
@@ -435,10 +455,11 @@ p {
 
 .card {
   background: var(--card);
-  border: 1px solid var(--border);
+  border: 1px solid var(--card-border);
   border-radius: var(--radius);
   box-shadow: var(--shadow);
   color: var(--card-foreground);
+  transition: box-shadow 0.2s cubic-bezier(0.4, 0, 0.2, 1), border-color 0.2s cubic-bezier(0.4, 0, 0.2, 1), transform 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .data-toolbar {
@@ -4475,8 +4496,10 @@ pre {
   }
 
   .mobile-bar {
-    background: color-mix(in srgb, var(--card) 94%, transparent);
-    border-bottom: 1px solid var(--border);
+    background: var(--glass-bg);
+    backdrop-filter: var(--glass-blur);
+    -webkit-backdrop-filter: var(--glass-blur);
+    border-bottom: 1px solid var(--glass-border);
     display: grid;
     gap: 10px;
     padding: 14px 18px;
@@ -5183,4 +5206,96 @@ pre {
   display: flex;
   justify-content: center;
   margin-top: 24px;
+}
+
+/* Insights Grid Layout */
+.insights-grid {
+  display: grid;
+  gap: 20px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-bottom: 20px;
+}
+
+@media (max-width: 1024px) {
+  .insights-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.insight-card {
+  display: flex;
+  flex-direction: column;
+}
+
+.insight-list {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+}
+
+.insight-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+  transition: background-color 0.16s ease;
+}
+
+.insight-row:last-child {
+  border-bottom: 0;
+}
+
+.insight-row:hover {
+  background: var(--table-row-hover);
+}
+
+.insight-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  flex: 1;
+}
+
+.insight-meta strong {
+  color: var(--foreground);
+  font-size: 14px;
+}
+
+.insight-meta code {
+  color: var(--accent);
+  background: var(--muted);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 12px;
+  width: fit-content;
+}
+
+.desc-line {
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 1.4;
+  margin: 0;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.channel-row {
+  align-items: flex-start;
+}
+
+.channel-badge {
+  width: fit-content;
+  font-family: monospace;
+}
+
+.insight-empty {
+  padding: 24px;
+  text-align: center;
+  color: var(--muted-foreground);
 }

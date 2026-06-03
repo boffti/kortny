@@ -96,6 +96,71 @@
     </article>
   </section>
 
+  <section class="insights-grid" aria-label="System insights">
+    <!-- Skills Card -->
+    <article class="card insight-card skills-card">
+      <header>
+        <h2>Agent Skills</h2>
+        <p>Execution routines and invocation counts.</p>
+      </header>
+      <div class="insight-list">
+        {% for skill in overview.skill_usage %}
+          <div class="insight-row">
+            <div class="insight-meta">
+              <strong>{{ skill.name }}</strong>
+              <p class="desc-line">{{ skill.description }}</p>
+            </div>
+            <span class="badge badge-neutral num">{{ skill.invocation_count|number }} calls</span>
+          </div>
+        {% else %}
+          <p class="empty insight-empty">No procedural skills executed yet.</p>
+        {% endfor %}
+      </div>
+    </article>
+
+    <!-- Channel Profiles Card -->
+    <article class="card insight-card profiles-card">
+      <header>
+        <h2>Channel Profiles</h2>
+        <p>Kortny's observational mappings in channels.</p>
+      </header>
+      <div class="insight-list">
+        {% for cp in overview.channel_profiles %}
+          <div class="insight-row channel-row">
+            <div class="insight-meta">
+              <span class="badge badge-neutral channel-badge">{{ cp.channel.name or cp.channel.slack_id }}</span>
+              <p class="desc-line">{{ cp.summary }}</p>
+            </div>
+            <span class="badge badge-accent num">{{ cp.message_count|number }} msgs</span>
+          </div>
+        {% else %}
+          <p class="empty insight-empty">No active channel profiles compiled yet.</p>
+        {% endfor %}
+      </div>
+    </article>
+
+    <!-- Memory Facts Card -->
+    <article class="card insight-card memory-card-panel">
+      <header>
+        <h2>Active Memory</h2>
+        <p>Current behavior guidelines from workspace facts.</p>
+      </header>
+      <div class="insight-list">
+        {% for fact_row in overview.active_facts %}
+          <div class="insight-row">
+            <div class="insight-meta">
+              <code>{{ fact_row.fact.key }}</code>
+              <p class="desc-line">{{ fact_row.value_summary }}</p>
+            </div>
+            <span class="badge badge-success">{{ fact_row.fact.status }}</span>
+          </div>
+        {% else %}
+          <p class="empty insight-empty">No active behavior policies proposed yet.</p>
+        {% endfor %}
+      </div>
+    </article>
+  </section>
+
   <section class="card detail-section">
     <header class="section-header-row">
       <div>

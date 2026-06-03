@@ -26,6 +26,7 @@ class EvidenceKind(StrEnum):
 
     tool_result = "tool_result"
     memory = "memory"
+    workspace_graph = "workspace_graph"
     artifact = "artifact"
     approval = "approval"
     error = "error"

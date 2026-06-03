@@ -71,7 +71,7 @@ from kortny.slack.reactions import (
     ACK_REACTION_ADDED_MESSAGE,
     ACK_REACTION_REMOVED_MESSAGE,
 )
-from kortny.slack.synthesis import SynthesisOutcome
+from kortny.slack.synthesis import EvidenceKind, EvidenceTrust, SynthesisOutcome
 from kortny.tasks import TaskService
 from kortny.tools import ToolResult
 from kortny.tools.types import JsonObject, JsonSchema
@@ -1729,6 +1729,119 @@ def test_synthesis_context_marks_memory_no_result_from_tool_evidence(
     assert synthesis_context.evidence[0].trust == "trusted"
     assert synthesis_context.evidence[0].metadata["forgotten_count"] == 0
     assert "Do not claim the requested item was found or changed." in (
+        synthesis_context.forbidden_claims
+    )
+
+
+def test_synthesis_context_uses_graph_profile_despite_memory_no_match(
+    db_session: Session,
+) -> None:
+    task = create_task(db_session, event_id="EvGraphProfileWithMemoryMiss")
+    task.input = "what do you know about how this channel is used, and why?"
+    service = TaskService(db_session)
+    service.append_event(
+        task,
+        TaskEventType.tool_call,
+        {
+            "tool_call_id": "call-graph-profile",
+            "tool": "query_workspace_graph",
+            "argument_keys": ["anchor_keys", "include_evidence"],
+        },
+    )
+    service.append_event(
+        task,
+        TaskEventType.tool_result,
+        {
+            "tool_call_id": "call-graph-profile",
+            "tool": "query_workspace_graph",
+            "output": {
+                "successful": True,
+                "destination": {
+                    "surface_type": "private_channel",
+                    "surface_id": "C123",
+                    "user_id": None,
+                },
+                "entity_count": 2,
+                "edge_count": 1,
+                "omitted_count": 0,
+                "omitted_reasons": [],
+                "entities": [
+                    {
+                        "canonical_key": "slack_channel:C123",
+                        "display_name": "#rag",
+                        "entity_type": "channel",
+                        "confidence_score": "0.900",
+                        "evidence_count": 1,
+                    },
+                    {
+                        "canonical_key": "channel_profile:C123",
+                        "display_name": "AI assistant testing and project management",
+                        "entity_type": "firm_fact",
+                        "confidence_score": "0.700",
+                        "evidence_count": 4,
+                    },
+                ],
+                "relationships": [
+                    {
+                        "source_label": "#rag",
+                        "target_label": "AI assistant testing and project management",
+                        "relationship_type": "relates_to",
+                        "confidence_score": "0.700",
+                    }
+                ],
+            },
+            "artifact_count": 0,
+        },
+    )
+    service.append_event(
+        task,
+        TaskEventType.tool_call,
+        {
+            "tool_call_id": "call-recall-channel-note",
+            "tool": "recall_fact",
+            "argument_keys": ["key"],
+        },
+    )
+    service.append_event(
+        task,
+        TaskEventType.tool_result,
+        {
+            "tool_call_id": "call-recall-channel-note",
+            "tool": "recall_fact",
+            "output": {
+                "key": "channel_usage_summary",
+                "found": False,
+            },
+            "artifact_count": 0,
+        },
+    )
+    raw_answer = (
+        "This channel looks like an AI assistant testing and project management "
+        "space. I believe that because the channel profile and recent messages "
+        "point to Linear task lookups, tool comparisons, and policy decisions."
+    )
+
+    response_record = build_response_record(
+        session=db_session,
+        task=task,
+        raw_text=raw_answer,
+    )
+    synthesis_context = build_synthesis_context(
+        session=db_session,
+        task=task,
+        raw_text=raw_answer,
+        response_record=response_record,
+    )
+
+    assert response_record.response_mode.value == "context_answer"
+    assert response_record.response_shape.shape.value == "context_profile"
+    assert synthesis_context.outcome is SynthesisOutcome.ok
+    assert synthesis_context.outcome_reason == "task completed with user-facing answer"
+    assert synthesis_context.evidence[0].kind is EvidenceKind.workspace_graph
+    assert synthesis_context.evidence[0].trust is EvidenceTrust.trusted
+    assert "AI assistant testing" in synthesis_context.evidence[0].content
+    assert "No active memory fact" in synthesis_context.evidence[1].content
+    assert "Do not claim the requested item was found or changed." not in (
         synthesis_context.forbidden_claims
     )
 

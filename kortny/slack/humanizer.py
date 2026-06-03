@@ -73,6 +73,10 @@ Rules:
 - For memory no-match cases, use normal coworker language: say Kortny checked
   what it remembers, does not see that saved right now, and has nothing to
   remove. Do not expose raw tool phrases.
+- For context_profile responses, answer as a workspace-aware coworker. Explain
+  what Kortny knows, why Kortny believes it, and the confidence/limits in
+  natural language. Do not lead with implementation terms like "workspace graph"
+  unless the user specifically asks about internals.
 - Use Slack mrkdwn: *bold*, simple bullets, and <https://url|label> links.
 - Do not use Markdown headings with #.
 - Avoid repetitive endings like "If you want..." unless a next step is
@@ -97,6 +101,9 @@ HUMANIZER_LEAK_MARKERS = frozenset(
         "response_record",
     }
 )
+MEMORY_TOOL_NAMES = frozenset(
+    {"remember_fact", "recall_fact", "inspect_memory", "forget_fact"}
+)
 logger = logging.getLogger(__name__)
 
 
@@ -109,6 +116,7 @@ class ResponseMode(StrEnum):
     artifact_delivery = "artifact_delivery"
     failure_recovery = "failure_recovery"
     memory_recall = "memory_recall"
+    context_answer = "context_answer"
     multi_step_recap = "multi_step_recap"
 
 
@@ -122,6 +130,7 @@ class ResponseShape(StrEnum):
     file_review = "file_review"
     document_delivery = "document_delivery"
     memory_note = "memory_note"
+    context_profile = "context_profile"
     status_recap = "status_recap"
     failure_note = "failure_note"
 
@@ -884,6 +893,9 @@ def _synthesis_tool_content(tool: str, output: object) -> str | None:
                 return f"Proposed memory fact {key} for confirmation: {value_text}"
             return f"Proposed memory fact {key} for confirmation."
 
+    if tool == "query_workspace_graph":
+        return _workspace_graph_summary(output)
+
     summary = _string(output.get("summary")) or _string(output.get("message"))
     if summary:
         return summary
@@ -901,6 +913,97 @@ def _memory_fact_summary(fact: JsonObject) -> str | None:
     if key:
         return key
     return value_text
+
+
+def _workspace_graph_summary(output: JsonObject) -> str:
+    entity_count = _optional_int(output.get("entity_count")) or 0
+    edge_count = _optional_int(output.get("edge_count")) or 0
+    destination = output.get("destination")
+    destination_label = _workspace_graph_destination_label(destination)
+    omitted_reasons = _string_list(output.get("omitted_reasons"))
+    if entity_count == 0 and edge_count == 0:
+        if omitted_reasons:
+            return (
+                f"Workspace context lookup for {destination_label} returned no "
+                f"visible active graph rows ({', '.join(omitted_reasons)})."
+            )
+        return (
+            f"Workspace context lookup for {destination_label} returned no "
+            "visible active graph rows."
+        )
+
+    entity_bits = [
+        bit
+        for entity in output.get("entities", [])[:6]
+        if isinstance(entity, dict)
+        if (bit := _workspace_graph_entity_bit(entity)) is not None
+    ]
+    relationship_bits = [
+        bit
+        for relationship in output.get("relationships", [])[:4]
+        if isinstance(relationship, dict)
+        if (bit := _workspace_graph_relationship_bit(relationship)) is not None
+    ]
+    pieces = [
+        (
+            f"Workspace context lookup for {destination_label} returned "
+            f"{entity_count} active graph {_plural('entity', entity_count)} "
+            f"and {edge_count} {_plural('relationship', edge_count)}."
+        )
+    ]
+    if entity_bits:
+        pieces.append("Entities: " + "; ".join(entity_bits))
+    if relationship_bits:
+        pieces.append("Relationships: " + "; ".join(relationship_bits))
+    if omitted_reasons:
+        pieces.append("Limits: " + ", ".join(omitted_reasons))
+    return " ".join(pieces)
+
+
+def _workspace_graph_destination_label(destination: object) -> str:
+    if not isinstance(destination, dict):
+        return "this Slack surface"
+    surface_type = _string(destination.get("surface_type")) or "surface"
+    surface_id = _string(destination.get("surface_id"))
+    if surface_id:
+        return f"{surface_type} {surface_id}"
+    return surface_type
+
+
+def _workspace_graph_entity_bit(entity: JsonObject) -> str | None:
+    label = _string(entity.get("display_name")) or _string(entity.get("canonical_key"))
+    entity_type = _string(entity.get("entity_type"))
+    confidence = _string(entity.get("confidence_score"))
+    evidence_count = _optional_int(entity.get("evidence_count"))
+    if label is None:
+        return None
+    suffixes: list[str] = []
+    if entity_type:
+        suffixes.append(entity_type)
+    if confidence:
+        suffixes.append(f"confidence {confidence}")
+    if evidence_count:
+        suffixes.append(f"{evidence_count} evidence item(s)")
+    if suffixes:
+        return f"{label} ({', '.join(suffixes)})"
+    return label
+
+
+def _workspace_graph_relationship_bit(relationship: JsonObject) -> str | None:
+    source = _string(relationship.get("source_label"))
+    target = _string(relationship.get("target_label"))
+    relationship_type = _string(relationship.get("relationship_type"))
+    confidence = _string(relationship.get("confidence_score"))
+    if source is None or target is None or relationship_type is None:
+        return None
+    bit = f"{source} {relationship_type} {target}"
+    if confidence:
+        bit += f" (confidence {confidence})"
+    return bit
+
+
+def _plural(noun: str, count: int) -> str:
+    return noun if count == 1 else f"{noun}s"
 
 
 def _result_titles(value: object) -> list[str]:
@@ -924,13 +1027,17 @@ def _result_titles(value: object) -> list[str]:
 
 
 def _evidence_kind_for_tool(tool: str) -> EvidenceKind:
-    if tool in {"remember_fact", "recall_fact", "inspect_memory", "forget_fact"}:
+    if tool == "query_workspace_graph":
+        return EvidenceKind.workspace_graph
+    if tool in MEMORY_TOOL_NAMES:
         return EvidenceKind.memory
     return EvidenceKind.tool_result
 
 
 def _trust_for_tool(tool: str) -> EvidenceTrust:
-    if tool in {"remember_fact", "recall_fact", "inspect_memory", "forget_fact"}:
+    if tool == "query_workspace_graph":
+        return EvidenceTrust.trusted
+    if tool in MEMORY_TOOL_NAMES:
         return EvidenceTrust.trusted
     return EvidenceTrust.untrusted
 
@@ -959,6 +1066,11 @@ def _synthesis_tool_metadata(payload: JsonObject, output: object) -> JsonObject:
             "forgotten_count",
             "status",
             "successful",
+            "entity_count",
+            "edge_count",
+            "destination",
+            "omitted_count",
+            "omitted_reasons",
         ):
             if key in output:
                 metadata[key] = output[key]
@@ -1015,7 +1127,9 @@ def _select_synthesis_outcome(
 ) -> tuple[SynthesisOutcome, str]:
     if any(approval.status in {"required", "waiting"} for approval in approvals):
         return SynthesisOutcome.needs_approval, "tool approval is pending"
-    if _has_no_result_signal(events):
+    if _has_no_result_signal(events) and _no_result_signal_is_terminal(
+        response_record
+    ):
         return SynthesisOutcome.no_result, "tool evidence reported no matching result"
     if response_record.failures and response_record.actions_taken:
         return (
@@ -1045,6 +1159,20 @@ def _has_no_result_signal(events: Sequence[TaskEvent]) -> bool:
         if tool == "inspect_memory" and output.get("count") == 0:
             return True
     return False
+
+
+def _no_result_signal_is_terminal(response_record: ResponseRecord) -> bool:
+    """Return whether a no-match tool result should dominate synthesis.
+
+    Memory no-match is terminal for direct memory operations like "forget X" or
+    "recall Y". It is not terminal for context/profile answers where memory is
+    only one evidence source alongside graph, Slack history, or other tools.
+    """
+
+    if response_record.response_mode is not ResponseMode.memory_recall:
+        return False
+    tool_names = {action.tool for action in response_record.actions_taken}
+    return bool(tool_names) and tool_names.issubset(MEMORY_TOOL_NAMES)
 
 
 def _synthesis_uncertainty(
@@ -1176,7 +1304,9 @@ def _select_response_mode(
         return ResponseMode.failure_recovery
     if "slack_file_read" in tool_names:
         return ResponseMode.file_analysis
-    if tool_names & {"remember_fact", "recall_fact", "inspect_memory", "forget_fact"}:
+    if "query_workspace_graph" in tool_names:
+        return ResponseMode.context_answer
+    if tool_names & MEMORY_TOOL_NAMES:
         return ResponseMode.memory_recall
     if _has_research_evidence(tool_names, evidence):
         return ResponseMode.research_summary
@@ -1215,6 +1345,12 @@ def _select_response_shape(
         return _shape_profile(
             ResponseShape.memory_note,
             selected_reason="task is about memory recall or memory state",
+            framework_hint=framework_hint,
+        )
+    if response_mode is ResponseMode.context_answer:
+        return _shape_profile(
+            ResponseShape.context_profile,
+            selected_reason="task uses workspace context or graph-backed profile evidence",
             framework_hint=framework_hint,
         )
     if _is_comparison_request(request):
@@ -1380,6 +1516,28 @@ def _shape_profile(
             ],
             quality_checks=["memory scope is clear"],
             avoid=["raw ids unless necessary", "raw tool-result phrasing"],
+        )
+    if shape is ResponseShape.context_profile:
+        return ResponseShapeProfile(
+            shape=shape,
+            label="Context profile",
+            selected_reason=selected_reason,
+            framework_hint=framework_hint,
+            required_elements=[
+                "what_kortny_knows",
+                "why_kortny_believes_it",
+                "confidence_or_limits",
+            ],
+            quality_checks=[
+                "clearly separates observed activity from inferred profile",
+                "uses provenance naturally instead of implementation labels",
+                "does not overstate stale or thin context",
+            ],
+            avoid=[
+                "starting with graph internals",
+                "raw ids unless needed for disambiguation",
+                "claiming remembered facts were found when only history was used",
+            ],
         )
     if shape is ResponseShape.failure_note:
         return ResponseShapeProfile(

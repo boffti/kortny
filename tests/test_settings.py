@@ -19,6 +19,10 @@ SETTINGS_ENV_VARS = {
     "KORTNY_PLANNED_WORKFLOWS_ENABLED",
     "KORTNY_PLANNED_WORKFLOW_MAX_PARALLEL_BRANCHES",
     "KORTNY_PLANNED_WORKFLOW_COST_CEILING_USD",
+    "KORTNY_PLANNED_WORKFLOW_MAX_BRANCH_MODEL_CALLS",
+    "KORTNY_PLANNED_WORKFLOW_MAX_BRANCH_TOOL_CALLS",
+    "KORTNY_PLANNED_WORKFLOW_MAX_TOTAL_TOOL_CALLS",
+    "KORTNY_PLANNED_WORKFLOW_PROGRESS_UPDATES_ENABLED",
     "KORTNY_WORKFLOW_BACKEND",
     "TEMPORAL_ADDRESS",
     "TEMPORAL_NAMESPACE",
@@ -78,6 +82,9 @@ def test_settings_loads_required_environment(monkeypatch: pytest.MonkeyPatch) ->
     assert settings.planned_workflows_enabled is True
     assert settings.planned_workflow_max_parallel_branches == 3
     assert settings.planned_workflow_cost_ceiling_usd == 0.75
+    assert settings.planned_workflow_max_branch_model_calls == 3
+    assert settings.planned_workflow_max_branch_tool_calls == 8
+    assert settings.planned_workflow_max_total_tool_calls == 12
     assert settings.workflow_backend == "inline"
     assert settings.temporal_address == "temporal:7233"
     assert settings.temporal_namespace == "default"
@@ -115,6 +122,7 @@ def test_settings_loads_optional_environment(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setenv("KORTNY_PLANNED_WORKFLOW_COST_CEILING_USD", "1.25")
     monkeypatch.setenv("KORTNY_PLANNED_WORKFLOW_MAX_BRANCH_MODEL_CALLS", "5")
     monkeypatch.setenv("KORTNY_PLANNED_WORKFLOW_MAX_BRANCH_TOOL_CALLS", "13")
+    monkeypatch.setenv("KORTNY_PLANNED_WORKFLOW_MAX_TOTAL_TOOL_CALLS", "21")
     monkeypatch.setenv("KORTNY_PLANNED_WORKFLOW_PROGRESS_UPDATES_ENABLED", "false")
     monkeypatch.setenv("KORTNY_WORKFLOW_BACKEND", "temporal")
     monkeypatch.setenv("TEMPORAL_ADDRESS", "temporal.example:7233")
@@ -153,6 +161,7 @@ def test_settings_loads_optional_environment(monkeypatch: pytest.MonkeyPatch) ->
     assert settings.planned_workflow_cost_ceiling_usd == 1.25
     assert settings.planned_workflow_max_branch_model_calls == 5
     assert settings.planned_workflow_max_branch_tool_calls == 13
+    assert settings.planned_workflow_max_total_tool_calls == 21
     assert settings.planned_workflow_progress_updates_enabled is False
     assert settings.workflow_backend == "temporal"
     assert settings.temporal_address == "temporal.example:7233"

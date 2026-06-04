@@ -7,7 +7,7 @@ import logging
 import os
 import re
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, MutableMapping
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from decimal import ROUND_HALF_UP, Decimal
@@ -81,7 +81,11 @@ ADK_PLANNED_BRANCH_AGENT_NAMES = frozenset(
 ADK_BRANCH_BUDGET_BLOCKED_PREFIX = "adk_budget_blocked:"
 ADK_BRANCH_MODEL_CALLS_PREFIX = "adk_model_calls:"
 ADK_BRANCH_TOOL_CALLS_PREFIX = "adk_tool_calls:"
+ADK_TOTAL_TOOL_CALLS_KEY = "adk_total_tool_calls"
+ADK_GLOBAL_BUDGET_BLOCKED_KEY = "adk_budget_blocked:planned_workflow"
 ADK_BRANCH_BUDGET_EVENT_PREFIX = "adk_budget_event_recorded:"
+ADK_PLANNED_BUDGET_SUMMARY_KEY = "planned_budget_summary"
+ADK_PLANNED_BUDGET_DEFAULT_SUMMARY = "No planned workflow budget caps reached."
 ADK_PHASE_EVENT_PREFIX = "adk_phase_event_recorded:"
 ADK_SINGLE_PERSONA_PROMPT = """User-facing identity rules:
 - Speak as Kortny, a single Slack-native coworker. Use first person when
@@ -216,6 +220,9 @@ Return compact JSON-shaped text with:
 Rules:
 - Do not execute the task yourself.
 - Prefer 2-3 independent subtasks when the work can be parallelized.
+- Use the planned workflow budget context as hard execution guidance.
+- Give each subtask narrow stop criteria. Favor "enough evidence for the
+  recommendation" over exhaustive lookup.
 - Respect Kortny's approval, tenant, and visibility boundaries.
 - Mark write/destructive subtasks as requires_approval=true.
 - Keep the plan short enough for Slack trace review.
@@ -231,7 +238,9 @@ facts, caveats, and source/tool provenance.
 
 Stop once you have enough evidence for a useful branch result. Prefer a small
 set of high-signal searches over exhaustive movie-by-movie or item-by-item
-lookup.
+lookup. Respect the planned workflow budget context; if a budget cap is reached,
+summarize what you found and what remains uncertain instead of trying another
+route.
 """
 ADK_PLANNED_WORKSPACE_BRANCH_PROMPT = """You are Kortny's planned workflow workspace branch.
 
@@ -243,7 +252,9 @@ Use the plan in {planned_workflow_plan}. Store a concise branch result with
 facts, caveats, and source/tool provenance.
 
 Stop once you have enough evidence for a useful branch result. Prefer a small
-set of high-signal checks over exhaustive lookup.
+set of high-signal checks over exhaustive lookup. Respect the planned workflow
+budget context; if a budget cap is reached, summarize what you found and what
+remains uncertain instead of trying another route.
 """
 ADK_PLANNED_INTEGRATION_BRANCH_PROMPT = """You are Kortny's planned workflow integration branch.
 
@@ -256,7 +267,9 @@ Use the plan in {planned_workflow_plan}. Store a concise branch result with
 facts, caveats, and source/tool provenance.
 
 Stop once you have enough evidence for a useful branch result. Prefer a small
-set of high-signal integration checks over exhaustive lookup.
+set of high-signal integration checks over exhaustive lookup. Respect the
+planned workflow budget context; if a budget cap is reached, summarize what you
+found and what remains uncertain instead of trying another route.
 """
 ADK_PLANNED_WORKFLOW_MERGER_PROMPT = """You are Kortny's planned workflow merger.
 
@@ -267,9 +280,12 @@ Inputs:
 - Research branch: {planned_research_result}
 - Workspace branch: {planned_workspace_result}
 - Integration branch: {planned_integration_result}
+- Budget notes: {planned_budget_summary}
 
 Rules:
 - Preserve what worked, what failed, and uncertainty.
+- If budget notes show a cap was reached, mention the limitation only when it
+  materially affects confidence or completeness.
 - Do not claim a source or tool was checked unless a branch actually says it was.
 - Keep the answer concise unless the user asked for depth.
 - Speak as Kortny, not as a workflow, branch, runtime, or agent.
@@ -398,6 +414,7 @@ class AdkAgentRuntime:
                 "slack_user_id": task.slack_user_id,
                 "runtime": "adk",
                 "runtime_mode": self._runtime_mode(),
+                ADK_PLANNED_BUDGET_SUMMARY_KEY: ADK_PLANNED_BUDGET_DEFAULT_SUMMARY,
                 "toolset_lazy": self.registry_factory is not None,
                 "tool_names": list(self._tool_names()),
                 "selected_fact_ids": [
@@ -517,11 +534,12 @@ class AdkAgentRuntime:
             settings=self.settings,
             payload=planned_workflow_payload,
         )
+        planned_context = _join_contexts(context, budget_context)
         planner = self._planned_agent(
             name="planned_workflow_planner",
             description="Creates a bounded plan for a complex Kortny task.",
             prompt=ADK_PLANNED_WORKFLOW_PLANNER_PROMPT,
-            context=_join_contexts(context, budget_context),
+            context=planned_context,
             model=self._adk_model_for_tier(ADK_PLANNED_PLANNER_MODEL_TIER),
             output_key="planned_workflow_plan",
             tools=[],
@@ -551,7 +569,7 @@ class AdkAgentRuntime:
                 name=name,
                 description=description,
                 prompt=prompt,
-                context=context,
+                context=planned_context,
                 model=self._adk_model_for_tier(ADK_PLANNED_BRANCH_MODEL_TIER),
                 output_key=output_key,
                 tools=self._worker_tools(task=task),
@@ -562,7 +580,7 @@ class AdkAgentRuntime:
             name="planned_workflow_merger",
             description="Merges planned workflow branch results into the final answer.",
             prompt=ADK_PLANNED_WORKFLOW_MERGER_PROMPT,
-            context=context,
+            context=planned_context,
             model=self._adk_model_for_tier(ADK_PLANNED_MERGER_MODEL_TIER),
             output_key=None,
             tools=[],
@@ -585,6 +603,15 @@ class AdkAgentRuntime:
                     "cost_ceiling_usd": (
                         self.settings.planned_workflow_cost_ceiling_usd
                     ),
+                    "max_branch_model_calls": (
+                        self.settings.planned_workflow_max_branch_model_calls
+                    ),
+                    "max_branch_tool_calls": (
+                        self.settings.planned_workflow_max_branch_tool_calls
+                    ),
+                    "max_total_tool_calls": (
+                        self.settings.planned_workflow_max_total_tool_calls
+                    ),
                     "classifier_payload": planned_workflow_payload or {},
                 },
             )
@@ -601,6 +628,13 @@ class AdkAgentRuntime:
                     self.settings.planned_workflow_max_parallel_branches
                 ),
                 cost_ceiling_usd=str(self.settings.planned_workflow_cost_ceiling_usd),
+                max_branch_model_calls=(
+                    self.settings.planned_workflow_max_branch_model_calls
+                ),
+                max_branch_tool_calls=(
+                    self.settings.planned_workflow_max_branch_tool_calls
+                ),
+                max_total_tool_calls=self.settings.planned_workflow_max_total_tool_calls,
             )
         return SequentialAgent(
             name="kortny_planned_workflow",
@@ -909,6 +943,16 @@ class AdkAgentRuntime:
         if agent_name not in ADK_PLANNED_BRANCH_AGENT_NAMES:
             return None
 
+        global_blocked_reason = _adk_state_text(
+            callback_context.state,
+            ADK_GLOBAL_BUDGET_BLOCKED_KEY,
+        )
+        if global_blocked_reason is not None:
+            return _planned_branch_budget_response(
+                agent_name=agent_name,
+                reason=global_blocked_reason,
+            )
+
         blocked_reason = _adk_state_text(
             callback_context.state,
             f"{ADK_BRANCH_BUDGET_BLOCKED_PREFIX}{agent_name}",
@@ -966,36 +1010,70 @@ class AdkAgentRuntime:
             callback_context.state,
             count_key,
         )
-        limit = self.settings.planned_workflow_max_branch_tool_calls
-        if tool_call_count <= limit:
+        branch_limit = self.settings.planned_workflow_max_branch_tool_calls
+        task = self._task_from_callback_context(callback_context)
+        tool_name = _string_or_none(getattr(tool, "name", None)) or "unknown_tool"
+        if tool_call_count > branch_limit:
+            reason = "max_branch_tool_calls_exceeded"
+            callback_context.state[
+                f"{ADK_BRANCH_BUDGET_BLOCKED_PREFIX}{agent_name}"
+            ] = reason
+            if task is not None:
+                self._record_planned_branch_budget_exceeded(
+                    task=task,
+                    callback_context=callback_context,
+                    budget_type="tool_calls",
+                    reason=reason,
+                    limit=branch_limit,
+                    observed=tool_call_count,
+                    tool_name=tool_name,
+                )
+            return {
+                "successful": False,
+                "error": (
+                    f"{agent_name} stopped before running {tool_name}: "
+                    f"planned branch tool-call budget reached."
+                ),
+                "budget_exhausted": True,
+                "budget_type": "tool_calls",
+                "budget_limit": branch_limit,
+                "observed_count": tool_call_count,
+                "tool": tool_name,
+            }
+
+        total_tool_call_count = _increment_adk_state_counter(
+            callback_context.state,
+            ADK_TOTAL_TOOL_CALLS_KEY,
+        )
+        total_limit = self.settings.planned_workflow_max_total_tool_calls
+        if total_tool_call_count <= total_limit:
             return None
 
-        reason = "max_branch_tool_calls_exceeded"
+        reason = "max_total_tool_calls_exceeded"
+        callback_context.state[ADK_GLOBAL_BUDGET_BLOCKED_KEY] = reason
         callback_context.state[f"{ADK_BRANCH_BUDGET_BLOCKED_PREFIX}{agent_name}"] = (
             reason
         )
-        task = self._task_from_callback_context(callback_context)
-        tool_name = _string_or_none(getattr(tool, "name", None)) or "unknown_tool"
         if task is not None:
             self._record_planned_branch_budget_exceeded(
                 task=task,
                 callback_context=callback_context,
-                budget_type="tool_calls",
+                budget_type="total_tool_calls",
                 reason=reason,
-                limit=limit,
-                observed=tool_call_count,
+                limit=total_limit,
+                observed=total_tool_call_count,
                 tool_name=tool_name,
             )
         return {
             "successful": False,
             "error": (
                 f"{agent_name} stopped before running {tool_name}: "
-                f"planned branch tool-call budget reached."
+                f"planned workflow total tool-call budget reached."
             ),
             "budget_exhausted": True,
-            "budget_type": "tool_calls",
-            "budget_limit": limit,
-            "observed_count": tool_call_count,
+            "budget_type": "total_tool_calls",
+            "budget_limit": total_limit,
+            "observed_count": total_tool_call_count,
             "tool": tool_name,
         }
 
@@ -1012,11 +1090,22 @@ class AdkAgentRuntime:
     ) -> None:
         agent_name = callback_context.agent_name
         event_key = (
-            f"{ADK_BRANCH_BUDGET_EVENT_PREFIX}{agent_name}:{budget_type}:{reason}"
+            f"{ADK_BRANCH_BUDGET_EVENT_PREFIX}"
+            f"{_planned_budget_event_scope(budget_type, agent_name)}:"
+            f"{budget_type}:{reason}"
         )
         if callback_context.state.get(event_key):
             return
         callback_context.state[event_key] = True
+        _append_planned_budget_note(
+            callback_context.state,
+            agent_name=agent_name,
+            budget_type=budget_type,
+            reason=reason,
+            limit=limit,
+            observed=observed,
+            tool_name=tool_name,
+        )
         payload: dict[str, Any] = {
             "message": "adk_planned_branch_budget_exceeded",
             "runtime": "adk",
@@ -1673,6 +1762,9 @@ def _render_planned_workflow_budget(
             "behavior=planned_parallel",
             f"max_parallel_branches={settings.planned_workflow_max_parallel_branches}",
             f"estimated_cost_ceiling_usd={settings.planned_workflow_cost_ceiling_usd}",
+            f"max_branch_model_calls={settings.planned_workflow_max_branch_model_calls}",
+            f"max_branch_tool_calls={settings.planned_workflow_max_branch_tool_calls}",
+            f"max_total_tool_calls={settings.planned_workflow_max_total_tool_calls}",
             f"classifier_route={_payload_value(payload, 'route')}",
             f"classifier_confidence={_payload_value(payload, 'confidence')}",
             (
@@ -1742,6 +1834,39 @@ def _planned_branch_budget_response(*, agent_name: str, reason: str) -> LlmRespo
             parts=[genai_types.Part.from_text(text=text)],
         )
     )
+
+
+def _planned_budget_event_scope(budget_type: str, agent_name: str) -> str:
+    if budget_type == "total_tool_calls":
+        return "planned_workflow"
+    return agent_name
+
+
+def _append_planned_budget_note(
+    state: MutableMapping[str, Any],
+    *,
+    agent_name: str,
+    budget_type: str,
+    reason: str,
+    limit: int,
+    observed: int,
+    tool_name: str | None,
+) -> None:
+    note = (
+        f"{agent_name} reached {budget_type} budget "
+        f"({reason}; observed={observed}; limit={limit}"
+    )
+    if tool_name is not None:
+        note += f"; tool={tool_name}"
+    note += ")."
+    existing = _adk_state_text(state, ADK_PLANNED_BUDGET_SUMMARY_KEY)
+    if existing is None or existing == ADK_PLANNED_BUDGET_DEFAULT_SUMMARY:
+        state[ADK_PLANNED_BUDGET_SUMMARY_KEY] = note
+        return
+    if note in existing:
+        return
+    combined = f"{existing}\n{note}"
+    state[ADK_PLANNED_BUDGET_SUMMARY_KEY] = combined[-1200:]
 
 
 def _planned_agent_start_phase(agent_name: str) -> str | None:

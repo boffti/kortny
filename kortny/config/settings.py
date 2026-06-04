@@ -83,6 +83,10 @@ class Settings(BaseSettings):
         default=8,
         validation_alias="KORTNY_PLANNED_WORKFLOW_MAX_BRANCH_TOOL_CALLS",
     )
+    planned_workflow_max_total_tool_calls: int = Field(
+        default=12,
+        validation_alias="KORTNY_PLANNED_WORKFLOW_MAX_TOTAL_TOOL_CALLS",
+    )
     planned_workflow_progress_updates_enabled: bool = Field(
         default=True,
         validation_alias="KORTNY_PLANNED_WORKFLOW_PROGRESS_UPDATES_ENABLED",
@@ -276,6 +280,15 @@ class Settings(BaseSettings):
         if value < 0 or value > 100:
             raise ValueError(
                 "KORTNY_PLANNED_WORKFLOW_MAX_BRANCH_TOOL_CALLS must be between 0 and 100"
+            )
+        return value
+
+    @field_validator("planned_workflow_max_total_tool_calls")
+    @classmethod
+    def _valid_planned_workflow_max_total_tool_calls(cls, value: int) -> int:
+        if value < 0 or value > 200:
+            raise ValueError(
+                "KORTNY_PLANNED_WORKFLOW_MAX_TOTAL_TOOL_CALLS must be between 0 and 200"
             )
         return value
 

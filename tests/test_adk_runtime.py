@@ -451,6 +451,127 @@ def test_adk_runtime_planned_branch_tool_budget_blocks_tool_and_next_model(
     ]
 
 
+def test_adk_runtime_planned_total_tool_budget_blocks_across_branches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    set_required_settings_env(monkeypatch)
+    monkeypatch.setenv("KORTNY_PLANNED_WORKFLOW_MAX_BRANCH_TOOL_CALLS", "10")
+    monkeypatch.setenv("KORTNY_PLANNED_WORKFLOW_MAX_TOTAL_TOOL_CALLS", "2")
+    settings = load_settings(env_file=None)
+    task = Task(
+        id=uuid.UUID("bd53f4e1-9d72-468d-ab18-5021d9e15dad"),
+        installation_id=uuid.UUID("1c53f4e1-9d72-468d-ab18-5021d9e15dad"),
+        slack_channel_id="D123",
+        slack_thread_ts="D123",
+        slack_user_id="U123",
+        input="Research the top James Bond movies.",
+    )
+    task_service = _FakeTaskService()
+    task_service.tasks[task.id] = task
+    runtime = AdkAgentRuntime(
+        settings=settings,
+        session=cast(Any, _FakeScalarSession([])),
+        task_service=cast(Any, task_service),
+    )
+    shared_state: dict[str, object] = {"task_id": str(task.id)}
+    research_context = SimpleNamespace(
+        agent_name="planned_research_worker",
+        invocation_id="inv-total-budget",
+        state=shared_state,
+    )
+    workspace_context = SimpleNamespace(
+        agent_name="planned_workspace_worker",
+        invocation_id="inv-total-budget",
+        state=shared_state,
+    )
+    integration_context = SimpleNamespace(
+        agent_name="planned_integration_worker",
+        invocation_id="inv-total-budget",
+        state=shared_state,
+    )
+    tool = SimpleNamespace(name="composio_exa_search")
+
+    assert (
+        runtime._guard_planned_tool_call(
+            tool=tool,
+            args={"query": "best bond movies"},
+            tool_context=cast(Any, research_context),
+        )
+        is None
+    )
+    assert (
+        runtime._guard_planned_tool_call(
+            tool=tool,
+            args={"query": "bond audience rankings"},
+            tool_context=cast(Any, workspace_context),
+        )
+        is None
+    )
+    blocked_tool_result = runtime._guard_planned_tool_call(
+        tool=tool,
+        args={"query": "bond box office rankings"},
+        tool_context=cast(Any, integration_context),
+    )
+    model_response = runtime._guard_planned_model_request(
+        cast(Any, research_context),
+        object(),
+    )
+
+    assert blocked_tool_result is not None
+    assert blocked_tool_result["budget_exhausted"] is True
+    assert blocked_tool_result["budget_type"] == "total_tool_calls"
+    assert blocked_tool_result["budget_limit"] == 2
+    assert blocked_tool_result["observed_count"] == 3
+    assert model_response is not None
+    assert model_response.content is not None
+    assert model_response.content.parts is not None
+    assert model_response.content.parts[0].text is not None
+    assert "max_total_tool_calls_exceeded" in model_response.content.parts[0].text
+    assert (
+        shared_state["planned_budget_summary"]
+        == "planned_integration_worker reached total_tool_calls budget "
+        "(max_total_tool_calls_exceeded; observed=3; limit=2; "
+        "tool=composio_exa_search)."
+    )
+    budget_events = [
+        payload
+        for _, payload in task_service.events
+        if payload.get("message") == "adk_planned_branch_budget_exceeded"
+    ]
+    assert budget_events == [
+        {
+            "message": "adk_planned_branch_budget_exceeded",
+            "runtime": "adk",
+            "adk_agent_name": "planned_integration_worker",
+            "adk_invocation_id": "inv-total-budget",
+            "budget_type": "total_tool_calls",
+            "reason": "max_total_tool_calls_exceeded",
+            "limit": 2,
+            "observed": 3,
+            "tool": "composio_exa_search",
+        }
+    ]
+    planned_budget_events = [
+        payload
+        for _, payload in task_service.events
+        if payload.get("message") == "planned_task_budget_reached"
+    ]
+    assert planned_budget_events == [
+        {
+            "message": "planned_task_budget_reached",
+            "runtime": "adk",
+            "phase": "budget_reached",
+            "adk_agent_name": "planned_integration_worker",
+            "adk_invocation_id": "inv-total-budget",
+            "budget_type": "total_tool_calls",
+            "reason": "max_total_tool_calls_exceeded",
+            "limit": 2,
+            "observed": 3,
+            "tool": "composio_exa_search",
+        }
+    ]
+
+
 def test_adk_runtime_records_planned_phase_events(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -841,6 +962,7 @@ def set_required_settings_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "KORTNY_PLANNED_WORKFLOW_COST_CEILING_USD",
         "KORTNY_PLANNED_WORKFLOW_MAX_BRANCH_MODEL_CALLS",
         "KORTNY_PLANNED_WORKFLOW_MAX_BRANCH_TOOL_CALLS",
+        "KORTNY_PLANNED_WORKFLOW_MAX_TOTAL_TOOL_CALLS",
         "KORTNY_PLANNED_WORKFLOW_PROGRESS_UPDATES_ENABLED",
         "POSTGRES_URL",
     ):

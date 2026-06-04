@@ -70,6 +70,39 @@ KG_GRAPH_NODE_LIMIT = 18
 KG_GRAPH_EDGE_LIMIT = 30
 KG_GRAPH_WIDTH = 920
 KG_GRAPH_HEIGHT = 420
+PLANNED_BRANCH_AGENT_TO_KEY = {
+    "planned_research_worker": "research",
+    "planned_workspace_worker": "workspace",
+    "planned_integration_worker": "integration",
+}
+PLANNED_BRANCH_LABELS = {
+    "research": "Research",
+    "workspace": "Workspace",
+    "integration": "Integrations",
+}
+PLANNED_AGENT_NAMES = frozenset(
+    {
+        "planned_workflow_planner",
+        "planned_workflow_merger",
+        *PLANNED_BRANCH_AGENT_TO_KEY.keys(),
+    }
+)
+PLANNED_TRACE_MESSAGES = frozenset(
+    {
+        "adk_planned_workflow_selected",
+        "planned_task_started",
+        "planned_task_planning_started",
+        "planned_task_plan_ready",
+        "planned_task_branch_started",
+        "planned_task_branch_completed",
+        "planned_task_budget_reached",
+        "planned_task_merging",
+        "planned_task_completed",
+        "planned_task_progress_posted",
+        "planned_workflow_cost_ceiling_exceeded",
+        "final_response_sanitized",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -127,6 +160,7 @@ class TaskDetail:
     usage: tuple[LLMUsage, ...]
     artifacts: tuple[Artifact, ...]
     posted_response_text: str | None
+    planned_trace: PlannedWorkflowTrace
 
 
 @dataclass(frozen=True)
@@ -165,6 +199,65 @@ class TimelineEvent:
     badges: tuple[TimelineBadge, ...]
     metrics: tuple[TimelineMetric, ...]
     payload_json: str
+
+
+@dataclass(frozen=True)
+class PlannedToolRollup:
+    tool: str
+    call_count: int
+    result_count: int
+    artifact_count: int
+    cost_usd: Decimal
+    branch_labels: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class PlannedBranchTrace:
+    key: str
+    label: str
+    status: str
+    tone: str
+    started: bool
+    completed: bool
+    llm_call_count: int
+    tool_call_count: int
+    tool_result_count: int
+    input_tokens: int
+    output_tokens: int
+    cost_usd: Decimal
+    budget_hit_count: int
+    tool_names: tuple[str, ...]
+    model_names: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class PlannedWorkflowTrace:
+    present: bool
+    mode: str | None
+    route: str | None
+    planner_agent: str | None
+    merger_agent: str | None
+    max_parallel_branches: int | None
+    max_branch_model_calls: int | None
+    max_branch_tool_calls: int | None
+    max_total_tool_calls: int | None
+    cost_ceiling_usd: Decimal | None
+    branch_count: int
+    completed_branch_count: int
+    budget_hit_count: int
+    llm_call_count: int
+    tool_call_count: int
+    tool_result_count: int
+    total_input_tokens: int
+    total_output_tokens: int
+    total_cost_usd: Decimal
+    final_sanitized: bool
+    raw_chars: int | None
+    posted_chars: int | None
+    branches: tuple[PlannedBranchTrace, ...]
+    tool_rollups: tuple[PlannedToolRollup, ...]
+    budget_events: tuple[TimelineEvent, ...]
+    phase_events: tuple[TimelineEvent, ...]
 
 
 @dataclass(frozen=True)
@@ -903,6 +996,8 @@ def get_task_detail(
             .order_by(Artifact.created_at.asc(), Artifact.id.asc())
         )
     )
+    timeline = tuple(_timeline_event(event) for event in events)
+    posted_response_text = _posted_response_text(events)
     identities = _identity_map(session, (task,))
     return TaskDetail(
         task=task,
@@ -919,10 +1014,17 @@ def get_task_detail(
             slack_id=task.slack_user_id,
         ),
         events=events,
-        timeline=tuple(_timeline_event(event) for event in events),
+        timeline=timeline,
         usage=usage,
         artifacts=artifacts,
-        posted_response_text=_posted_response_text(events),
+        posted_response_text=posted_response_text,
+        planned_trace=_planned_workflow_trace(
+            events=events,
+            timeline=timeline,
+            usage=usage,
+            raw_response_text=task.result_summary,
+            posted_response_text=posted_response_text,
+        ),
     )
 
 
@@ -4935,6 +5037,317 @@ def _posted_response_text(events: Sequence[TaskEvent]) -> str | None:
     return None
 
 
+def _planned_workflow_trace(
+    *,
+    events: Sequence[TaskEvent],
+    timeline: Sequence[TimelineEvent],
+    usage: Sequence[LLMUsage],
+    raw_response_text: str | None,
+    posted_response_text: str | None,
+) -> PlannedWorkflowTrace:
+    selected_payload: dict[str, Any] = {}
+    classifier_payload: dict[str, Any] = {}
+    present = False
+    timeline_by_seq = {
+        event.seq: item for event, item in zip(events, timeline, strict=True)
+    }
+    phase_events: list[TimelineEvent] = []
+    budget_events: list[TimelineEvent] = []
+
+    for event in events:
+        payload = event.payload if isinstance(event.payload, dict) else {}
+        message = _payload_string(payload, "message")
+        if _is_planned_trace_payload(payload, event.type):
+            present = True
+        if message == "adk_planned_workflow_selected":
+            selected_payload = payload
+        if message == "planned_workflow_classified":
+            classifier_payload = payload
+        if message in PLANNED_TRACE_MESSAGES and event.seq in timeline_by_seq:
+            phase_events.append(timeline_by_seq[event.seq])
+        if message in {
+            "planned_task_budget_reached",
+            "planned_workflow_cost_ceiling_exceeded",
+        } and event.seq in timeline_by_seq:
+            budget_events.append(timeline_by_seq[event.seq])
+
+    if not present:
+        return PlannedWorkflowTrace(
+            present=False,
+            mode=None,
+            route=None,
+            planner_agent=None,
+            merger_agent=None,
+            max_parallel_branches=None,
+            max_branch_model_calls=None,
+            max_branch_tool_calls=None,
+            max_total_tool_calls=None,
+            cost_ceiling_usd=None,
+            branch_count=0,
+            completed_branch_count=0,
+            budget_hit_count=0,
+            llm_call_count=0,
+            tool_call_count=0,
+            tool_result_count=0,
+            total_input_tokens=0,
+            total_output_tokens=0,
+            total_cost_usd=Decimal("0"),
+            final_sanitized=False,
+            raw_chars=len(raw_response_text) if raw_response_text else None,
+            posted_chars=len(posted_response_text) if posted_response_text else None,
+            branches=(),
+            tool_rollups=(),
+            budget_events=(),
+            phase_events=(),
+        )
+
+    branch_state: dict[str, dict[str, Any]] = {}
+    tool_state: dict[str, dict[str, Any]] = {}
+
+    for agent_name in _payload_list(selected_payload, "branch_agents"):
+        branch_key = PLANNED_BRANCH_AGENT_TO_KEY.get(str(agent_name))
+        if branch_key is not None:
+            _planned_branch_state(branch_state, branch_key)
+
+    final_sanitized = False
+    raw_chars = len(raw_response_text) if raw_response_text else None
+    posted_chars = len(posted_response_text) if posted_response_text else None
+    planned_llm_call_count = 0
+    planned_input_tokens = 0
+    planned_output_tokens = 0
+    planned_tool_call_count = 0
+    planned_tool_result_count = 0
+
+    for event in events:
+        payload = event.payload if isinstance(event.payload, dict) else {}
+        message = _payload_string(payload, "message")
+        branch_key = _planned_branch_key(payload)
+
+        if message == "final_response_sanitized":
+            final_sanitized = True
+            raw_chars = _payload_int_or_none(payload, "raw_chars") or raw_chars
+            posted_chars = _payload_int_or_none(payload, "output_chars") or posted_chars
+
+        if branch_key is not None:
+            branch = _planned_branch_state(branch_state, branch_key)
+            if message == "planned_task_branch_started":
+                branch["started"] = True
+            elif message == "planned_task_branch_completed":
+                branch["completed"] = True
+            elif message == "planned_task_budget_reached":
+                branch["budget_hit_count"] += 1
+
+        if event.type is TaskEventType.llm_call and _is_planned_llm_payload(payload):
+            planned_llm_call_count += 1
+            input_tokens = _payload_int(payload, "input_tokens")
+            output_tokens = _payload_int(payload, "output_tokens")
+            cost_usd = _payload_decimal(payload, "cost_usd")
+            planned_input_tokens += input_tokens
+            planned_output_tokens += output_tokens
+            if branch_key is not None:
+                branch = _planned_branch_state(branch_state, branch_key)
+                branch["llm_call_count"] += 1
+                branch["input_tokens"] += input_tokens
+                branch["output_tokens"] += output_tokens
+                branch["cost_usd"] += cost_usd
+                if model := _payload_string(payload, "model"):
+                    branch["model_names"].append(model)
+
+        if event.type in {TaskEventType.tool_call, TaskEventType.tool_result}:
+            runtime = _payload_string(payload, "runtime")
+            if runtime != "adk" and branch_key is None:
+                continue
+            tool = _payload_string(payload, "tool") or "tool"
+            tool_rollup = tool_state.setdefault(
+                tool,
+                {
+                    "call_count": 0,
+                    "result_count": 0,
+                    "artifact_count": 0,
+                    "cost_usd": Decimal("0"),
+                    "branch_labels": [],
+                },
+            )
+            if branch_key is not None:
+                label = PLANNED_BRANCH_LABELS[branch_key]
+                if label not in tool_rollup["branch_labels"]:
+                    tool_rollup["branch_labels"].append(label)
+            if event.type is TaskEventType.tool_call:
+                planned_tool_call_count += 1
+                tool_rollup["call_count"] += 1
+                if branch_key is not None:
+                    branch = _planned_branch_state(branch_state, branch_key)
+                    branch["tool_call_count"] += 1
+                    branch["tool_names"].append(tool)
+            else:
+                planned_tool_result_count += 1
+                tool_rollup["result_count"] += 1
+                tool_rollup["artifact_count"] += _payload_int(payload, "artifact_count")
+                tool_rollup["cost_usd"] += _payload_decimal(payload, "cost_usd")
+                if branch_key is not None:
+                    branch = _planned_branch_state(branch_state, branch_key)
+                    branch["tool_result_count"] += 1
+                    branch["tool_names"].append(tool)
+
+    branches = tuple(
+        _planned_branch_trace(branch_key, values)
+        for branch_key, values in sorted(
+            branch_state.items(), key=lambda item: _planned_branch_sort_key(item[0])
+        )
+    )
+    tool_rollups = tuple(
+        PlannedToolRollup(
+            tool=tool,
+            call_count=int(values["call_count"]),
+            result_count=int(values["result_count"]),
+            artifact_count=int(values["artifact_count"]),
+            cost_usd=values["cost_usd"],
+            branch_labels=tuple(values["branch_labels"]),
+        )
+        for tool, values in sorted(
+            tool_state.items(),
+            key=lambda item: (-int(item[1]["call_count"]), item[0]),
+        )
+    )
+    classifier = selected_payload.get("classifier_payload")
+    route = ""
+    if isinstance(classifier, dict):
+        route = _payload_string(classifier, "route")
+    if not route and classifier_payload:
+        route = _payload_string(classifier_payload, "route")
+    return PlannedWorkflowTrace(
+        present=True,
+        mode=_optional_payload_string(selected_payload, "mode"),
+        route=route or None,
+        planner_agent=_optional_payload_string(selected_payload, "planner_agent"),
+        merger_agent=_optional_payload_string(selected_payload, "merger_agent"),
+        max_parallel_branches=_payload_int_or_none(
+            selected_payload, "max_parallel_branches"
+        ),
+        max_branch_model_calls=_payload_int_or_none(
+            selected_payload, "max_branch_model_calls"
+        ),
+        max_branch_tool_calls=_payload_int_or_none(
+            selected_payload, "max_branch_tool_calls"
+        ),
+        max_total_tool_calls=_payload_int_or_none(
+            selected_payload, "max_total_tool_calls"
+        ),
+        cost_ceiling_usd=_payload_decimal_or_none(selected_payload, "cost_ceiling_usd"),
+        branch_count=len(branches),
+        completed_branch_count=sum(1 for branch in branches if branch.completed),
+        budget_hit_count=len(budget_events),
+        llm_call_count=planned_llm_call_count,
+        tool_call_count=planned_tool_call_count,
+        tool_result_count=planned_tool_result_count,
+        total_input_tokens=planned_input_tokens,
+        total_output_tokens=planned_output_tokens,
+        total_cost_usd=sum((row.cost_usd for row in usage), Decimal("0")),
+        final_sanitized=final_sanitized,
+        raw_chars=raw_chars,
+        posted_chars=posted_chars,
+        branches=branches,
+        tool_rollups=tool_rollups,
+        budget_events=tuple(budget_events),
+        phase_events=tuple(phase_events),
+    )
+
+
+def _planned_branch_state(
+    branch_state: dict[str, dict[str, Any]], branch_key: str
+) -> dict[str, Any]:
+    return branch_state.setdefault(
+        branch_key,
+        {
+            "started": False,
+            "completed": False,
+            "llm_call_count": 0,
+            "tool_call_count": 0,
+            "tool_result_count": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cost_usd": Decimal("0"),
+            "budget_hit_count": 0,
+            "tool_names": [],
+            "model_names": [],
+        },
+    )
+
+
+def _planned_branch_trace(
+    branch_key: str, values: dict[str, Any]
+) -> PlannedBranchTrace:
+    budget_hit_count = int(values["budget_hit_count"])
+    completed = bool(values["completed"])
+    started = bool(values["started"])
+    if budget_hit_count:
+        status = "Budget hit"
+        tone = "warning"
+    elif completed:
+        status = "Completed"
+        tone = "success"
+    elif started:
+        status = "Started"
+        tone = "accent"
+    else:
+        status = "Waiting"
+        tone = "neutral"
+    return PlannedBranchTrace(
+        key=branch_key,
+        label=PLANNED_BRANCH_LABELS[branch_key],
+        status=status,
+        tone=tone,
+        started=started,
+        completed=completed,
+        llm_call_count=int(values["llm_call_count"]),
+        tool_call_count=int(values["tool_call_count"]),
+        tool_result_count=int(values["tool_result_count"]),
+        input_tokens=int(values["input_tokens"]),
+        output_tokens=int(values["output_tokens"]),
+        cost_usd=values["cost_usd"],
+        budget_hit_count=budget_hit_count,
+        tool_names=tuple(_unique_strings(values["tool_names"])[:6]),
+        model_names=tuple(_unique_strings(values["model_names"])[:4]),
+    )
+
+
+def _is_planned_trace_payload(payload: dict[str, Any], event_type: TaskEventType) -> bool:
+    message = _payload_string(payload, "message")
+    if message in PLANNED_TRACE_MESSAGES or message == "planned_workflow_classified":
+        return True
+    if _payload_string(payload, "adk_agent_name") in PLANNED_AGENT_NAMES:
+        return True
+    prompt_name = _payload_string(payload, "prompt_name")
+    return prompt_name.startswith("kortny.adk.planned_") and event_type is TaskEventType.llm_call
+
+
+def _is_planned_llm_payload(payload: dict[str, Any]) -> bool:
+    agent_name = _payload_string(payload, "adk_agent_name")
+    if agent_name in PLANNED_AGENT_NAMES:
+        return True
+    prompt_name = _payload_string(payload, "prompt_name")
+    return prompt_name.startswith("kortny.adk.planned_")
+
+
+def _planned_branch_key(payload: dict[str, Any]) -> str | None:
+    branch = _payload_string(payload, "branch").lower()
+    if branch in PLANNED_BRANCH_LABELS:
+        return branch
+    agent_name = _payload_string(payload, "adk_agent_name")
+    if agent_name in PLANNED_BRANCH_AGENT_TO_KEY:
+        return PLANNED_BRANCH_AGENT_TO_KEY[agent_name]
+    prompt_name = _payload_string(payload, "prompt_name")
+    for planned_agent_name, branch_key in PLANNED_BRANCH_AGENT_TO_KEY.items():
+        if planned_agent_name in prompt_name:
+            return branch_key
+    return None
+
+
+def _planned_branch_sort_key(branch_key: str) -> int:
+    order = {"research": 0, "workspace": 1, "integration": 2}
+    return order.get(branch_key, 99)
+
+
 def _event_title(event_type: str, message: str) -> str:
     if event_type == "log" and message:
         return _message_title(message)
@@ -5230,6 +5643,11 @@ def _payload_string(payload: dict[str, Any], key: str) -> str:
     return str(value)
 
 
+def _optional_payload_string(payload: dict[str, Any], key: str) -> str | None:
+    value = _payload_string(payload, key)
+    return value or None
+
+
 _NUMERIC_PAYLOAD_KEYS = frozenset(
     {
         "latency_ms",
@@ -5245,6 +5663,34 @@ _NUMERIC_PAYLOAD_KEYS = frozenset(
         "observed",
     }
 )
+
+
+def _payload_int(payload: dict[str, Any], key: str) -> int:
+    return _payload_int_or_none(payload, key) or 0
+
+
+def _payload_int_or_none(payload: dict[str, Any], key: str) -> int | None:
+    value = payload.get(key)
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _payload_decimal(payload: dict[str, Any], key: str) -> Decimal:
+    return _payload_decimal_or_none(payload, key) or Decimal("0")
+
+
+def _payload_decimal_or_none(payload: dict[str, Any], key: str) -> Decimal | None:
+    value = payload.get(key)
+    if value is None or value == "":
+        return None
+    try:
+        return Decimal(str(value))
+    except Exception:
+        return None
 
 
 def _payload_number(payload: dict[str, Any], key: str) -> str:
@@ -5271,6 +5717,17 @@ def _unique_badges(badges: list[TimelineBadge]) -> list[TimelineBadge]:
             continue
         seen.add(marker)
         unique.append(badge)
+    return unique
+
+
+def _unique_strings(values: Iterable[str]) -> list[str]:
+    seen: set[str] = set()
+    unique: list[str] = []
+    for value in values:
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        unique.append(value)
     return unique
 
 

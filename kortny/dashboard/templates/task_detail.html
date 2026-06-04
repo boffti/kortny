@@ -40,10 +40,10 @@
 	    {% endif %}
 	  </section>
 
-	  <section class="summary-grid">
-	    <div class="card metric-card">
-	      <span>Status</span>
-	      <strong>{{ detail.task.status.value }}</strong>
+  <section class="summary-grid">
+    <div class="card metric-card">
+      <span>Status</span>
+      <strong>{{ detail.task.status.value }}</strong>
     </div>
     <div class="card metric-card">
       <span>Cost</span>
@@ -58,6 +58,179 @@
       <strong>{{ detail.task.total_output_tokens|number }}</strong>
     </div>
   </section>
+
+  {% if detail.planned_trace.present %}
+    {% set trace = detail.planned_trace %}
+    <section class="planned-trace-panel" aria-labelledby="planned-trace-heading">
+      <header class="planned-trace-header">
+        <div>
+          <span class="detail-label">ADK planned workflow</span>
+          <h2 id="planned-trace-heading">Planned Trace</h2>
+          <p>
+            Branch execution, budgets, tool usage, and final-response handling for this task.
+          </p>
+        </div>
+        <div class="planned-trace-mode">
+          <span class="badge badge-accent">{{ trace.mode or "planned" }}</span>
+          {% if trace.route %}<span class="badge badge-neutral">{{ trace.route }}</span>{% endif %}
+        </div>
+      </header>
+
+      <div class="planned-trace-stats" aria-label="Planned workflow summary">
+        <div>
+          <span>Branches</span>
+          <strong>{{ trace.completed_branch_count|number }} / {{ trace.branch_count|number }}</strong>
+        </div>
+        <div>
+          <span>LLM Calls</span>
+          <strong>{{ trace.llm_call_count|number }}</strong>
+        </div>
+        <div>
+          <span>Tool Calls</span>
+          <strong>{{ trace.tool_call_count|number }}</strong>
+        </div>
+        <div>
+          <span>Budget Hits</span>
+          <strong>{{ trace.budget_hit_count|number }}</strong>
+        </div>
+        <div>
+          <span>Recorded Cost</span>
+          <strong>{{ trace.total_cost_usd|money }}</strong>
+        </div>
+      </div>
+
+      <div class="planned-budget-strip" aria-label="Budget controls">
+        <div>
+          <span>Max branches</span>
+          <strong>{{ trace.max_parallel_branches|number if trace.max_parallel_branches is not none else "-" }}</strong>
+        </div>
+        <div>
+          <span>Branch model calls</span>
+          <strong>{{ trace.max_branch_model_calls|number if trace.max_branch_model_calls is not none else "-" }}</strong>
+        </div>
+        <div>
+          <span>Branch tool calls</span>
+          <strong>{{ trace.max_branch_tool_calls|number if trace.max_branch_tool_calls is not none else "-" }}</strong>
+        </div>
+        <div>
+          <span>Total tool calls</span>
+          <strong>{{ trace.max_total_tool_calls|number if trace.max_total_tool_calls is not none else "-" }}</strong>
+        </div>
+        <div>
+          <span>Cost ceiling</span>
+          <strong>{{ trace.cost_ceiling_usd|money if trace.cost_ceiling_usd is not none else "-" }}</strong>
+        </div>
+      </div>
+
+      {% if trace.branches %}
+        <div class="planned-branch-grid" aria-label="Planned branches">
+          {% for branch in trace.branches %}
+            <article class="planned-branch-card">
+              <header>
+                <div>
+                  <h3>{{ branch.label }}</h3>
+                  <p>{{ branch.input_tokens|number }} in / {{ branch.output_tokens|number }} out tokens</p>
+                </div>
+                <span class="badge badge-{{ branch.tone }}">{{ branch.status }}</span>
+              </header>
+              <dl class="planned-branch-metrics">
+                <div>
+                  <dt>LLMs</dt>
+                  <dd>{{ branch.llm_call_count|number }}</dd>
+                </div>
+                <div>
+                  <dt>Tools</dt>
+                  <dd>{{ branch.tool_call_count|number }}</dd>
+                </div>
+                <div>
+                  <dt>Results</dt>
+                  <dd>{{ branch.tool_result_count|number }}</dd>
+                </div>
+                <div>
+                  <dt>Cost</dt>
+                  <dd>{{ branch.cost_usd|money }}</dd>
+                </div>
+              </dl>
+              <div class="planned-chip-block">
+                <span>Tools</span>
+                <div>
+                  {% for tool in branch.tool_names %}
+                    <code>{{ tool }}</code>
+                  {% else %}
+                    <small>No branch-attributed tools.</small>
+                  {% endfor %}
+                </div>
+              </div>
+              <div class="planned-chip-block">
+                <span>Models</span>
+                <div>
+                  {% for model in branch.model_names %}
+                    <code>{{ model }}</code>
+                  {% else %}
+                    <small>No branch-attributed model calls.</small>
+                  {% endfor %}
+                </div>
+              </div>
+            </article>
+          {% endfor %}
+        </div>
+      {% endif %}
+
+      <div class="planned-trace-subgrid">
+        <section class="planned-subpanel" aria-labelledby="planned-output-heading">
+          <header>
+            <h3 id="planned-output-heading">Raw vs Posted</h3>
+            <span class="badge {{ 'badge-success' if trace.final_sanitized else 'badge-neutral' }}">
+              {{ "Sanitized" if trace.final_sanitized else "No sanitizer event" }}
+            </span>
+          </header>
+          <dl class="planned-output-metrics">
+            <div>
+              <dt>Raw agent chars</dt>
+              <dd>{{ trace.raw_chars|number if trace.raw_chars is not none else "-" }}</dd>
+            </div>
+            <div>
+              <dt>Posted chars</dt>
+              <dd>{{ trace.posted_chars|number if trace.posted_chars is not none else "-" }}</dd>
+            </div>
+          </dl>
+          <p>The full raw result and Slack-posted response remain in the Overview tab.</p>
+        </section>
+
+        <section class="planned-subpanel" aria-labelledby="planned-tools-heading">
+          <header>
+            <h3 id="planned-tools-heading">Tool Rollup</h3>
+            <span class="badge badge-neutral">{{ trace.tool_result_count|number }} results</span>
+          </header>
+          <div class="planned-tool-list">
+            {% for tool in trace.tool_rollups %}
+              <div class="planned-tool-row">
+                <code>{{ tool.tool }}</code>
+                <span>{{ tool.call_count|number }} calls</span>
+                <span>{{ tool.result_count|number }} results</span>
+                {% if tool.branch_labels %}
+                  <small>{{ tool.branch_labels|join(", ") }}</small>
+                {% else %}
+                  <small>Branch not recorded</small>
+                {% endif %}
+              </div>
+            {% else %}
+              <p class="empty">No ADK tool calls recorded for this planned workflow.</p>
+            {% endfor %}
+          </div>
+        </section>
+      </div>
+
+      {% if trace.budget_events %}
+        <div class="planned-budget-events">
+          <span>Budget control</span>
+          {% for event in trace.budget_events %}
+            <p><strong>#{{ event.seq }} {{ event.title }}</strong> {{ event.summary }}</p>
+          {% endfor %}
+        </div>
+      {% endif %}
+    </section>
+  {% endif %}
 
   <nav class="segmented-nav task-detail-tabs" role="tablist">
     <button class="segmented-item tab-btn active" data-tab="overview" role="tab" aria-selected="true">Overview</button>

@@ -1651,6 +1651,146 @@ def test_dashboard_task_detail_shows_events_usage_and_artifacts(
 ) -> None:
     test_client, session = client
     task = create_dashboard_task(session)
+    session.add_all(
+        [
+            TaskEvent(
+                task_id=task.id,
+                seq=7,
+                type=TaskEventType.log,
+                payload={
+                    "message": "adk_planned_workflow_selected",
+                    "runtime": "adk",
+                    "mode": "planned_parallel",
+                    "planner_agent": "planned_workflow_planner",
+                    "merger_agent": "planned_workflow_merger",
+                    "branch_agents": [
+                        "planned_research_worker",
+                        "planned_workspace_worker",
+                        "planned_integration_worker",
+                    ],
+                    "max_parallel_branches": 3,
+                    "max_branch_model_calls": 3,
+                    "max_branch_tool_calls": 4,
+                    "max_total_tool_calls": 12,
+                    "cost_ceiling_usd": "0.075",
+                    "classifier_payload": {"route": "research_analysis"},
+                },
+                created_at=task.created_at + timedelta(seconds=31),
+            ),
+            TaskEvent(
+                task_id=task.id,
+                seq=8,
+                type=TaskEventType.log,
+                payload={"message": "planned_task_started", "runtime": "adk"},
+                created_at=task.created_at + timedelta(seconds=32),
+            ),
+            TaskEvent(
+                task_id=task.id,
+                seq=9,
+                type=TaskEventType.log,
+                payload={
+                    "message": "planned_task_branch_started",
+                    "runtime": "adk",
+                    "phase": "branch_started",
+                    "branch": "research",
+                    "adk_agent_name": "planned_research_worker",
+                },
+                created_at=task.created_at + timedelta(seconds=33),
+            ),
+            TaskEvent(
+                task_id=task.id,
+                seq=10,
+                type=TaskEventType.llm_call,
+                payload={
+                    "message": "llm_call_completed",
+                    "runtime": "adk",
+                    "provider": "openrouter",
+                    "model": "deepseek/deepseek-v4-flash",
+                    "model_tier": "cheap_fast",
+                    "prompt_name": "kortny.adk.planned_research_worker",
+                    "adk_agent_name": "planned_research_worker",
+                    "input_tokens": 800,
+                    "output_tokens": 120,
+                    "total_tokens": 920,
+                    "cost_usd": "0.000050",
+                },
+                created_at=task.created_at + timedelta(seconds=34),
+            ),
+            TaskEvent(
+                task_id=task.id,
+                seq=11,
+                type=TaskEventType.tool_call,
+                payload={
+                    "turn": 1,
+                    "tool_call_id": "call_planned_search",
+                    "tool": "composio_exa_search",
+                    "runtime": "adk",
+                    "adk_agent_name": "planned_research_worker",
+                    "argument_keys": ["query", "numResults"],
+                },
+                created_at=task.created_at + timedelta(seconds=35),
+            ),
+            TaskEvent(
+                task_id=task.id,
+                seq=12,
+                type=TaskEventType.tool_result,
+                payload={
+                    "turn": 1,
+                    "tool_call_id": "call_planned_search",
+                    "tool": "composio_exa_search",
+                    "runtime": "adk",
+                    "adk_agent_name": "planned_research_worker",
+                    "latency_ms": 420,
+                    "artifact_count": 0,
+                    "cost_usd": "0",
+                },
+                created_at=task.created_at + timedelta(seconds=36),
+            ),
+            TaskEvent(
+                task_id=task.id,
+                seq=13,
+                type=TaskEventType.log,
+                payload={
+                    "message": "planned_task_budget_reached",
+                    "runtime": "adk",
+                    "phase": "budget_reached",
+                    "branch": "research",
+                    "adk_agent_name": "planned_research_worker",
+                    "budget_type": "total_tool_calls",
+                    "reason": "limit_reached",
+                    "limit": 12,
+                    "observed": 13,
+                },
+                created_at=task.created_at + timedelta(seconds=37),
+            ),
+            TaskEvent(
+                task_id=task.id,
+                seq=14,
+                type=TaskEventType.log,
+                payload={
+                    "message": "planned_task_branch_completed",
+                    "runtime": "adk",
+                    "phase": "branch_completed",
+                    "branch": "research",
+                    "adk_agent_name": "planned_research_worker",
+                },
+                created_at=task.created_at + timedelta(seconds=38),
+            ),
+            TaskEvent(
+                task_id=task.id,
+                seq=15,
+                type=TaskEventType.log,
+                payload={
+                    "message": "final_response_sanitized",
+                    "reason": "internal_preamble_removed",
+                    "raw_chars": 1200,
+                    "output_chars": 620,
+                },
+                created_at=task.created_at + timedelta(seconds=39),
+            ),
+        ]
+    )
+    session.commit()
     login(test_client)
 
     response = test_client.get(f"/tasks/{task.id}")
@@ -1676,6 +1816,19 @@ def test_dashboard_task_detail_shows_events_usage_and_artifacts(
     assert "{&#x27;source&#x27;: &#x27;test&#x27;}" not in response.text
     assert "dashboard_report.pdf" in response.text
     assert "analysis" in response.text
+    assert "Planned Trace" in response.text
+    assert "ADK planned workflow" in response.text
+    assert "planned_parallel" in response.text
+    assert "research_analysis" in response.text
+    assert "Budget Hits" in response.text
+    assert "Max branches" in response.text
+    assert "Branch model calls" in response.text
+    assert "Total tool calls" in response.text
+    assert "Raw vs Posted" in response.text
+    assert "Sanitized" in response.text
+    assert "Research" in response.text
+    assert "composio_exa_search" in response.text
+    assert "Branch not recorded" not in response.text
     assert "Planned budget reached" in response.text
     assert "A planned branch reached its budget" in response.text
     assert "tool calls" in response.text

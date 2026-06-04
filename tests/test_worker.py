@@ -70,7 +70,11 @@ from kortny.observe.assessment import (
     CHANNEL_ASSESSMENT_SUPPRESS_SLACK_POST_KEY,
 )
 from kortny.slack.comments import ARTIFACT_COMMENT_FALLBACK_TEXT
-from kortny.slack.humanizer import build_response_record, build_synthesis_context
+from kortny.slack.humanizer import (
+    ResponseSynthesisResult,
+    build_response_record,
+    build_synthesis_context,
+)
 from kortny.slack.reactions import (
     ACK_REACTION_ADDED_MESSAGE,
     ACK_REACTION_REMOVED_MESSAGE,
@@ -1434,10 +1438,10 @@ def test_agent_executor_skips_humanizer_for_adk_quick_fast_path(
     )
 
 
-def test_agent_executor_skips_humanizer_for_adk_planned_merger_final(
+def test_agent_executor_humanizes_adk_planned_merger_final(
     db_session: Session,
 ) -> None:
-    task = create_task(db_session, event_id="EvAdkPlannedSkipHumanizer")
+    task = create_task(db_session, event_id="EvAdkPlannedHumanizer")
     task.input = "research AI observability tools, check Linear, and summarize"
     task_service = TaskService(db_session)
     task_service.append_event(
@@ -1486,14 +1490,48 @@ def test_agent_executor_skips_humanizer_for_adk_planned_merger_final(
     )
     slack_client = FakeSlackClient()
     raw_answer = (
-        "I checked the research, workspace context, and integration context. "
-        "The next step is to record the observability decision, keep Langfuse "
-        "as the default candidate, and track Phoenix as the evaluation path."
+        'The user said "research AI observability tools" and provided branch '
+        "context. I am the planned_workflow_merger, and my job is to merge "
+        "branch outputs into one Slack-native answer.\n\n"
+        "I'll present this as Kortny's final answer.\n"
+        "*Bottom line:* record Langfuse as the default observability candidate "
+        "and track Phoenix as the evaluation path. Capture the decision in "
+        "Linear, keep pricing/current docs as follow-up evidence, and avoid "
+        "creating a PDF unless the user explicitly asks for one."
     )
+    humanized_answer = (
+        "*Bottom line:* record Langfuse as the default observability candidate "
+        "and track Phoenix as the evaluation path."
+    )
+
+    class RecordingSynthesizer:
+        uses_procedural_skills = False
+
+        def __init__(self) -> None:
+            self.raw_answers: list[str] = []
+
+        def synthesize(
+            self,
+            *,
+            session: Session,
+            task: Task,
+            response_record: Any,
+            synthesis_context: Any,
+            task_service: TaskService,
+        ) -> ResponseSynthesisResult:
+            del session, task, synthesis_context, task_service
+            self.raw_answers.append(response_record.raw_answer)
+            return ResponseSynthesisResult(
+                text=humanized_answer,
+                changed=True,
+                reason="recording_humanizer",
+            )
+
+    synthesizer = RecordingSynthesizer()
 
     AgentTaskExecutor(
         settings=settings,
-        llm_provider=FakeAgentProvider([]),
+        response_synthesizer=synthesizer,
         slack_client=slack_client,
     )._post_outputs(
         settings=settings,
@@ -1505,15 +1543,34 @@ def test_agent_executor_skips_humanizer_for_adk_planned_merger_final(
 
     events = task_events(db_session, task)
 
-    assert slack_client.messages[-1]["text"] == raw_answer
+    assert slack_client.messages[-1]["text"] == humanized_answer
     assert any(
+        event.payload.get("message") == "final_response_sanitized"
+        and event.payload.get("reason") == "internal_preamble_removed"
+        for event in events
+    )
+    assert any(
+        event.payload.get("message") == "response_humanizer_started" for event in events
+    )
+    assert any(
+        event.payload.get("message") == "response_humanizer_completed"
+        for event in events
+    )
+    assert not any(
         event.payload.get("message") == "response_humanizer_skipped"
         and event.payload.get("reason") == "adk_planned_merger_final"
         for event in events
     )
-    assert not any(
-        event.payload.get("message") == "response_humanizer_started" for event in events
-    )
+    assert synthesizer.raw_answers == [
+        (
+            "*Bottom line:* record Langfuse as the default observability "
+            "candidate and track Phoenix as the evaluation path. Capture the "
+            "decision in Linear, keep pricing/current docs as follow-up "
+            "evidence, and avoid creating a PDF unless the user explicitly "
+            "asks for one."
+        )
+    ]
+    assert "planned_workflow_merger" not in synthesizer.raw_answers[0]
 
 
 def test_agent_executor_humanizes_final_text_before_posting(

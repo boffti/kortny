@@ -44,6 +44,21 @@ def test_sanitize_humanized_response_falls_back_on_humanizer_leak() -> None:
     )
 
 
+def test_sanitize_humanized_response_strips_planned_workflow_preamble() -> None:
+    leaked = (
+        'The user said "research the top James Bond movies" and provided branch '
+        "context. I'm the planned_workflow_merger, so my job is to merge branch "
+        "outputs.\n\n"
+        "I'll present this as Kortny's final answer.\n"
+        ":clapper: James Bond Films\nCasino Royale is the best modern entry."
+    )
+
+    assert (
+        sanitize_humanized_response(leaked, fallback=leaked)
+        == ":clapper: James Bond Films\nCasino Royale is the best modern entry."
+    )
+
+
 def test_sanitize_humanized_response_golden_slack_cases() -> None:
     cases = [
         (

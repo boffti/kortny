@@ -93,13 +93,46 @@ HUMANIZER_LEAK_MARKERS = frozenset(
     {
         "_mode is",
         "answer_shape",
+        "branch outputs",
         "final_mode",
+        "i'm the planned_workflow_merger",
+        "i am the planned_workflow_merger",
+        "i can see that the integration branch",
+        "i can see that the workspace branch",
+        "i can see that the research branch",
+        "i'll present this as kortny's final answer",
+        "i’ll present this as kortny's final answer",
         "let me check",
         "let me write",
+        "my job is to merge",
+        "planned_integration_worker",
+        "planned_research_worker",
+        "planned_workflow",
+        "planned_workflow_merger",
+        "planned_workspace_worker",
         "raw_answer",
         "renderer_constraints",
         "response_record",
+        "the user said",
     }
+)
+FINAL_ANSWER_MARKERS = (
+    "final answer:",
+    "here is the final slack-ready answer:",
+    "here's the final slack-ready answer:",
+    "i'll present this as kortny's final answer.",
+    "i’ll present this as kortny's final answer.",
+)
+FINAL_ANSWER_LINE_PREFIXES = (
+    ":",
+    "*",
+    "bottom line",
+    "here's",
+    "here is",
+    "quick take",
+    "recommendation",
+    "short version",
+    "the short version",
 )
 MEMORY_TOOL_NAMES = frozenset(
     {"remember_fact", "recall_fact", "inspect_memory", "forget_fact"}
@@ -582,19 +615,50 @@ def synthesize_response(
 def sanitize_humanized_response(text: str | None, *, fallback: str) -> str:
     """Normalize a model-generated Slack response."""
 
+    safe_fallback = normalize_slack_mrkdwn(strip_internal_response_preamble(fallback))
     if text is None:
-        return normalize_slack_mrkdwn(fallback)
+        return safe_fallback
     message = _json_message(text)
     normalized = (
         (message if message is not None else text).strip().strip('"').strip("'").strip()
     )
     if not normalized:
-        return normalize_slack_mrkdwn(fallback)
+        return safe_fallback
     if _looks_like_humanizer_leak(normalized):
-        return normalize_slack_mrkdwn(fallback)
+        return safe_fallback
     if len(normalized) > MAX_HUMANIZED_CHARS:
         normalized = normalized[: MAX_HUMANIZED_CHARS - 1].rstrip() + "."
     return normalize_slack_mrkdwn(normalized)
+
+
+def strip_internal_response_preamble(text: str) -> str:
+    """Remove ADK/agent scratchpad text before a Slack-facing final answer."""
+
+    raw = text.strip()
+    if not raw:
+        return raw
+    head = raw[:2500].casefold()
+    if not _looks_like_humanizer_leak(head):
+        return raw
+
+    for marker in FINAL_ANSWER_MARKERS:
+        index = head.find(marker)
+        if index == -1:
+            continue
+        candidate = raw[index + len(marker) :].strip()
+        if _usable_final_answer_candidate(candidate):
+            return candidate
+
+    lines = raw.splitlines()
+    for index, line in enumerate(lines[1:], start=1):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if _looks_like_final_answer_start(stripped):
+            candidate = "\n".join(lines[index:]).strip()
+            if _usable_final_answer_candidate(candidate):
+                return candidate
+    return raw
 
 
 def _json_message(text: str) -> str | None:
@@ -613,6 +677,15 @@ def _json_message(text: str) -> str | None:
 def _looks_like_humanizer_leak(text: str) -> bool:
     normalized = text.casefold()
     return any(marker in normalized for marker in HUMANIZER_LEAK_MARKERS)
+
+
+def _looks_like_final_answer_start(line: str) -> bool:
+    normalized = line.casefold()
+    return normalized.startswith(FINAL_ANSWER_LINE_PREFIXES)
+
+
+def _usable_final_answer_candidate(text: str) -> bool:
+    return len(text.strip()) >= 40
 
 
 def build_response_record(

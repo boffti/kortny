@@ -951,11 +951,12 @@ class AdkAgentRuntime:
         self,
         tool: Any,
         args: dict[str, Any],
-        callback_context: CallbackContext,
+        tool_context: CallbackContext,
     ) -> dict[str, Any] | None:
         """Stop planned branch workers before they exceed tool-call budgets."""
 
         del args
+        callback_context = tool_context
         agent_name = callback_context.agent_name
         if agent_name not in ADK_PLANNED_BRANCH_AGENT_NAMES:
             return None
@@ -1497,13 +1498,16 @@ class AdkAgentRuntime:
         message = _planned_agent_final_message(author)
         if phase is None or message is None:
             return
+        event_text = _event_text(event)
+        if not event_text.strip():
+            return
         payload: dict[str, Any] = {
             "message": message,
             "runtime": "adk",
             "phase": phase,
             "adk_agent_name": author,
             "event_index": event_count,
-            "text_chars": len(_event_text(event)),
+            "text_chars": len(event_text),
         }
         branch = _planned_branch_name(author)
         if branch is not None:

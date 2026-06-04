@@ -59,6 +59,7 @@ from kortny.slack.humanizer import (
     LLMResponseSynthesizer,
     ResponseSynthesizer,
     StaticResponseSynthesizer,
+    strip_internal_response_preamble,
     synthesize_response,
 )
 from kortny.slack.membership import SlackChannelMembershipService
@@ -1127,14 +1128,26 @@ class AgentTaskExecutor:
                 )
                 return
             logger.info("posting final message task_id=%s", task.id)
+            response_source = strip_internal_response_preamble(result_summary)
+            if response_source != result_summary.strip():
+                task_service.append_event(
+                    task,
+                    TaskEventType.log,
+                    {
+                        "message": "final_response_sanitized",
+                        "reason": "internal_preamble_removed",
+                        "raw_chars": len(result_summary),
+                        "output_chars": len(response_source),
+                    },
+                )
             skip_humanizer_reason = _response_humanizer_skip_reason(
                 settings=settings,
                 session=session,
                 task=task,
-                raw_text=result_summary,
+                raw_text=response_source,
             )
             if skip_humanizer_reason is not None:
-                response_text = normalize_slack_mrkdwn(result_summary)
+                response_text = normalize_slack_mrkdwn(response_source)
                 task_service.append_event(
                     task,
                     TaskEventType.log,
@@ -1151,7 +1164,7 @@ class AgentTaskExecutor:
                     self._build_response_synthesizer(settings),
                     session=session,
                     task=task,
-                    raw_text=result_summary,
+                    raw_text=response_source,
                     task_service=task_service,
                 )
             poster.post_message(thread, response_text)
@@ -1713,14 +1726,6 @@ def _response_humanizer_skip_reason(
         return None
 
     events = _task_events(session, task)
-    completed = _latest_payload_event(
-        events,
-        message="adk_runtime_completed",
-    )
-    if completed is not None and completed.get("final_author") == (
-        "planned_workflow_merger"
-    ):
-        return "adk_planned_merger_final"
 
     if len(raw_text.strip()) >= settings.response_humanizer_min_chars:
         return None
@@ -1739,6 +1744,10 @@ def _response_humanizer_skip_reason(
         return None
     if route.get("tier") != ModelRouteTier.cheap_fast.value:
         return None
+    completed = _latest_payload_event(
+        events,
+        message="adk_runtime_completed",
+    )
     if completed is None:
         return None
     final_author = completed.get("final_author")

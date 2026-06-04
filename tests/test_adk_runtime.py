@@ -387,16 +387,16 @@ def test_adk_runtime_planned_branch_tool_budget_blocks_tool_and_next_model(
 
     assert (
         runtime._guard_planned_tool_call(
-            tool,
-            {"query": "best bond movies"},
-            cast(Any, callback_context),
+            tool=tool,
+            args={"query": "best bond movies"},
+            tool_context=cast(Any, callback_context),
         )
         is None
     )
     blocked_tool_result = runtime._guard_planned_tool_call(
-        tool,
-        {"query": "more bond rankings"},
-        cast(Any, callback_context),
+        tool=tool,
+        args={"query": "more bond rankings"},
+        tool_context=cast(Any, callback_context),
     )
     model_response = runtime._guard_planned_model_request(
         cast(Any, callback_context),

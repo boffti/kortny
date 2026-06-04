@@ -176,6 +176,33 @@ def test_post_message_posts_to_thread_and_logs_event(db_session: Session) -> Non
     assert side_effect.idempotency_key == f"slack:message:{task.id}:result"
 
 
+def test_post_message_allows_scheduled_channel_root_delivery(
+    db_session: Session,
+) -> None:
+    task = create_task(
+        db_session,
+        channel_id="C123",
+        thread_ts=None,
+    )
+    task.identity_kind = "scheduled"
+    db_session.flush()
+    client = FakeSlackClient()
+
+    message_ts = SlackPoster(session=db_session, client=client).post_message(
+        SlackThread.from_task(task),
+        "Scheduled update.",
+    )
+
+    assert message_ts == "1716400001.000001"
+    assert client.messages == [
+        {
+            "channel": "C123",
+            "text": "Scheduled update.",
+            "thread_ts": None,
+        }
+    ]
+
+
 def test_post_message_in_dm_posts_without_thread_ts(db_session: Session) -> None:
     task = create_task(db_session, channel_id="D123")
     client = FakeSlackClient()
@@ -545,7 +572,12 @@ def cleanup_database(session: Session) -> None:
         session.execute(delete(model))
 
 
-def create_task(session: Session, *, channel_id: str = "C123") -> Task:
+def create_task(
+    session: Session,
+    *,
+    channel_id: str = "C123",
+    thread_ts: str | None = "1716400000.000001",
+) -> Task:
     installation = Installation(slack_team_id=f"T{uuid.uuid4().hex}")
     session.add(installation)
     session.flush()
@@ -553,8 +585,8 @@ def create_task(session: Session, *, channel_id: str = "C123") -> Task:
         installation_id=installation.id,
         slack_event_id=f"Ev{uuid.uuid4().hex}",
         slack_channel_id=channel_id,
-        slack_thread_ts="1716400000.000001",
-        slack_message_ts="1716400000.000001",
+        slack_thread_ts=thread_ts,
+        slack_message_ts=thread_ts,
         slack_user_id="U123",
         input="make a report",
     )

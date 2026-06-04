@@ -421,6 +421,15 @@ class Schedule(Base):
     task_template: Mapped[dict] = mapped_column(
         JSONB, nullable=False, server_default=text("'{}'::jsonb")
     )
+    delivery_kind: Mapped[str] = mapped_column(
+        String, nullable=False, server_default=text("'slack_dm'")
+    )
+    delivery_slack_user_id: Mapped[str | None] = mapped_column(String)
+    delivery_slack_channel_id: Mapped[str | None] = mapped_column(String)
+    delivery_slack_thread_ts: Mapped[str | None] = mapped_column(String)
+    artifact_delivery_policy: Mapped[str] = mapped_column(
+        String, nullable=False, server_default=text("'message_only'")
+    )
     planned_cost_ceiling_usd: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
     idempotency_key_template: Mapped[str | None] = mapped_column(String)
     created_by_slack_user_id: Mapped[str | None] = mapped_column(String)
@@ -474,6 +483,16 @@ class Schedule(Base):
         CheckConstraint(
             "planned_cost_ceiling_usd is null or planned_cost_ceiling_usd > 0",
             name="ck_schedules_cost_ceiling",
+        ),
+        CheckConstraint(
+            "delivery_kind in "
+            "('slack_dm', 'slack_channel', 'slack_thread', 'dashboard_only')",
+            name="ck_schedules_delivery_kind",
+        ),
+        CheckConstraint(
+            "artifact_delivery_policy in "
+            "('message_only', 'attach_files', 'link_artifacts')",
+            name="ck_schedules_artifact_delivery_policy",
         ),
         Index(
             "idx_schedules_due",

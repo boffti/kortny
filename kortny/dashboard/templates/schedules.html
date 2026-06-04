@@ -1,0 +1,159 @@
+{% extends "base.html" %}
+
+{% block title %}Scheduled Tasks - Kortny Dashboard{% endblock %}
+
+{% block content %}
+  <section class="page-heading">
+    <div>
+      <h1>Scheduled Tasks</h1>
+      <p>Inspect recurring and delayed work Kortny will run from Slack requests.</p>
+    </div>
+    <a class="btn-ghost" href="{{ '/tasks' if dashboard_is_admin else '/me/tasks' }}">View Tasks</a>
+  </section>
+
+  {% if notice %}
+    <div class="notice notice-{{ notice_tone }}" role="status">{{ notice }}</div>
+  {% endif %}
+
+  <section class="summary-grid schedules-summary" aria-label="Scheduled task overview">
+    {% for metric in schedule_page.metrics %}
+      <div class="card metric-card metric-{{ metric.tone }}">
+        <span>{{ metric.label }}</span>
+        <strong>{{ metric.value }}</strong>
+        <small>{{ metric.detail }}</small>
+      </div>
+    {% endfor %}
+  </section>
+
+  <section class="memory-toolbar schedules-toolbar" aria-label="Scheduled task view selector">
+    {% if dashboard_is_admin %}
+      <nav class="segmented-nav">
+        <a class="segmented-item {{ 'active' if schedule_page.active_view == 'all' else '' }}" href="{{ schedules_base_path }}?view=all&status={{ schedule_page.status_filter }}" {% if schedule_page.active_view == 'all' %}aria-current="page"{% endif %}>All</a>
+        <a class="segmented-item {{ 'active' if schedule_page.active_view == 'my' else '' }}" href="{{ schedules_base_path }}?view=my&status={{ schedule_page.status_filter }}" {% if schedule_page.active_view == 'my' %}aria-current="page"{% endif %}>My Tasks</a>
+        <a class="segmented-item {{ 'active' if schedule_page.active_view == 'system' else '' }}" href="{{ schedules_base_path }}?view=system&status={{ schedule_page.status_filter }}" {% if schedule_page.active_view == 'system' %}aria-current="page"{% endif %}>System Tasks</a>
+      </nav>
+    {% else %}
+      <nav class="segmented-nav">
+        <a class="segmented-item active" href="{{ schedules_base_path }}?status={{ schedule_page.status_filter }}" aria-current="page">My Tasks</a>
+      </nav>
+    {% endif %}
+    <p>
+      Showing {{ schedule_page.first_item|number }}-{{ schedule_page.last_item|number }}
+      of {{ schedule_page.total_count|number }} scheduled task{{ "" if schedule_page.total_count == 1 else "s" }}.
+    </p>
+  </section>
+
+  <section class="card detail-section">
+    <header>
+      <h2>Schedule Registry</h2>
+      <p>Active schedules are materialized into normal tasks when they become due.</p>
+    </header>
+
+    <form class="filters panel-filters schedules-filters" method="get" action="{{ schedules_base_path }}">
+      {% if dashboard_is_admin %}
+        <input type="hidden" name="view" value="{{ schedule_page.active_view }}">
+      {% endif %}
+      <label>
+        Status
+        <select class="input" name="status">
+          <option value="all" {{ "selected" if schedule_page.status_filter == "all" else "" }}>All statuses</option>
+          <option value="active" {{ "selected" if schedule_page.status_filter == "active" else "" }}>Active</option>
+          <option value="paused" {{ "selected" if schedule_page.status_filter == "paused" else "" }}>Paused</option>
+          <option value="proposed" {{ "selected" if schedule_page.status_filter == "proposed" else "" }}>Proposed</option>
+          <option value="completed" {{ "selected" if schedule_page.status_filter == "completed" else "" }}>Completed</option>
+          <option value="cancelled" {{ "selected" if schedule_page.status_filter == "cancelled" else "" }}>Cancelled</option>
+        </select>
+      </label>
+      <button class="btn" type="submit">Apply</button>
+      <a class="btn-ghost" href="{{ schedules_base_path }}">Reset</a>
+    </form>
+
+    <div class="schedule-list" role="list" aria-label="Scheduled tasks">
+      {% for row in schedule_page.rows %}
+        <article class="schedule-row" role="listitem">
+          <div class="schedule-main">
+            <div class="schedule-title">
+              <span class="badge badge-{{ row.tone }}">{{ row.schedule.status }}</span>
+              <strong>{{ row.schedule.title }}</strong>
+            </div>
+            <dl class="schedule-meta">
+              <div>
+                <dt>Cadence</dt>
+                <dd>{{ row.cadence }}</dd>
+              </div>
+              <div>
+                <dt>Owner</dt>
+                <dd>{{ row.owner }}</dd>
+              </div>
+              <div>
+                <dt>Delivery</dt>
+                <dd>{{ row.delivery }}</dd>
+              </div>
+              <div>
+                <dt>Budget</dt>
+                <dd>{{ row.budget }}</dd>
+              </div>
+            </dl>
+          </div>
+          <aside class="schedule-side">
+            <dl class="schedule-run-times">
+              <div>
+                <dt>Next run</dt>
+                <dd>{{ row.next_run }}</dd>
+              </div>
+              <div>
+                <dt>Last run</dt>
+                <dd>{{ row.last_run }}</dd>
+              </div>
+            </dl>
+            <div class="schedule-actions" aria-label="Schedule actions">
+              {% if row.can_activate %}
+                <form method="post" action="/schedules/{{ row.schedule.id }}/activate" onsubmit="return confirm('Activate this scheduled task?');">
+                  <input type="hidden" name="next" value="{{ schedules_return_path }}">
+                  <button class="btn" type="submit">Activate</button>
+                </form>
+              {% endif %}
+              {% if row.can_pause %}
+                <form method="post" action="/schedules/{{ row.schedule.id }}/pause" onsubmit="return confirm('Pause this scheduled task?');">
+                  <input type="hidden" name="next" value="{{ schedules_return_path }}">
+                  <button class="btn-ghost" type="submit">Pause</button>
+                </form>
+              {% endif %}
+              {% if row.can_resume %}
+                <form method="post" action="/schedules/{{ row.schedule.id }}/resume" onsubmit="return confirm('Resume this scheduled task?');">
+                  <input type="hidden" name="next" value="{{ schedules_return_path }}">
+                  <button class="btn" type="submit">Resume</button>
+                </form>
+              {% endif %}
+              {% if row.can_cancel %}
+                <form method="post" action="/schedules/{{ row.schedule.id }}/cancel" onsubmit="return confirm('Cancel this scheduled task? Audit history will remain.');">
+                  <input type="hidden" name="next" value="{{ schedules_return_path }}">
+                  <button class="btn-ghost btn-danger" type="submit">Cancel</button>
+                </form>
+              {% endif %}
+              {% if not row.can_activate and not row.can_pause and not row.can_resume and not row.can_cancel %}
+                <span class="identity-id">No active controls</span>
+              {% endif %}
+            </div>
+          </aside>
+        </article>
+      {% else %}
+        <p class="empty attention-empty">No scheduled tasks match these filters.</p>
+      {% endfor %}
+    </div>
+  </section>
+
+  <nav class="pager" role="navigation" aria-label="Scheduled task pages">
+    {% if schedule_page.previous_page_url %}
+      <a class="btn-ghost" href="{{ schedule_page.previous_page_url }}">Previous</a>
+    {% else %}
+      <span class="btn-ghost disabled" aria-disabled="true">Previous</span>
+    {% endif %}
+    <strong>Page {{ schedule_page.page|number }} of {{ schedule_page.total_pages|number }}</strong>
+    {% if schedule_page.next_page_url %}
+      <a class="btn-ghost" href="{{ schedule_page.next_page_url }}">Next</a>
+    {% else %}
+      <span class="btn-ghost disabled" aria-disabled="true">Next</span>
+    {% endif %}
+  </nav>
+{% endblock %}

@@ -61,6 +61,7 @@ from kortny.dashboard.memory_actions import (
     forget_fact,
     supersede_fact,
 )
+from kortny.dashboard.schedules import apply_schedule_action, get_schedule_dashboard
 from kortny.dashboard.settings import DashboardSettings, load_dashboard_settings
 from kortny.db.models import (
     ComposioConnection,
@@ -1429,6 +1430,39 @@ def register_routes(app: FastAPI) -> None:
             },
         )
 
+    @app.get("/me/schedules", response_class=HTMLResponse)
+    def me_schedules(
+        request: Request,
+        session: Annotated[Session, Depends(get_session)],
+        principal: Annotated[DashboardPrincipal, Depends(require_principal)],
+        schedule_status: Annotated[str, Query(alias="status")] = "all",
+        page: Annotated[int, Query(ge=1)] = 1,
+        notice: Annotated[str | None, Query()] = None,
+        notice_tone: Annotated[str, Query()] = "success",
+    ) -> Response:
+        schedule_page = get_schedule_dashboard(
+            session,
+            installation_id=principal.installation_id,
+            slack_user_id=principal.slack_user_id,
+            is_admin=False,
+            view="my",
+            status=schedule_status,
+            page=page,
+            base_path="/me/schedules",
+        )
+        return templates.TemplateResponse(
+            request=request,
+            name="schedules.html",
+            context={
+                **_dashboard_context(principal, active_page="me_schedules"),
+                "schedule_page": schedule_page,
+                "schedules_base_path": "/me/schedules",
+                "schedules_return_path": _request_path(request),
+                "notice": notice,
+                "notice_tone": _notice_tone(notice_tone),
+            },
+        )
+
     @app.get("/me/memory", response_class=HTMLResponse)
     def me_memory(
         request: Request,
@@ -1707,6 +1741,65 @@ def register_routes(app: FastAPI) -> None:
                 "system": system_health,
             },
         )
+
+    @app.get("/schedules", response_class=HTMLResponse)
+    def schedules(
+        request: Request,
+        session: Annotated[Session, Depends(get_session)],
+        principal: Annotated[DashboardPrincipal, Depends(require_admin)],
+        view: Annotated[str, Query()] = "all",
+        schedule_status: Annotated[str, Query(alias="status")] = "all",
+        page: Annotated[int, Query(ge=1)] = 1,
+        notice: Annotated[str | None, Query()] = None,
+        notice_tone: Annotated[str, Query()] = "success",
+    ) -> Response:
+        schedule_page = get_schedule_dashboard(
+            session,
+            installation_id=principal.installation_id,
+            slack_user_id=principal.slack_user_id,
+            is_admin=True,
+            view=view,
+            status=schedule_status,
+            page=page,
+            base_path="/schedules",
+        )
+        return templates.TemplateResponse(
+            request=request,
+            name="schedules.html",
+            context={
+                **_dashboard_context(principal, active_page="schedules"),
+                "schedule_page": schedule_page,
+                "schedules_base_path": "/schedules",
+                "schedules_return_path": _request_path(request),
+                "notice": notice,
+                "notice_tone": _notice_tone(notice_tone),
+            },
+        )
+
+    @app.post("/schedules/{schedule_id}/{action}")
+    async def schedule_action(
+        request: Request,
+        session: Annotated[Session, Depends(get_session)],
+        principal: Annotated[DashboardPrincipal, Depends(require_principal)],
+        schedule_id: UUID,
+        action: str,
+    ) -> RedirectResponse:
+        form = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
+        default_next = "/schedules" if principal.role == "admin" else "/me/schedules"
+        next_path = _safe_next_path(form.get("next", [default_next])[0])
+        try:
+            notice = apply_schedule_action(
+                session,
+                schedule_id=schedule_id,
+                action=action,
+                installation_id=principal.installation_id,
+                slack_user_id=principal.slack_user_id,
+                is_admin=principal.role == "admin",
+            )
+        except ValueError as exc:
+            session.rollback()
+            return _redirect_with_notice(next_path, str(exc), tone="danger")
+        return _redirect_with_notice(next_path, notice)
 
     @app.get("/playground", response_class=HTMLResponse)
     def playground(

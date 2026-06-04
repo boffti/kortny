@@ -87,8 +87,11 @@ def test_materializer_turns_due_oneoff_schedule_into_pending_task(
         now - timedelta(seconds=30)
     ).isoformat()
     assert task.identity_payload["planned_cost_ceiling_usd"] == "0.2500"
+    assert task.identity_payload["delivery_kind"] == "slack_dm"
+    assert task.identity_payload["artifact_delivery_policy"] == "message_only"
     assert task.slack_channel_id == "DTestUser"
     assert task.slack_user_id == "UTestUser"
+    assert task.slack_thread_ts == "DTestUser"
 
     materialized_event = db_session.scalar(
         select(TaskEvent).where(
@@ -99,6 +102,41 @@ def test_materializer_turns_due_oneoff_schedule_into_pending_task(
     )
     assert materialized_event is not None
     assert materialized_event.payload["schedule_id"] == str(schedule.id)
+    assert materialized_event.payload["delivery_kind"] == "slack_dm"
+
+
+def test_materializer_uses_channel_root_delivery_contract(
+    db_session: Session,
+) -> None:
+    now = datetime(2026, 6, 4, 9, 30, tzinfo=UTC)
+    schedule = create_schedule(
+        db_session,
+        spec_kind="oneoff",
+        run_at=now - timedelta(seconds=30),
+        next_run_at=now - timedelta(seconds=30),
+    )
+    schedule.delivery_kind = "slack_channel"
+    schedule.delivery_slack_channel_id = "CMarket"
+    schedule.delivery_slack_thread_ts = None
+    schedule.task_template = {
+        **dict(schedule.task_template),
+        "slack_channel_id": "CMarket",
+        "slack_thread_ts": None,
+        "delivery_surface": "channel",
+    }
+    db_session.commit()
+
+    results = ScheduleMaterializer(db_session).materialize_due_schedules(
+        now=now,
+        use_advisory_lock=False,
+    )
+    db_session.commit()
+
+    task = db_session.get(Task, results[0].task_id)
+    assert task is not None
+    assert task.slack_channel_id == "CMarket"
+    assert task.slack_thread_ts is None
+    assert task.identity_payload["delivery_kind"] == "slack_channel"
 
 
 def test_materializer_skips_stale_oneoff_when_catchup_window_elapsed(
@@ -227,11 +265,18 @@ def create_schedule(
         catchup_window_seconds=catchup_window_seconds,
         overlap_policy="skip",
         status="active",
+        delivery_kind="slack_dm",
+        delivery_slack_user_id="UTestUser",
+        delivery_slack_channel_id="DTestUser",
+        delivery_slack_thread_ts="DTestUser",
+        artifact_delivery_policy="message_only",
         task_template={
             "input": "check unresolved decisions I was involved in",
             "slack_channel_id": "DTestUser",
             "slack_user_id": "UTestUser",
             "slack_thread_ts": "DTestUser",
+            "delivery_surface": "dm",
+            "artifact_delivery_policy": "message_only",
         },
         planned_cost_ceiling_usd=planned_cost_ceiling_usd,
         created_by_slack_user_id="UTestUser",

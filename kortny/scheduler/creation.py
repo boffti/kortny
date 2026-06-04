@@ -139,6 +139,24 @@ LEADING_CADENCE_RE = re.compile(
     r")\s*,?\s*",
     re.IGNORECASE,
 )
+THREAD_DELIVERY_RE = re.compile(
+    r"\b(this thread|same thread|reply here|reply in this thread|"
+    r"in this thread|keep it here)\b",
+    re.IGNORECASE,
+)
+CHANNEL_DELIVERY_RE = re.compile(
+    r"\b(?:post|send|deliver|share)\b.{0,40}\b(?:here|this channel|the channel)\b|"
+    r"\b(?:in|to)\s+this\s+channel\b",
+    re.IGNORECASE,
+)
+ATTACH_ARTIFACTS_RE = re.compile(
+    r"\b(attach|upload|send)\b.{0,32}\b(files?|artifacts?|pdfs?|reports?)\b",
+    re.IGNORECASE,
+)
+LINK_ARTIFACTS_RE = re.compile(
+    r"\b(link|links only|artifact links?|report links?)\b",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,6 +186,35 @@ class ScheduleProposal:
 
 
 @dataclass(frozen=True, slots=True)
+class ScheduleDelivery:
+    """Explicit delivery destination for a scheduled run."""
+
+    kind: str
+    slack_user_id: str | None
+    slack_channel_id: str | None
+    slack_thread_ts: str | None
+    artifact_policy: str = "message_only"
+
+    @property
+    def legacy_surface(self) -> str:
+        return {
+            "slack_dm": "dm",
+            "slack_channel": "channel",
+            "slack_thread": "thread",
+            "dashboard_only": "dashboard",
+        }[self.kind]
+
+    @property
+    def response_label(self) -> str:
+        return {
+            "slack_dm": "in this DM",
+            "slack_channel": "in this channel",
+            "slack_thread": "in this thread",
+            "dashboard_only": "in the dashboard",
+        }[self.kind]
+
+
+@dataclass(frozen=True, slots=True)
 class ScheduleCreationContext:
     """Slack context needed to propose a schedule."""
 
@@ -181,9 +228,7 @@ class ScheduleCreationContext:
 
     @property
     def delivery_surface(self) -> str:
-        if self.source_surface == "dm" or self.slack_channel_id.startswith("D"):
-            return "dm"
-        return "thread"
+        return infer_schedule_delivery(context=self, text="").legacy_surface
 
 
 class ScheduleCreationService:
@@ -218,6 +263,7 @@ class ScheduleCreationService:
 
         needs_confirmation = _needs_confirmation(text=text, draft=draft)
         status = "proposed" if needs_confirmation else "active"
+        delivery = infer_schedule_delivery(context=context, text=text)
         schedule = Schedule(
             installation_id=context.installation_id,
             owner_type="user",
@@ -233,12 +279,18 @@ class ScheduleCreationService:
             catchup_window_seconds=DEFAULT_CATCHUP_WINDOW_SECONDS,
             overlap_policy="skip",
             status=status,
+            delivery_kind=delivery.kind,
+            delivery_slack_user_id=delivery.slack_user_id,
+            delivery_slack_channel_id=delivery.slack_channel_id,
+            delivery_slack_thread_ts=delivery.slack_thread_ts,
+            artifact_delivery_policy=delivery.artifact_policy,
             task_template={
                 "input": draft.task_input,
-                "slack_channel_id": context.slack_channel_id,
-                "slack_user_id": context.slack_user_id,
-                "slack_thread_ts": context.slack_thread_ts,
-                "delivery_surface": context.delivery_surface,
+                "slack_channel_id": delivery.slack_channel_id,
+                "slack_user_id": delivery.slack_user_id,
+                "slack_thread_ts": delivery.slack_thread_ts,
+                "delivery_surface": delivery.legacy_surface,
+                "artifact_delivery_policy": delivery.artifact_policy,
             },
             planned_cost_ceiling_usd=DEFAULT_SCHEDULE_BUDGET_USD,
             created_by_slack_user_id=context.slack_user_id,
@@ -247,7 +299,9 @@ class ScheduleCreationService:
                 "source_surface": context.source_surface,
                 "original_input": text,
                 "cadence_label": draft.cadence_label,
-                "delivery_surface": context.delivery_surface,
+                "delivery_surface": delivery.legacy_surface,
+                "delivery_kind": delivery.kind,
+                "artifact_delivery_policy": delivery.artifact_policy,
                 "confirmation_required": needs_confirmation,
                 "parse_strategy": draft.parse_strategy,
             },
@@ -264,7 +318,9 @@ class ScheduleCreationService:
                 "cadence_label": draft.cadence_label,
                 "next_run_at": draft.next_run_at.isoformat(),
                 "timezone": draft.timezone,
-                "delivery_surface": context.delivery_surface,
+                "delivery_surface": delivery.legacy_surface,
+                "delivery_kind": delivery.kind,
+                "artifact_delivery_policy": delivery.artifact_policy,
                 "planned_cost_ceiling_usd": str(DEFAULT_SCHEDULE_BUDGET_USD),
                 "confirmation_required": needs_confirmation,
             },
@@ -287,8 +343,9 @@ class ScheduleCreationService:
             response_text=format_schedule_proposal(
                 schedule=schedule,
                 draft=draft,
-                delivery_surface=context.delivery_surface,
+                delivery_surface=delivery.legacy_surface,
                 needs_confirmation=needs_confirmation,
+                delivery_label=delivery.response_label,
             ),
         )
 
@@ -297,6 +354,52 @@ def looks_like_schedule_request(text: str) -> bool:
     """Return whether a user message explicitly asks for scheduled work."""
 
     return bool(SCHEDULE_RE.search(text))
+
+
+def infer_schedule_delivery(
+    *,
+    context: ScheduleCreationContext,
+    text: str,
+) -> ScheduleDelivery:
+    """Infer a deliverable Slack destination from the request surface."""
+
+    artifact_policy = _artifact_delivery_policy(text)
+    if context.source_surface == "dm" or context.slack_channel_id.startswith("D"):
+        return ScheduleDelivery(
+            kind="slack_dm",
+            slack_user_id=context.slack_user_id,
+            slack_channel_id=context.slack_channel_id,
+            slack_thread_ts=context.slack_thread_ts,
+            artifact_policy=artifact_policy,
+        )
+
+    if THREAD_DELIVERY_RE.search(text):
+        return ScheduleDelivery(
+            kind="slack_thread",
+            slack_user_id=context.slack_user_id,
+            slack_channel_id=context.slack_channel_id,
+            slack_thread_ts=context.slack_thread_ts,
+            artifact_policy=artifact_policy,
+        )
+
+    if CHANNEL_DELIVERY_RE.search(text):
+        return ScheduleDelivery(
+            kind="slack_channel",
+            slack_user_id=context.slack_user_id,
+            slack_channel_id=context.slack_channel_id,
+            slack_thread_ts=None,
+            artifact_policy=artifact_policy,
+        )
+
+    # Channel-origin schedules are recurring by definition, so the safe default
+    # is the request thread instead of the channel root.
+    return ScheduleDelivery(
+        kind="slack_thread",
+        slack_user_id=context.slack_user_id,
+        slack_channel_id=context.slack_channel_id,
+        slack_thread_ts=context.slack_thread_ts,
+        artifact_policy=artifact_policy,
+    )
 
 
 def parse_schedule_request(
@@ -401,10 +504,11 @@ def format_schedule_proposal(
     draft: ScheduleDraft,
     delivery_surface: str,
     needs_confirmation: bool,
+    delivery_label: str | None = None,
 ) -> str:
     """Render a Slack-native schedule response."""
 
-    destination = "here" if delivery_surface == "dm" else "in this thread"
+    destination = delivery_label or ("in this DM" if delivery_surface == "dm" else "in this thread")
     first_run = _human_next_run(draft.next_run_at, timezone=draft.timezone)
     task_summary = _human_task_summary(draft.task_input)
     cadence = draft.cadence_label[:1].lower() + draft.cadence_label[1:]
@@ -489,6 +593,14 @@ def _task_input_from_schedule_text(text: str) -> str:
 def _needs_confirmation(*, text: str, draft: ScheduleDraft) -> bool:
     del draft
     return bool(CONFIRMATION_REQUEST_RE.search(text))
+
+
+def _artifact_delivery_policy(text: str) -> str:
+    if ATTACH_ARTIFACTS_RE.search(text):
+        return "attach_files"
+    if LINK_ARTIFACTS_RE.search(text):
+        return "link_artifacts"
+    return "message_only"
 
 
 def _human_next_run(value: datetime, *, timezone: str) -> str:

@@ -543,9 +543,20 @@ def _next_run_label(schedule: Schedule) -> str:
 
 def _delivery_label(schedule: Schedule) -> str:
     template = schedule.task_template if isinstance(schedule.task_template, dict) else {}
+    delivery_kind = getattr(schedule, "delivery_kind", None)
+    if delivery_kind == "slack_dm":
+        return "this DM"
+    if delivery_kind == "slack_channel":
+        return "this channel"
+    if delivery_kind == "slack_thread":
+        return "this thread"
+    if delivery_kind == "dashboard_only":
+        return "the dashboard"
     delivery_surface = template.get("delivery_surface")
     if delivery_surface == "dm":
         return "this DM"
+    if delivery_surface == "channel":
+        return "this channel"
     return "this thread"
 
 

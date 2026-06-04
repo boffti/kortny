@@ -58,13 +58,13 @@ class SlackThread:
     """Slack channel/thread target, optionally tied to a task."""
 
     channel_id: str
-    thread_ts: str
+    thread_ts: str | None
     task_id: uuid.UUID | None = None
 
     @classmethod
     def from_task(cls, task: Task) -> SlackThread:
         thread_ts = task.slack_thread_ts or task.slack_message_ts
-        if not thread_ts:
+        if not thread_ts and task.identity_kind != "scheduled":
             raise ValueError("Task has no Slack thread timestamp")
         return cls(
             channel_id=task.slack_channel_id,

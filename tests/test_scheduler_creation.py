@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, datetime
 
-from kortny.scheduler import looks_like_schedule_request, parse_schedule_request
+from kortny.scheduler import (
+    ScheduleCreationContext,
+    infer_schedule_delivery,
+    looks_like_schedule_request,
+    parse_schedule_request,
+)
 from kortny.scheduler.creation import format_schedule_proposal
 
 
@@ -76,6 +82,44 @@ def test_parse_daily_schedule_with_explicit_central_time_humanizes_response() ->
     assert "I'll send a stock market update every morning at 8:00 AM Central time" in response
     assert "First check is tomorrow at 8:00 AM Central time" in response
     assert "I'll at" not in response
+
+
+def test_infer_schedule_delivery_from_surface_and_text() -> None:
+    source_task_id = uuid.uuid4()
+    dm_context = ScheduleCreationContext(
+        installation_id=uuid.uuid4(),
+        slack_channel_id="D123",
+        slack_user_id="U123",
+        slack_thread_ts="D123",
+        source_surface="dm",
+        source_task_id=source_task_id,
+    )
+    channel_context = ScheduleCreationContext(
+        installation_id=uuid.uuid4(),
+        slack_channel_id="C123",
+        slack_user_id="U123",
+        slack_thread_ts="1716400000.000001",
+        source_surface="app_mention",
+        source_task_id=source_task_id,
+    )
+
+    dm_delivery = infer_schedule_delivery(context=dm_context, text="Every morning")
+    thread_delivery = infer_schedule_delivery(
+        context=channel_context,
+        text="Every morning check the market",
+    )
+    channel_delivery = infer_schedule_delivery(
+        context=channel_context,
+        text="Every morning post the market update in this channel and attach files",
+    )
+
+    assert dm_delivery.kind == "slack_dm"
+    assert dm_delivery.response_label == "in this DM"
+    assert thread_delivery.kind == "slack_thread"
+    assert thread_delivery.slack_thread_ts == "1716400000.000001"
+    assert channel_delivery.kind == "slack_channel"
+    assert channel_delivery.slack_thread_ts is None
+    assert channel_delivery.artifact_policy == "attach_files"
 
 
 def test_schedule_detector_ignores_plain_work_requests() -> None:

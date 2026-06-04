@@ -775,6 +775,11 @@ def test_dm_scheduling_request_creates_active_schedule(
     assert schedule.owner_slack_user_id == "U123"
     assert schedule.spec_kind == "cron"
     assert schedule.cron_expr == "0 9 * * *"
+    assert schedule.delivery_kind == "slack_dm"
+    assert schedule.delivery_slack_user_id == "U123"
+    assert schedule.delivery_slack_channel_id == "D123"
+    assert schedule.delivery_slack_thread_ts == "D123"
+    assert schedule.artifact_delivery_policy == "message_only"
     assert schedule.task_template["delivery_surface"] == "dm"
     assert schedule.task_template["slack_channel_id"] == "D123"
     assert schedule.task_template["slack_thread_ts"] == "D123"
@@ -790,6 +795,7 @@ def test_dm_scheduling_request_creates_active_schedule(
     assert "Done" in client.calls[0]["text"]
     assert "PYPL" in client.calls[0]["text"]
     assert "every morning" in client.calls[0]["text"].casefold()
+    assert "this DM" in client.calls[0]["text"]
     assert "pause, change, or cancel" in client.calls[0]["text"]
     assert "Schedule id" not in client.calls[0]["text"]
     assert "Budget cap" not in client.calls[0]["text"]
@@ -800,6 +806,7 @@ def test_dm_scheduling_request_creates_active_schedule(
         event.payload.get("message") == "schedule_created"
         and event.payload.get("schedule_id") == str(schedule.id)
         and event.payload.get("schedule_status") == "active"
+        and event.payload.get("delivery_kind") == "slack_dm"
         for event in events
     )
     message_event = next(
@@ -809,6 +816,73 @@ def test_dm_scheduling_request_creates_active_schedule(
         and event.payload.get("purpose") == "schedule_created"
     )
     assert message_event.payload["text"] == client.calls[0]["text"]
+
+
+def test_channel_scheduling_request_defaults_to_thread_delivery(
+    db_session: Session,
+) -> None:
+    client = FakeSlackClient()
+    result = SlackIngress(
+        session=db_session,
+        client=client,
+        intent_classifier=FakeIntentClassifier(intent_decision()),
+        reaction_provider=FakeReactionProvider(name="calendar", intent="scheduled"),
+    ).handle_app_mention(
+        body=app_mention_body(event_id="EvScheduleChannel"),
+        event=app_mention_event(
+            text="<@UBOT> Every morning check the market and summarize it",
+            ts="1716400200.000001",
+        ),
+    )
+    db_session.commit()
+
+    assert result is not None
+    schedule = db_session.scalar(select(Schedule))
+    assert schedule is not None
+    assert schedule.status == "active"
+    assert schedule.delivery_kind == "slack_thread"
+    assert schedule.delivery_slack_user_id == "U123"
+    assert schedule.delivery_slack_channel_id == "C123"
+    assert schedule.delivery_slack_thread_ts == "1716400200.000001"
+    assert schedule.task_template["delivery_surface"] == "thread"
+
+    assert len(client.calls) == 1
+    assert client.calls[0]["channel"] == "C123"
+    assert client.calls[0]["thread_ts"] == "1716400200.000001"
+    assert "this thread" in client.calls[0]["text"]
+
+
+def test_channel_scheduling_request_can_target_channel_root(
+    db_session: Session,
+) -> None:
+    client = FakeSlackClient()
+    result = SlackIngress(
+        session=db_session,
+        client=client,
+        intent_classifier=FakeIntentClassifier(intent_decision()),
+        reaction_provider=FakeReactionProvider(name="calendar", intent="scheduled"),
+    ).handle_app_mention(
+        body=app_mention_body(event_id="EvScheduleChannelRoot"),
+        event=app_mention_event(
+            text="<@UBOT> Every morning post a market update in this channel",
+            ts="1716400300.000001",
+        ),
+    )
+    db_session.commit()
+
+    assert result is not None
+    schedule = db_session.scalar(select(Schedule))
+    assert schedule is not None
+    assert schedule.status == "active"
+    assert schedule.delivery_kind == "slack_channel"
+    assert schedule.delivery_slack_channel_id == "C123"
+    assert schedule.delivery_slack_thread_ts is None
+    assert schedule.task_template["delivery_surface"] == "channel"
+
+    assert len(client.calls) == 1
+    assert client.calls[0]["channel"] == "C123"
+    assert client.calls[0]["thread_ts"] == "1716400300.000001"
+    assert "this channel" in client.calls[0]["text"]
 
 
 def test_dm_confirmation_activates_latest_proposed_schedule(

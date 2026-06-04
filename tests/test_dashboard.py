@@ -38,6 +38,7 @@ from kortny.db.models import (
     LLMProvider,
     LLMUsage,
     ModelPricing,
+    Schedule,
     SlackChannelMembership,
     SlackIdentity,
     Task,
@@ -435,6 +436,172 @@ def test_dashboard_member_is_filtered_to_own_tasks(
     assert own_detail_response.status_code == 200
     assert "Member private task" in own_detail_response.text
     assert other_detail_response.status_code == 404
+
+
+def test_dashboard_admin_can_view_and_pause_schedules(
+    client: tuple[TestClient, Session],
+) -> None:
+    test_client, session = client
+    installation = Installation(slack_team_id="TSchedules", team_name="Schedules Team")
+    session.add(installation)
+    session.flush()
+    active = create_dashboard_schedule(
+        session,
+        installation=installation,
+        title="Send stock market update",
+        owner_slack_user_id="UScheduleOwner",
+        status="active",
+    )
+    system = create_dashboard_schedule(
+        session,
+        installation=installation,
+        title="Workflow Discovery",
+        owner_type="system",
+        owner_slack_user_id=None,
+        status="paused",
+    )
+    session.commit()
+    login(test_client)
+
+    page_response = test_client.get("/schedules")
+    system_response = test_client.get("/schedules?view=system")
+    pause_response = test_client.post(
+        f"/schedules/{active.id}/pause",
+        data={"next": "/schedules"},
+        follow_redirects=False,
+    )
+
+    assert page_response.status_code == 200
+    assert "Scheduled Tasks" in page_response.text
+    assert "Send stock market update" in page_response.text
+    assert "Workflow Discovery" in page_response.text
+    assert "Every morning at 8:00 AM Central time" in page_response.text
+    assert system_response.status_code == 200
+    assert "Workflow Discovery" in system_response.text
+    assert "Send stock market update" not in system_response.text
+    assert pause_response.status_code == 303
+    assert "notice=Scheduled+task+paused." in pause_response.headers["location"]
+    session.refresh(active)
+    session.refresh(system)
+    assert active.status == "paused"
+    assert system.status == "paused"
+
+
+def test_dashboard_member_schedules_are_scoped_to_their_user(
+    db_session: Session,
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert TEST_POSTGRES_URL is not None
+    installation = Installation(slack_team_id="TMemberSchedules", team_name="Member Team")
+    db_session.add(installation)
+    db_session.flush()
+    own_schedule = create_dashboard_schedule(
+        db_session,
+        installation=installation,
+        title="Member market update",
+        owner_slack_user_id="UMemberSchedule",
+        status="active",
+    )
+    other_schedule = create_dashboard_schedule(
+        db_session,
+        installation=installation,
+        title="Other user's schedule",
+        owner_slack_user_id="UOtherSchedule",
+        status="active",
+    )
+    system_schedule = create_dashboard_schedule(
+        db_session,
+        installation=installation,
+        title="System heartbeat",
+        owner_type="system",
+        owner_slack_user_id=None,
+        status="active",
+    )
+    dashboard_user = DashboardUser(
+        installation_id=installation.id,
+        slack_user_id="UMemberSchedule",
+        email="member-schedule@example.com",
+        display_name="Member Schedule",
+        role="member",
+        status="active",
+    )
+    oauth_state = DashboardOAuthState(
+        provider="slack",
+        state="member-schedule-state",
+        redirect_path="/me/schedules",
+        expires_at=datetime.now(UTC) + timedelta(minutes=10),
+    )
+    db_session.add_all([dashboard_user, oauth_state])
+    db_session.commit()
+    session_factory = make_session_factory(engine=engine)
+    settings = slack_dashboard_settings()
+
+    class FakeSlackOpenIDClient:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def exchange_code(self, *, code: str) -> str:
+            assert code == "member-schedule-code"
+            return "member-schedule-token"
+
+        def user_info(self, *, access_token: str) -> SlackOpenIDProfile:
+            assert access_token == "member-schedule-token"
+            return SlackOpenIDProfile(
+                team_id="TMemberSchedules",
+                user_id="UMemberSchedule",
+                display_name="Member Schedule",
+                email="member-schedule@example.com",
+                avatar_url=None,
+                raw_json={
+                    "name": "Member Schedule",
+                    "https://slack.com/team_id": "TMemberSchedules",
+                    "https://slack.com/user_id": "UMemberSchedule",
+                },
+            )
+
+    monkeypatch.setattr(
+        "kortny.dashboard.app.SlackOpenIDClient",
+        FakeSlackOpenIDClient,
+    )
+    with TestClient(
+        create_app(settings=settings, session_factory=session_factory)
+    ) as test_client:
+        login_response = test_client.get(
+            "/auth/slack/callback?code=member-schedule-code&state=member-schedule-state",
+            follow_redirects=False,
+        )
+        page_response = test_client.get("/me/schedules")
+        admin_response = test_client.get("/schedules", follow_redirects=False)
+        blocked_cancel = test_client.post(
+            f"/schedules/{other_schedule.id}/cancel",
+            data={"next": "/me/schedules"},
+            follow_redirects=False,
+        )
+        cancel_response = test_client.post(
+            f"/schedules/{own_schedule.id}/cancel",
+            data={"next": "/me/schedules"},
+            follow_redirects=False,
+        )
+
+    assert login_response.status_code == 303
+    assert login_response.headers["location"] == "/me/schedules"
+    assert page_response.status_code == 200
+    assert "Member market update" in page_response.text
+    assert "Other user's schedule" not in page_response.text
+    assert "System heartbeat" not in page_response.text
+    assert admin_response.status_code == 403
+    assert blocked_cancel.status_code == 303
+    assert "notice_tone=danger" in blocked_cancel.headers["location"]
+    assert cancel_response.status_code == 303
+    assert "notice=Scheduled+task+cancelled." in cancel_response.headers["location"]
+    db_session.refresh(own_schedule)
+    db_session.refresh(other_schedule)
+    db_session.refresh(system_schedule)
+    assert own_schedule.status == "cancelled"
+    assert own_schedule.next_run_at is None
+    assert other_schedule.status == "active"
+    assert system_schedule.status == "active"
 
 
 def test_dashboard_admin_can_manage_dashboard_user_role_and_status(
@@ -2769,6 +2936,57 @@ def create_dashboard_task(
     return task
 
 
+def create_dashboard_schedule(
+    session: Session,
+    *,
+    installation: Installation,
+    title: str,
+    owner_type: str = "user",
+    owner_slack_user_id: str | None = "UScheduleOwner",
+    status: str = "active",
+) -> Schedule:
+    schedule = Schedule(
+        installation_id=installation.id,
+        owner_type=owner_type,
+        owner_slack_user_id=owner_slack_user_id,
+        title=title,
+        spec_kind="cron",
+        cron_expr="0 8 * * *",
+        timezone="America/Chicago",
+        next_run_at=datetime(2026, 6, 5, 13, 0, tzinfo=UTC)
+        if status != "cancelled"
+        else None,
+        last_run_at=None,
+        catchup_policy="skip",
+        catchup_window_seconds=300,
+        overlap_policy="skip",
+        status=status,
+        delivery_kind="slack_dm",
+        delivery_slack_user_id=owner_slack_user_id or "USystem",
+        delivery_slack_channel_id="DMemberSchedule",
+        delivery_slack_thread_ts="DMemberSchedule",
+        artifact_delivery_policy="message_only",
+        task_template={
+            "input": "send a stock market update",
+            "slack_channel_id": "DMemberSchedule",
+            "slack_user_id": owner_slack_user_id or "USystem",
+            "slack_thread_ts": "DMemberSchedule",
+            "delivery_surface": "dm",
+            "artifact_delivery_policy": "message_only",
+        },
+        planned_cost_ceiling_usd=Decimal("0.2500"),
+        created_by_slack_user_id=owner_slack_user_id,
+        metadata_json={
+            "cadence_label": "Every morning at 8:00 AM Central time",
+            "delivery_surface": "dm",
+            "confirmation_required": False,
+        },
+    )
+    session.add(schedule)
+    session.flush()
+    return schedule
+
+
 def create_dashboard_memory_fact(
     session: Session,
     task: Task,
@@ -2860,6 +3078,7 @@ def cleanup_database(session: Session) -> None:
         ComposioConnection,
         DashboardOAuthState,
         DashboardUser,
+        Schedule,
         SlackChannelMembership,
         SlackIdentity,
         TaskEvent,

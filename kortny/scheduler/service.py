@@ -176,21 +176,17 @@ class ScheduleMaterializer:
     ) -> Task:
         template = dict(schedule.task_template or {})
         input_text = _required_template_string(template, "input", schedule=schedule)
-        slack_channel_id = _required_template_string(
-            template,
-            "slack_channel_id",
-            schedule=schedule,
-        )
-        slack_user_id = _required_template_string(
-            template,
-            "slack_user_id",
-            schedule=schedule,
-        )
+        delivery = _schedule_delivery(schedule, template=template)
         identity_payload: dict[str, Any] = {
             "schedule_title": schedule.title,
             "owner_type": schedule.owner_type,
             "owner_slack_user_id": schedule.owner_slack_user_id,
             "spec_kind": schedule.spec_kind,
+            "delivery_kind": delivery["kind"],
+            "delivery_slack_user_id": delivery["slack_user_id"],
+            "delivery_slack_channel_id": delivery["slack_channel_id"],
+            "delivery_slack_thread_ts": delivery["slack_thread_ts"],
+            "artifact_delivery_policy": delivery["artifact_policy"],
         }
         if schedule.planned_cost_ceiling_usd is not None:
             identity_payload["planned_cost_ceiling_usd"] = str(
@@ -205,10 +201,10 @@ class ScheduleMaterializer:
         )
         task = self.tasks.create_task(
             installation_id=schedule.installation_id,
-            slack_channel_id=slack_channel_id,
-            slack_user_id=slack_user_id,
+            slack_channel_id=delivery["slack_channel_id"],
+            slack_user_id=delivery["slack_user_id"],
             input=input_text,
-            slack_thread_ts=_optional_template_string(template, "slack_thread_ts"),
+            slack_thread_ts=delivery["slack_thread_ts"],
             slack_message_ts=_optional_template_string(template, "slack_message_ts"),
             parent_task_id=None,
             identity=identity,
@@ -226,6 +222,10 @@ class ScheduleMaterializer:
                 "planned_cost_ceiling_usd": _decimal_string(
                     schedule.planned_cost_ceiling_usd
                 ),
+                "delivery_kind": delivery["kind"],
+                "delivery_slack_channel_id": delivery["slack_channel_id"],
+                "delivery_slack_thread_ts": delivery["slack_thread_ts"],
+                "artifact_delivery_policy": delivery["artifact_policy"],
             },
         )
         return task
@@ -406,6 +406,55 @@ def _optional_template_string(template: dict[str, Any], name: str) -> str | None
     if isinstance(value, str) and value.strip():
         return value.strip()
     return None
+
+
+def _schedule_delivery(
+    schedule: Schedule,
+    *,
+    template: dict[str, Any],
+) -> dict[str, str | None]:
+    kind = schedule.delivery_kind or _legacy_delivery_kind(template)
+    slack_channel_id = schedule.delivery_slack_channel_id or _optional_template_string(
+        template,
+        "slack_channel_id",
+    )
+    slack_user_id = (
+        schedule.delivery_slack_user_id
+        or _optional_template_string(template, "slack_user_id")
+        or schedule.owner_slack_user_id
+    )
+    slack_thread_ts = schedule.delivery_slack_thread_ts
+    if not slack_thread_ts and kind != "slack_channel":
+        slack_thread_ts = _optional_template_string(template, "slack_thread_ts")
+    if kind == "slack_channel":
+        slack_thread_ts = None
+    artifact_policy = (
+        schedule.artifact_delivery_policy
+        or _optional_template_string(template, "artifact_delivery_policy")
+        or "message_only"
+    )
+    if not slack_channel_id:
+        raise ValueError(f"schedule {schedule.id} delivery is missing slack_channel_id")
+    if not slack_user_id:
+        raise ValueError(f"schedule {schedule.id} delivery is missing slack_user_id")
+    return {
+        "kind": kind,
+        "slack_channel_id": slack_channel_id,
+        "slack_user_id": slack_user_id,
+        "slack_thread_ts": slack_thread_ts,
+        "artifact_policy": artifact_policy,
+    }
+
+
+def _legacy_delivery_kind(template: dict[str, Any]) -> str:
+    surface = _optional_template_string(template, "delivery_surface")
+    if surface == "thread":
+        return "slack_thread"
+    if surface == "channel":
+        return "slack_channel"
+    if surface == "dashboard":
+        return "dashboard_only"
+    return "slack_dm"
 
 
 def _next_interval_after(schedule: Schedule, *, after: datetime) -> datetime:

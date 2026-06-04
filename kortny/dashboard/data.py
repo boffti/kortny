@@ -5068,6 +5068,7 @@ def _planned_workflow_trace(
         if message in {
             "planned_task_budget_reached",
             "planned_workflow_cost_ceiling_exceeded",
+            "scheduled_task_cost_ceiling_exceeded",
         } and event.seq in timeline_by_seq:
             budget_events.append(timeline_by_seq[event.seq])
 

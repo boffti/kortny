@@ -10,9 +10,17 @@ from alembic.config import Config
 from sqlalchemy import Engine, delete, select
 from sqlalchemy.orm import Session
 
-from kortny.db.models import Installation, Schedule, Task, TaskEvent, TaskEventType
+from kortny.db.models import (
+    Installation,
+    LLMUsage,
+    Schedule,
+    Task,
+    TaskEvent,
+    TaskEventType,
+)
 from kortny.db.session import make_engine, make_session_factory, normalize_database_url
 from kortny.scheduler import ScheduleMaterializer
+from kortny.tasks import TaskService
 
 TEST_POSTGRES_URL = os.environ.get("KORTNY_TEST_POSTGRES_URL")
 
@@ -103,6 +111,44 @@ def test_materializer_turns_due_oneoff_schedule_into_pending_task(
     assert materialized_event is not None
     assert materialized_event.payload["schedule_id"] == str(schedule.id)
     assert materialized_event.payload["delivery_kind"] == "slack_dm"
+    admitted_event = db_session.scalar(
+        select(TaskEvent).where(
+            TaskEvent.task_id == task.id,
+            TaskEvent.type == TaskEventType.log,
+            TaskEvent.payload["message"].as_string() == "scheduled_task_budget_admitted",
+        )
+    )
+    assert admitted_event is not None
+    assert admitted_event.payload["cost_ceiling_usd"] == "0.2500"
+
+
+def test_materializer_pauses_schedule_without_run_budget(
+    db_session: Session,
+) -> None:
+    now = datetime(2026, 6, 4, 9, 30, tzinfo=UTC)
+    schedule = create_schedule(
+        db_session,
+        spec_kind="oneoff",
+        run_at=now - timedelta(seconds=30),
+        next_run_at=now - timedelta(seconds=30),
+        planned_cost_ceiling_usd=None,
+    )
+    db_session.commit()
+
+    results = ScheduleMaterializer(db_session).materialize_due_schedules(
+        now=now,
+        use_advisory_lock=False,
+    )
+    db_session.commit()
+
+    assert len(results) == 1
+    assert results[0].action == "paused"
+    assert results[0].task_id is None
+    assert results[0].reason == "missing_planned_cost_ceiling"
+    db_session.refresh(schedule)
+    assert schedule.status == "paused"
+    assert schedule.metadata_json["last_budget_status"] == "admission_failed"
+    assert db_session.scalar(select(Task).where(Task.identity_kind == "scheduled")) is None
 
 
 def test_materializer_uses_channel_root_delivery_contract(
@@ -137,6 +183,56 @@ def test_materializer_uses_channel_root_delivery_contract(
     assert task.slack_channel_id == "CMarket"
     assert task.slack_thread_ts is None
     assert task.identity_payload["delivery_kind"] == "slack_channel"
+
+
+def test_scheduled_task_budget_breach_pauses_future_runs(
+    db_session: Session,
+) -> None:
+    now = datetime(2026, 6, 4, 9, 30, tzinfo=UTC)
+    schedule = create_schedule(
+        db_session,
+        spec_kind="interval",
+        interval_seconds=60,
+        next_run_at=now - timedelta(seconds=30),
+        planned_cost_ceiling_usd=Decimal("0.0001"),
+    )
+    db_session.commit()
+    results = ScheduleMaterializer(db_session).materialize_due_schedules(
+        now=now,
+        use_advisory_lock=False,
+    )
+    db_session.commit()
+    task = db_session.get(Task, results[0].task_id)
+    assert task is not None
+
+    service = TaskService(db_session)
+    service.record_llm_usage(
+        task,
+        provider="openrouter",
+        model="test/model",
+        model_tier="standard",
+        input_tokens=10,
+        output_tokens=5,
+        cost_usd=Decimal("0.0002"),
+    )
+    db_session.commit()
+
+    db_session.refresh(schedule)
+    assert schedule.status == "paused"
+    assert schedule.metadata_json["last_budget_status"] == "exceeded"
+    events = tuple(
+        db_session.scalars(
+            select(TaskEvent).where(
+                TaskEvent.task_id == task.id,
+                TaskEvent.payload["message"].as_string()
+                == "scheduled_task_cost_ceiling_exceeded",
+            )
+        )
+    )
+    assert len(events) == 1
+    assert events[0].payload["cost_ceiling_usd"] == "0.0001"
+    assert events[0].payload["cumulative_cost_usd"] == "0.000200"
+    assert events[0].payload["schedule_paused"] is True
 
 
 def test_materializer_skips_stale_oneoff_when_catchup_window_elapsed(
@@ -227,7 +323,7 @@ def test_materializer_runs_simple_weekly_cron_schedule(
 
 
 def cleanup_database(session: Session) -> None:
-    for model in (TaskEvent, Task, Schedule, Installation):
+    for model in (LLMUsage, TaskEvent, Task, Schedule, Installation):
         session.execute(delete(model))
 
 
@@ -247,7 +343,7 @@ def create_schedule(
     cron_expr: str | None = None,
     next_run_at: datetime,
     catchup_window_seconds: int | None = None,
-    planned_cost_ceiling_usd: Decimal | None = None,
+    planned_cost_ceiling_usd: Decimal | None = Decimal("0.2500"),
 ) -> Schedule:
     installation = create_installation(session)
     schedule = Schedule(

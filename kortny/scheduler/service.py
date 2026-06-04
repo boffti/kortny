@@ -29,6 +29,8 @@ DEFAULT_CATCHUP_WINDOW_SECONDS = 300
 DEFAULT_MATERIALIZE_LIMIT = 50
 DEFAULT_POLL_INTERVAL_SECONDS = 5.0
 DEFAULT_ADVISORY_LOCK_KEY = 759340185
+SCHEDULE_BUDGET_ADMISSION_FAILED_MESSAGE = "schedule_budget_admission_failed"
+SCHEDULED_TASK_BUDGET_ADMITTED_MESSAGE = "scheduled_task_budget_admitted"
 
 logger = logging.getLogger(__name__)
 
@@ -158,6 +160,15 @@ class ScheduleMaterializer:
                 reason="missed_catchup_window",
             )
 
+        if not _has_valid_run_budget(schedule):
+            self._pause_for_budget_admission_failure(schedule, now=now)
+            return ScheduleMaterialization(
+                schedule_id=schedule.id,
+                action="paused",
+                fire_time=due_at,
+                reason="missing_planned_cost_ceiling",
+            )
+
         task = self._create_materialized_task(schedule, fire_time=due_at, now=now)
         self._advance_after_run(schedule, fire_time=due_at, now=now)
         return ScheduleMaterialization(
@@ -215,6 +226,18 @@ class ScheduleMaterializer:
             task,
             TaskEventType.log,
             {
+                "message": SCHEDULED_TASK_BUDGET_ADMITTED_MESSAGE,
+                "schedule_id": str(schedule.id),
+                "cost_ceiling_usd": _decimal_string(
+                    schedule.planned_cost_ceiling_usd
+                ),
+                "behavior": "admit_with_per_run_ceiling",
+            },
+        )
+        self.tasks.append_event(
+            task,
+            TaskEventType.log,
+            {
                 "message": "scheduled_task_materialized",
                 "schedule_id": str(schedule.id),
                 "schedule_title": schedule.title,
@@ -229,6 +252,20 @@ class ScheduleMaterializer:
             },
         )
         return task
+
+    def _pause_for_budget_admission_failure(
+        self,
+        schedule: Schedule,
+        *,
+        now: datetime,
+    ) -> None:
+        metadata = dict(schedule.metadata_json or {})
+        metadata["last_scheduler_error"] = "missing_planned_cost_ceiling"
+        metadata["last_budget_status"] = "admission_failed"
+        metadata["last_budget_admission_failed_at"] = now.isoformat()
+        schedule.metadata_json = metadata
+        schedule.status = "paused"
+        schedule.updated_at = now
 
     def _advance_after_run(
         self,
@@ -455,6 +492,13 @@ def _legacy_delivery_kind(template: dict[str, Any]) -> str:
     if surface == "dashboard":
         return "dashboard_only"
     return "slack_dm"
+
+
+def _has_valid_run_budget(schedule: Schedule) -> bool:
+    ceiling = schedule.planned_cost_ceiling_usd
+    if ceiling is None:
+        return False
+    return Decimal(str(ceiling)) > 0
 
 
 def _next_interval_after(schedule: Schedule, *, after: datetime) -> datetime:

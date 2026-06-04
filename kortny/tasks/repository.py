@@ -16,7 +16,14 @@ from kortny.approvals import (
     TOOL_APPROVAL_REQUIRED_MESSAGE,
     TOOL_APPROVAL_WAITING_MESSAGE,
 )
-from kortny.db.models import LLMProvider, LLMUsage, Task, TaskEvent, TaskEventType
+from kortny.db.models import (
+    LLMProvider,
+    LLMUsage,
+    Schedule,
+    Task,
+    TaskEvent,
+    TaskEventType,
+)
 from kortny.db.models import TaskStatus as DbTaskStatus
 from kortny.observability import sanitize_payload
 from kortny.tasks.identity import TaskIdentity
@@ -31,6 +38,7 @@ CANCELLABLE_STATUSES = {
     DbTaskStatus.running,
     DbTaskStatus.waiting_approval,
 }
+SCHEDULED_TASK_COST_CEILING_EXCEEDED_MESSAGE = "scheduled_task_cost_ceiling_exceeded"
 
 
 class TaskCancelledError(RuntimeError):
@@ -597,6 +605,7 @@ class TaskRepository:
         self.session.add(usage)
         self.session.flush()
         self._refresh_usage_rollup(task_obj)
+        self._record_scheduled_task_cost_ceiling_if_exceeded(task_obj)
         self._commit_if_requested()
         return usage
 
@@ -644,6 +653,64 @@ class TaskRepository:
         task.updated_at = datetime.now(UTC)
         self.session.flush()
 
+    def _record_scheduled_task_cost_ceiling_if_exceeded(self, task: Task) -> None:
+        if task.identity_kind != "scheduled":
+            return
+        payload = task.identity_payload if isinstance(task.identity_payload, dict) else {}
+        ceiling = _optional_decimal(payload.get("planned_cost_ceiling_usd"))
+        if ceiling is None or ceiling <= 0:
+            return
+        cumulative = _coerce_decimal(task.total_cost_usd or Decimal("0"))
+        if cumulative <= ceiling:
+            return
+        already_recorded = self.session.scalar(
+            select(TaskEvent.id)
+            .where(
+                TaskEvent.task_id == task.id,
+                TaskEvent.type == TaskEventType.log,
+                TaskEvent.payload["message"].as_string()
+                == SCHEDULED_TASK_COST_CEILING_EXCEEDED_MESSAGE,
+            )
+            .limit(1)
+        )
+        if already_recorded is not None:
+            return
+
+        schedule_id = _optional_uuid(payload.get("schedule_id"))
+        schedule_status_before: str | None = None
+        schedule_paused = False
+        if schedule_id is not None:
+            schedule = self.session.get(Schedule, schedule_id)
+            if schedule is not None:
+                schedule_status_before = schedule.status
+                if schedule.status == "active":
+                    now = datetime.now(UTC)
+                    metadata = dict(schedule.metadata_json or {})
+                    metadata["last_budget_status"] = "exceeded"
+                    metadata["last_budget_task_id"] = str(task.id)
+                    metadata["last_budget_exceeded_at"] = now.isoformat()
+                    metadata["last_budget_ceiling_usd"] = str(ceiling)
+                    metadata["last_budget_observed_cost_usd"] = str(cumulative)
+                    schedule.metadata_json = metadata
+                    schedule.status = "paused"
+                    schedule.updated_at = now
+                    self.session.add(schedule)
+                    schedule_paused = True
+
+        self.append_event(
+            task,
+            TaskEventType.log,
+            {
+                "message": SCHEDULED_TASK_COST_CEILING_EXCEEDED_MESSAGE,
+                "behavior": "pause_future_runs",
+                "cost_ceiling_usd": str(ceiling),
+                "cumulative_cost_usd": str(cumulative),
+                "schedule_id": str(schedule_id) if schedule_id is not None else None,
+                "schedule_status_before": schedule_status_before,
+                "schedule_paused": schedule_paused,
+            },
+        )
+
     def _record_identity_mismatch_if_needed(
         self,
         task: Task,
@@ -686,6 +753,24 @@ def _coerce_decimal(value: Decimal | int | str) -> Decimal:
     if isinstance(value, Decimal):
         return value
     return Decimal(str(value))
+
+
+def _optional_decimal(value: Any) -> Decimal | None:
+    if value is None:
+        return None
+    try:
+        return _coerce_decimal(value)
+    except Exception:
+        return None
+
+
+def _optional_uuid(value: Any) -> uuid.UUID | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        return uuid.UUID(value)
+    except ValueError:
+        return None
 
 
 def _clear_task_lease(task: Task) -> None:

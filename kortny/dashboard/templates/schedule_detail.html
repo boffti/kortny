@@ -1,0 +1,149 @@
+{% extends "base.html" %}
+
+{% block title %}{{ detail.schedule.title }} - Scheduled Task - Kortny Dashboard{% endblock %}
+
+{% block content %}
+  <section class="page-heading">
+    <div>
+      <h1>{{ detail.schedule.title }}</h1>
+      <p>Inspect and adjust this scheduled task without removing its history.</p>
+    </div>
+    <a class="btn-ghost" href="{{ schedules_base_path }}">Back to Schedules</a>
+  </section>
+
+  {% if notice %}
+    <div class="notice notice-{{ notice_tone }}" role="status">{{ notice }}</div>
+  {% endif %}
+
+  <section class="schedule-detail-grid" aria-label="Scheduled task detail">
+    <article class="card schedule-summary-panel">
+      <header>
+        <div>
+          <span class="panel-eyebrow">Status</span>
+          <h2>{{ detail.schedule.status|title }}</h2>
+        </div>
+        <span class="badge badge-{{ detail.row.tone }}">{{ detail.schedule.status }}</span>
+      </header>
+      <dl class="schedule-detail-list">
+        <div>
+          <dt>Owner</dt>
+          <dd>{{ detail.row.owner }}</dd>
+        </div>
+        <div>
+          <dt>Cadence</dt>
+          <dd>{{ detail.row.cadence }}</dd>
+        </div>
+        <div>
+          <dt>Next run</dt>
+          <dd>{{ detail.row.next_run }}</dd>
+        </div>
+        <div>
+          <dt>Last run</dt>
+          <dd>{{ detail.row.last_run }}</dd>
+        </div>
+        <div>
+          <dt>Delivery</dt>
+          <dd>{{ detail.row.delivery }}</dd>
+        </div>
+        <div>
+          <dt>Budget</dt>
+          <dd>{{ detail.row.budget }}</dd>
+        </div>
+      </dl>
+
+      <div class="schedule-actions schedule-detail-actions" aria-label="Schedule controls">
+        {% if detail.row.can_activate %}
+          <form method="post" action="/schedules/{{ detail.schedule.id }}/activate" onsubmit="return confirm('Activate this scheduled task?');">
+            <input type="hidden" name="next" value="{{ schedules_return_path }}">
+            <button class="btn" type="submit">Activate</button>
+          </form>
+        {% endif %}
+        {% if detail.row.can_pause %}
+          <form method="post" action="/schedules/{{ detail.schedule.id }}/pause" onsubmit="return confirm('Pause this scheduled task?');">
+            <input type="hidden" name="next" value="{{ schedules_return_path }}">
+            <button class="btn-ghost" type="submit">Pause</button>
+          </form>
+        {% endif %}
+        {% if detail.row.can_resume %}
+          <form method="post" action="/schedules/{{ detail.schedule.id }}/resume" onsubmit="return confirm('Resume this scheduled task?');">
+            <input type="hidden" name="next" value="{{ schedules_return_path }}">
+            <button class="btn" type="submit">Resume</button>
+          </form>
+        {% endif %}
+        {% if detail.row.can_cancel %}
+          <form method="post" action="/schedules/{{ detail.schedule.id }}/cancel" onsubmit="return confirm('Cancel this scheduled task? Audit history will remain.');">
+            <input type="hidden" name="next" value="{{ schedules_base_path }}">
+            <button class="btn-ghost btn-danger" type="submit">Cancel</button>
+          </form>
+        {% endif %}
+      </div>
+    </article>
+
+    <article class="card schedule-edit-panel">
+      <header>
+        <div>
+          <span class="panel-eyebrow">Controls</span>
+          <h2>Edit Schedule</h2>
+        </div>
+      </header>
+
+      {% if detail.can_edit %}
+        <form class="schedule-edit-form" method="post" action="{{ schedule_edit_path }}">
+          <input type="hidden" name="next" value="{{ schedules_return_path }}">
+          <div class="schedule-form-grid">
+            <label class="form-field schedule-form-full">
+              Title
+              <input class="input" name="title" value="{{ detail.schedule.title }}" required>
+            </label>
+            <label class="form-field schedule-form-full">
+              Schedule
+              <input class="input" name="schedule_text" value="{{ detail.schedule_text }}" required>
+            </label>
+            <label class="form-field schedule-form-full">
+              Task
+              <textarea class="input schedule-textarea" name="task_input" rows="4" required>{{ detail.task_input }}</textarea>
+            </label>
+            <label class="form-field">
+              Per-run budget
+              <input class="input" name="planned_cost_ceiling_usd" value="{{ detail.budget_value }}" inputmode="decimal" required>
+            </label>
+            <label class="form-field">
+              Artifact policy
+              <select class="input" name="artifact_delivery_policy">
+                {% for key, label in detail.artifact_options %}
+                  <option value="{{ key }}" {{ "selected" if detail.schedule.artifact_delivery_policy == key else "" }}>{{ label }}</option>
+                {% endfor %}
+              </select>
+            </label>
+            <label class="form-field">
+              Delivery
+              <select class="input" name="delivery_kind">
+                {% for key, label in detail.delivery_options %}
+                  <option value="{{ key }}" {{ "selected" if detail.schedule.delivery_kind == key else "" }}>{{ label }}</option>
+                {% endfor %}
+              </select>
+            </label>
+            <label class="form-field">
+              Slack user ID
+              <input class="input" name="delivery_slack_user_id" value="{{ detail.schedule.delivery_slack_user_id or detail.schedule.owner_slack_user_id or '' }}">
+            </label>
+            <label class="form-field">
+              Slack channel/DM ID
+              <input class="input" name="delivery_slack_channel_id" value="{{ detail.schedule.delivery_slack_channel_id or '' }}" required>
+            </label>
+            <label class="form-field">
+              Slack thread TS
+              <input class="input" name="delivery_slack_thread_ts" value="{{ detail.schedule.delivery_slack_thread_ts or '' }}">
+            </label>
+          </div>
+          <div class="schedule-edit-actions">
+            <a class="btn-ghost" href="{{ schedules_base_path }}">Cancel</a>
+            <button class="btn" type="submit">Save Changes</button>
+          </div>
+        </form>
+      {% else %}
+        <p class="empty schedule-locked">Completed and cancelled schedules are locked. History remains available from the task timeline.</p>
+      {% endif %}
+    </article>
+  </section>
+{% endblock %}

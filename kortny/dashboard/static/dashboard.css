@@ -2746,6 +2746,93 @@ pre {
   margin-top: 18px;
 }
 
+.schedule-detail-grid {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: minmax(280px, 0.36fr) minmax(0, 1fr);
+}
+
+.schedule-summary-panel,
+.schedule-edit-panel {
+  min-width: 0;
+}
+
+.schedule-summary-panel > header,
+.schedule-edit-panel > header {
+  align-items: start;
+  display: flex;
+  justify-content: space-between;
+}
+
+.schedule-detail-list {
+  display: grid;
+  gap: 10px;
+  margin: 16px 0 0;
+}
+
+.schedule-detail-list div {
+  background: var(--payload-bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  min-width: 0;
+  padding: 10px 11px;
+}
+
+.schedule-detail-list dt {
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.schedule-detail-list dd {
+  color: var(--foreground);
+  font-weight: 650;
+  margin: 3px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.schedule-detail-actions {
+  justify-content: flex-start;
+  margin-top: 16px;
+}
+
+.schedule-edit-form {
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+}
+
+.schedule-form-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.schedule-form-full {
+  grid-column: 1 / -1;
+}
+
+.schedule-textarea {
+  min-height: 112px;
+  resize: vertical;
+}
+
+.schedule-edit-actions {
+  align-items: center;
+  border-top: 1px solid var(--border);
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+  margin: 0 -16px -16px;
+  padding: 14px 16px 16px;
+}
+
+.schedule-locked {
+  margin: 0;
+  padding: 16px;
+}
+
 .system-checks,
 .system-note,
 .config-card {
@@ -4875,12 +4962,25 @@ pre {
   }
 
   .schedule-row,
-  .schedule-meta {
+  .schedule-meta,
+  .schedule-detail-grid,
+  .schedule-form-grid {
     grid-template-columns: 1fr;
   }
 
   .schedule-actions {
     justify-content: flex-start;
+  }
+
+  .schedule-edit-actions {
+    align-items: stretch;
+    flex-direction: column-reverse;
+  }
+
+  .schedule-edit-actions .btn,
+  .schedule-edit-actions .btn-ghost {
+    justify-content: center;
+    width: 100%;
   }
 
   .member-hero-grid,

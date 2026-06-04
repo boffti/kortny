@@ -107,6 +107,7 @@
               </div>
             </dl>
             <div class="schedule-actions" aria-label="Schedule actions">
+              <a class="btn-ghost" href="{{ schedules_detail_base_path }}/{{ row.schedule.id }}">Details</a>
               {% if row.can_activate %}
                 <form method="post" action="/schedules/{{ row.schedule.id }}/activate" onsubmit="return confirm('Activate this scheduled task?');">
                   <input type="hidden" name="next" value="{{ schedules_return_path }}">

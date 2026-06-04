@@ -6,18 +6,31 @@ import math
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from kortny.db.models import Schedule, SlackIdentity
+from kortny.scheduler.creation import parse_schedule_request
 
 SCHEDULE_PAGE_SIZE = 25
 SCHEDULE_STATUSES = {"all", "proposed", "active", "paused", "completed", "cancelled"}
 SCHEDULE_VIEWS = {"all", "my", "system"}
 SCHEDULE_ACTIONS = {"activate", "pause", "resume", "cancel"}
+MANAGEABLE_SCHEDULE_STATUSES = {"proposed", "active", "paused"}
+SCHEDULE_DELIVERY_OPTIONS = (
+    ("slack_dm", "DM"),
+    ("slack_thread", "Thread"),
+    ("slack_channel", "Channel"),
+    ("dashboard_only", "Dashboard"),
+)
+SCHEDULE_ARTIFACT_OPTIONS = (
+    ("message_only", "Message only"),
+    ("link_artifacts", "Link artifacts"),
+    ("attach_files", "Attach files"),
+)
 
 
 @dataclass(frozen=True)
@@ -42,6 +55,18 @@ class ScheduleRow:
     can_pause: bool
     can_resume: bool
     can_cancel: bool
+
+
+@dataclass(frozen=True)
+class ScheduleDetail:
+    schedule: Schedule
+    row: ScheduleRow
+    schedule_text: str
+    task_input: str
+    budget_value: str
+    delivery_options: tuple[tuple[str, str], ...]
+    artifact_options: tuple[tuple[str, str], ...]
+    can_edit: bool
 
 
 @dataclass(frozen=True)
@@ -212,6 +237,151 @@ def apply_schedule_action(
     return notice
 
 
+def get_schedule_detail(
+    session: Session,
+    *,
+    schedule_id: uuid.UUID,
+    installation_id: uuid.UUID | None,
+    slack_user_id: str | None,
+    is_admin: bool,
+) -> ScheduleDetail:
+    """Return a single schedule detail model scoped to the current principal."""
+
+    schedule = _get_accessible_schedule(
+        session,
+        schedule_id=schedule_id,
+        installation_id=installation_id,
+        slack_user_id=slack_user_id,
+        is_admin=is_admin,
+    )
+    identities = _owner_identity_map(session, (schedule,))
+    return ScheduleDetail(
+        schedule=schedule,
+        row=_schedule_row(schedule, identities=identities),
+        schedule_text=_cadence_label(schedule),
+        task_input=_schedule_task_input(schedule),
+        budget_value=_budget_form_value(schedule.planned_cost_ceiling_usd),
+        delivery_options=SCHEDULE_DELIVERY_OPTIONS,
+        artifact_options=SCHEDULE_ARTIFACT_OPTIONS,
+        can_edit=schedule.status in MANAGEABLE_SCHEDULE_STATUSES,
+    )
+
+
+def update_schedule_from_dashboard(
+    session: Session,
+    *,
+    schedule_id: uuid.UUID,
+    installation_id: uuid.UUID | None,
+    slack_user_id: str | None,
+    is_admin: bool,
+    actor: str,
+    title: str,
+    schedule_text: str,
+    task_input: str,
+    planned_cost_ceiling_usd: str,
+    delivery_kind: str,
+    delivery_slack_user_id: str,
+    delivery_slack_channel_id: str,
+    delivery_slack_thread_ts: str,
+    artifact_delivery_policy: str,
+    now: datetime | None = None,
+) -> str:
+    """Update a schedule from dashboard form values."""
+
+    schedule = _get_accessible_schedule(
+        session,
+        schedule_id=schedule_id,
+        installation_id=installation_id,
+        slack_user_id=slack_user_id,
+        is_admin=is_admin,
+    )
+    if schedule.status not in MANAGEABLE_SCHEDULE_STATUSES:
+        raise ValueError("Only proposed, active, or paused schedules can be edited.")
+
+    task_text = task_input.strip()
+    if not task_text:
+        raise ValueError("Task instructions are required.")
+    cadence_text = schedule_text.strip()
+    if not cadence_text:
+        raise ValueError("Schedule timing is required.")
+
+    edit_time = _coerce_utc(now or datetime.now(UTC))
+    draft = parse_schedule_request(
+        f"{cadence_text} {task_text}",
+        now=edit_time,
+        timezone=schedule.timezone or "UTC",
+    )
+    if draft is None:
+        if cadence_text != _cadence_label(schedule):
+            raise ValueError(
+                "I could not parse that schedule timing. Try wording like "
+                "'Every morning at 8 AM central time' or 'Every Monday morning'."
+            )
+        cadence_label = cadence_text
+    else:
+        cadence_label = draft.cadence_label
+
+    cost_ceiling = _parse_budget(planned_cost_ceiling_usd)
+    normalized_delivery_kind = delivery_kind.strip()
+    if normalized_delivery_kind not in {key for key, _label in SCHEDULE_DELIVERY_OPTIONS}:
+        raise ValueError("Delivery must be DM, thread, channel, or dashboard.")
+    normalized_artifact_policy = artifact_delivery_policy.strip() or "message_only"
+    if normalized_artifact_policy not in {
+        key for key, _label in SCHEDULE_ARTIFACT_OPTIONS
+    }:
+        raise ValueError("Artifact policy is not supported.")
+
+    target_user_id = delivery_slack_user_id.strip() or schedule.owner_slack_user_id or ""
+    target_channel_id = delivery_slack_channel_id.strip()
+    target_thread_ts = delivery_slack_thread_ts.strip() or None
+    if not target_channel_id:
+        raise ValueError("Slack channel or DM id is required for delivery.")
+    if not target_user_id:
+        raise ValueError("Slack user id is required for delivery.")
+    if normalized_delivery_kind == "slack_channel":
+        target_thread_ts = None
+    elif normalized_delivery_kind == "slack_dm" and target_thread_ts is None:
+        target_thread_ts = target_channel_id
+    elif normalized_delivery_kind == "slack_thread" and target_thread_ts is None:
+        raise ValueError("Thread delivery requires a Slack thread timestamp.")
+
+    previous = _schedule_snapshot(schedule)
+    schedule.title = title.strip() or (draft.title if draft is not None else task_text)
+    if draft is not None:
+        schedule.spec_kind = draft.spec_kind
+        schedule.cron_expr = draft.cron_expr
+        schedule.interval_seconds = draft.interval_seconds
+        schedule.run_at = draft.run_at
+        schedule.timezone = draft.timezone
+        schedule.next_run_at = draft.next_run_at
+    schedule.planned_cost_ceiling_usd = cost_ceiling
+    schedule.delivery_kind = normalized_delivery_kind
+    schedule.delivery_slack_user_id = target_user_id
+    schedule.delivery_slack_channel_id = target_channel_id
+    schedule.delivery_slack_thread_ts = target_thread_ts
+    schedule.artifact_delivery_policy = normalized_artifact_policy
+    schedule.task_template = {
+        **dict(schedule.task_template or {}),
+        "input": task_text,
+        "slack_channel_id": target_channel_id,
+        "slack_user_id": target_user_id,
+        "slack_thread_ts": target_thread_ts,
+        "delivery_surface": _legacy_delivery_surface(normalized_delivery_kind),
+        "artifact_delivery_policy": normalized_artifact_policy,
+    }
+    schedule.metadata_json = _dashboard_edit_metadata(
+        schedule,
+        actor=actor,
+        now=edit_time,
+        cadence_label=cadence_label,
+        previous=previous,
+    )
+    schedule.updated_at = edit_time
+    session.add(schedule)
+    session.commit()
+    return "Scheduled task updated."
+
+
 def _schedule_filters(
     *,
     installation_id: uuid.UUID | None,
@@ -305,6 +475,27 @@ def _can_access_schedule(
     if is_admin:
         return True
     return schedule.owner_type == "user" and schedule.owner_slack_user_id == slack_user_id
+
+
+def _get_accessible_schedule(
+    session: Session,
+    *,
+    schedule_id: uuid.UUID,
+    installation_id: uuid.UUID | None,
+    slack_user_id: str | None,
+    is_admin: bool,
+) -> Schedule:
+    schedule = session.get(Schedule, schedule_id)
+    if schedule is None:
+        raise LookupError("Scheduled task was not found.")
+    if not _can_access_schedule(
+        schedule,
+        installation_id=installation_id,
+        slack_user_id=slack_user_id,
+        is_admin=is_admin,
+    ):
+        raise PermissionError("You do not have access to this scheduled task.")
+    return schedule
 
 
 def _normalize_view(*, view: str, is_admin: bool) -> str:
@@ -404,6 +595,14 @@ def _delivery_with_artifact_policy(label: str, schedule: Schedule) -> str:
     return label
 
 
+def _schedule_task_input(schedule: Schedule) -> str:
+    template = schedule.task_template if isinstance(schedule.task_template, dict) else {}
+    value = template.get("input")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return schedule.title
+
+
 def _datetime_label(value: datetime | None) -> str:
     if value is None:
         return "Not scheduled"
@@ -414,6 +613,99 @@ def _budget_label(value: Decimal | None) -> str:
     if value is None:
         return "No cap"
     return f"${value:,.4f}"
+
+
+def _budget_form_value(value: Decimal | None) -> str:
+    if value is None:
+        return ""
+    return f"{value:.4f}"
+
+
+def _parse_budget(value: str) -> Decimal:
+    stripped = value.strip()
+    if not stripped:
+        raise ValueError("Per-run budget is required.")
+    try:
+        budget = Decimal(stripped)
+    except InvalidOperation as exc:
+        raise ValueError("Per-run budget must be a valid dollar amount.") from exc
+    if budget <= 0:
+        raise ValueError("Per-run budget must be greater than zero.")
+    return budget.quantize(Decimal("0.0001"))
+
+
+def _legacy_delivery_surface(delivery_kind: str) -> str:
+    return {
+        "slack_dm": "dm",
+        "slack_thread": "thread",
+        "slack_channel": "channel",
+        "dashboard_only": "dashboard",
+    }[delivery_kind]
+
+
+def _schedule_snapshot(schedule: Schedule) -> dict[str, Any]:
+    return {
+        "title": schedule.title,
+        "status": schedule.status,
+        "spec_kind": schedule.spec_kind,
+        "cron_expr": schedule.cron_expr,
+        "interval_seconds": schedule.interval_seconds,
+        "run_at": schedule.run_at.isoformat() if schedule.run_at else None,
+        "timezone": schedule.timezone,
+        "next_run_at": schedule.next_run_at.isoformat()
+        if schedule.next_run_at
+        else None,
+        "delivery_kind": schedule.delivery_kind,
+        "delivery_slack_user_id": schedule.delivery_slack_user_id,
+        "delivery_slack_channel_id": schedule.delivery_slack_channel_id,
+        "delivery_slack_thread_ts": schedule.delivery_slack_thread_ts,
+        "artifact_delivery_policy": schedule.artifact_delivery_policy,
+        "planned_cost_ceiling_usd": _decimal_string(
+            schedule.planned_cost_ceiling_usd
+        ),
+    }
+
+
+def _dashboard_edit_metadata(
+    schedule: Schedule,
+    *,
+    actor: str,
+    now: datetime,
+    cadence_label: str,
+    previous: dict[str, Any],
+) -> dict[str, Any]:
+    metadata = dict(schedule.metadata_json or {})
+    history = metadata.get("dashboard_edit_history")
+    if not isinstance(history, list):
+        history = []
+    history.append(
+        {
+            "at": now.isoformat(),
+            "by": actor,
+            "previous": previous,
+        }
+    )
+    metadata.update(
+        {
+            "cadence_label": cadence_label,
+            "dashboard_edited_at": now.isoformat(),
+            "dashboard_edited_by": actor,
+            "dashboard_edit_history": history[-20:],
+        }
+    )
+    return metadata
+
+
+def _decimal_string(value: Decimal | None) -> str | None:
+    if value is None:
+        return None
+    return str(value)
+
+
+def _coerce_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 def _status_tone(status: str) -> str:

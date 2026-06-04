@@ -61,7 +61,12 @@ from kortny.dashboard.memory_actions import (
     forget_fact,
     supersede_fact,
 )
-from kortny.dashboard.schedules import apply_schedule_action, get_schedule_dashboard
+from kortny.dashboard.schedules import (
+    apply_schedule_action,
+    get_schedule_dashboard,
+    get_schedule_detail,
+    update_schedule_from_dashboard,
+)
 from kortny.dashboard.settings import DashboardSettings, load_dashboard_settings
 from kortny.db.models import (
     ComposioConnection,
@@ -1457,6 +1462,7 @@ def register_routes(app: FastAPI) -> None:
                 **_dashboard_context(principal, active_page="me_schedules"),
                 "schedule_page": schedule_page,
                 "schedules_base_path": "/me/schedules",
+                "schedules_detail_base_path": "/me/schedules",
                 "schedules_return_path": _request_path(request),
                 "notice": notice,
                 "notice_tone": _notice_tone(notice_tone),
@@ -1770,11 +1776,97 @@ def register_routes(app: FastAPI) -> None:
                 **_dashboard_context(principal, active_page="schedules"),
                 "schedule_page": schedule_page,
                 "schedules_base_path": "/schedules",
+                "schedules_detail_base_path": "/schedules",
                 "schedules_return_path": _request_path(request),
                 "notice": notice,
                 "notice_tone": _notice_tone(notice_tone),
             },
         )
+
+    @app.get("/schedules/{schedule_id}", response_class=HTMLResponse)
+    @app.get("/me/schedules/{schedule_id}", response_class=HTMLResponse)
+    def schedule_detail(
+        request: Request,
+        session: Annotated[Session, Depends(get_session)],
+        principal: Annotated[DashboardPrincipal, Depends(require_principal)],
+        schedule_id: UUID,
+        notice: Annotated[str | None, Query()] = None,
+        notice_tone: Annotated[str, Query()] = "success",
+    ) -> Response:
+        is_admin = principal.role == "admin"
+        detail_base_path = "/schedules" if is_admin else "/me/schedules"
+        active_page = "schedules" if is_admin else "me_schedules"
+        try:
+            detail = get_schedule_detail(
+                session,
+                schedule_id=schedule_id,
+                installation_id=principal.installation_id,
+                slack_user_id=principal.slack_user_id,
+                is_admin=is_admin,
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND) from exc
+        except PermissionError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND) from exc
+        return templates.TemplateResponse(
+            request=request,
+            name="schedule_detail.html",
+            context={
+                **_dashboard_context(principal, active_page=active_page),
+                "detail": detail,
+                "schedules_base_path": detail_base_path,
+                "schedule_edit_path": f"{detail_base_path}/{schedule_id}/edit",
+                "schedules_return_path": _request_path(request),
+                "notice": notice,
+                "notice_tone": _notice_tone(notice_tone),
+            },
+        )
+
+    @app.post("/schedules/{schedule_id}/edit")
+    @app.post("/me/schedules/{schedule_id}/edit")
+    async def schedule_edit(
+        request: Request,
+        session: Annotated[Session, Depends(get_session)],
+        principal: Annotated[DashboardPrincipal, Depends(require_principal)],
+        schedule_id: UUID,
+    ) -> RedirectResponse:
+        form = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
+        is_admin = principal.role == "admin"
+        detail_base_path = "/schedules" if is_admin else "/me/schedules"
+        next_path = _safe_next_path(
+            form.get("next", [f"{detail_base_path}/{schedule_id}"])[0]
+        )
+        try:
+            notice = update_schedule_from_dashboard(
+                session,
+                schedule_id=schedule_id,
+                installation_id=principal.installation_id,
+                slack_user_id=principal.slack_user_id,
+                is_admin=is_admin,
+                actor=principal.display_name,
+                title=_form_value(form, "title"),
+                schedule_text=_form_value(form, "schedule_text"),
+                task_input=_form_value(form, "task_input"),
+                planned_cost_ceiling_usd=_form_value(
+                    form, "planned_cost_ceiling_usd"
+                ),
+                delivery_kind=_form_value(form, "delivery_kind"),
+                delivery_slack_user_id=_form_value(form, "delivery_slack_user_id"),
+                delivery_slack_channel_id=_form_value(
+                    form, "delivery_slack_channel_id"
+                ),
+                delivery_slack_thread_ts=_form_value(form, "delivery_slack_thread_ts"),
+                artifact_delivery_policy=_form_value(
+                    form, "artifact_delivery_policy"
+                ),
+            )
+        except (LookupError, PermissionError) as exc:
+            session.rollback()
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND) from exc
+        except ValueError as exc:
+            session.rollback()
+            return _redirect_with_notice(next_path, str(exc), tone="danger")
+        return _redirect_with_notice(next_path, notice)
 
     @app.post("/schedules/{schedule_id}/{action}")
     async def schedule_action(

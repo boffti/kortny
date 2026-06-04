@@ -487,6 +487,111 @@ def test_dashboard_admin_can_view_and_pause_schedules(
     assert system.status == "paused"
 
 
+def test_dashboard_admin_can_edit_schedule_detail(
+    client: tuple[TestClient, Session],
+) -> None:
+    test_client, session = client
+    installation = Installation(
+        slack_team_id="TScheduleEdit",
+        team_name="Schedule Edit Team",
+    )
+    session.add(installation)
+    session.flush()
+    schedule = create_dashboard_schedule(
+        session,
+        installation=installation,
+        title="Send stock market update",
+        owner_slack_user_id="UScheduleOwner",
+        status="active",
+    )
+    session.commit()
+    login(test_client)
+
+    detail_response = test_client.get(f"/schedules/{schedule.id}")
+    edit_response = test_client.post(
+        f"/schedules/{schedule.id}/edit",
+        data={
+            "next": f"/schedules/{schedule.id}",
+            "title": "PYPL market brief",
+            "schedule_text": "Every afternoon at 1:30 PM central time",
+            "task_input": "send a PYPL market update",
+            "planned_cost_ceiling_usd": "0.5000",
+            "delivery_kind": "slack_channel",
+            "delivery_slack_user_id": "UScheduleOwner",
+            "delivery_slack_channel_id": "CMarketBriefs",
+            "delivery_slack_thread_ts": "1780420000.000100",
+            "artifact_delivery_policy": "link_artifacts",
+        },
+        follow_redirects=False,
+    )
+
+    assert detail_response.status_code == 200
+    assert "Edit Schedule" in detail_response.text
+    assert "Every morning at 8:00 AM Central time" in detail_response.text
+    assert edit_response.status_code == 303
+    assert "notice=Scheduled+task+updated." in edit_response.headers["location"]
+    session.refresh(schedule)
+    assert schedule.title == "PYPL market brief"
+    assert schedule.task_template["input"] == "send a PYPL market update"
+    assert schedule.cron_expr == "30 13 * * *"
+    assert schedule.timezone == "America/Chicago"
+    assert schedule.delivery_kind == "slack_channel"
+    assert schedule.delivery_slack_channel_id == "CMarketBriefs"
+    assert schedule.delivery_slack_thread_ts is None
+    assert schedule.artifact_delivery_policy == "link_artifacts"
+    assert schedule.planned_cost_ceiling_usd == Decimal("0.5000")
+    assert schedule.metadata_json["dashboard_edited_by"] == "admin"
+    assert schedule.metadata_json["cadence_label"] == (
+        "Every afternoon at 1:30 PM Central time"
+    )
+    assert schedule.metadata_json["dashboard_edit_history"]
+
+
+def test_dashboard_edit_preserves_existing_timing_when_cadence_is_unchanged(
+    client: tuple[TestClient, Session],
+) -> None:
+    test_client, session = client
+    installation = Installation(
+        slack_team_id="TScheduleEditLegacy",
+        team_name="Schedule Legacy Team",
+    )
+    session.add(installation)
+    session.flush()
+    schedule = create_dashboard_schedule(
+        session,
+        installation=installation,
+        title="Legacy cron schedule",
+        owner_slack_user_id="ULegacySchedule",
+        status="active",
+    )
+    schedule.metadata_json = {}
+    session.commit()
+    login(test_client)
+
+    edit_response = test_client.post(
+        f"/schedules/{schedule.id}/edit",
+        data={
+            "next": f"/schedules/{schedule.id}",
+            "title": "Legacy cron schedule",
+            "schedule_text": "0 8 * * *",
+            "task_input": "send the legacy market update",
+            "planned_cost_ceiling_usd": "0.3000",
+            "delivery_kind": "slack_dm",
+            "delivery_slack_user_id": "ULegacySchedule",
+            "delivery_slack_channel_id": "DMemberSchedule",
+            "delivery_slack_thread_ts": "DMemberSchedule",
+            "artifact_delivery_policy": "message_only",
+        },
+        follow_redirects=False,
+    )
+
+    assert edit_response.status_code == 303
+    session.refresh(schedule)
+    assert schedule.cron_expr == "0 8 * * *"
+    assert schedule.task_template["input"] == "send the legacy market update"
+    assert schedule.planned_cost_ceiling_usd == Decimal("0.3000")
+
+
 def test_dashboard_member_schedules_are_scoped_to_their_user(
     db_session: Session,
     engine: Engine,
@@ -572,10 +677,28 @@ def test_dashboard_member_schedules_are_scoped_to_their_user(
             follow_redirects=False,
         )
         page_response = test_client.get("/me/schedules")
+        detail_response = test_client.get(f"/me/schedules/{own_schedule.id}")
+        blocked_detail = test_client.get(f"/me/schedules/{other_schedule.id}")
         admin_response = test_client.get("/schedules", follow_redirects=False)
         blocked_cancel = test_client.post(
             f"/schedules/{other_schedule.id}/cancel",
             data={"next": "/me/schedules"},
+            follow_redirects=False,
+        )
+        edit_response = test_client.post(
+            f"/me/schedules/{own_schedule.id}/edit",
+            data={
+                "next": f"/me/schedules/{own_schedule.id}",
+                "title": "Member PM update",
+                "schedule_text": "Every afternoon at 1:00 PM central time",
+                "task_input": "send my market update",
+                "planned_cost_ceiling_usd": "0.4000",
+                "delivery_kind": "slack_dm",
+                "delivery_slack_user_id": "UMemberSchedule",
+                "delivery_slack_channel_id": "DMemberSchedule",
+                "delivery_slack_thread_ts": "DMemberSchedule",
+                "artifact_delivery_policy": "message_only",
+            },
             follow_redirects=False,
         )
         cancel_response = test_client.post(
@@ -590,9 +713,13 @@ def test_dashboard_member_schedules_are_scoped_to_their_user(
     assert "Member market update" in page_response.text
     assert "Other user's schedule" not in page_response.text
     assert "System heartbeat" not in page_response.text
+    assert detail_response.status_code == 200
+    assert blocked_detail.status_code == 404
     assert admin_response.status_code == 403
     assert blocked_cancel.status_code == 303
     assert "notice_tone=danger" in blocked_cancel.headers["location"]
+    assert edit_response.status_code == 303
+    assert "notice=Scheduled+task+updated." in edit_response.headers["location"]
     assert cancel_response.status_code == 303
     assert "notice=Scheduled+task+cancelled." in cancel_response.headers["location"]
     db_session.refresh(own_schedule)
@@ -600,6 +727,9 @@ def test_dashboard_member_schedules_are_scoped_to_their_user(
     db_session.refresh(system_schedule)
     assert own_schedule.status == "cancelled"
     assert own_schedule.next_run_at is None
+    assert own_schedule.title == "Member PM update"
+    assert own_schedule.task_template["input"] == "send my market update"
+    assert own_schedule.planned_cost_ceiling_usd == Decimal("0.4000")
     assert other_schedule.status == "active"
     assert system_schedule.status == "active"
 

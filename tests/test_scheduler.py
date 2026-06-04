@@ -322,6 +322,35 @@ def test_materializer_runs_simple_weekly_cron_schedule(
     assert schedule.next_run_at == datetime(2026, 6, 15, 9, 0, tzinfo=UTC)
 
 
+def test_materializer_runs_weekday_range_cron_schedule(
+    db_session: Session,
+) -> None:
+    now = datetime(2026, 6, 5, 13, 5, tzinfo=UTC)
+    due_at = datetime(2026, 6, 5, 13, 0, tzinfo=UTC)
+    schedule = create_schedule(
+        db_session,
+        spec_kind="cron",
+        cron_expr="0 8 * * 1-5",
+        timezone="America/Chicago",
+        next_run_at=due_at,
+    )
+    db_session.commit()
+
+    results = ScheduleMaterializer(db_session).materialize_due_schedules(
+        now=now,
+        use_advisory_lock=False,
+    )
+    db_session.commit()
+
+    assert len(results) == 1
+    assert results[0].action == "materialized"
+
+    db_session.refresh(schedule)
+    assert schedule.status == "active"
+    assert schedule.last_run_at == due_at
+    assert schedule.next_run_at == datetime(2026, 6, 8, 13, 0, tzinfo=UTC)
+
+
 def cleanup_database(session: Session) -> None:
     for model in (LLMUsage, TaskEvent, Task, Schedule, Installation):
         session.execute(delete(model))
@@ -342,6 +371,7 @@ def create_schedule(
     interval_seconds: int | None = None,
     cron_expr: str | None = None,
     next_run_at: datetime,
+    timezone: str = "UTC",
     catchup_window_seconds: int | None = None,
     planned_cost_ceiling_usd: Decimal | None = Decimal("0.2500"),
 ) -> Schedule:
@@ -355,7 +385,7 @@ def create_schedule(
         cron_expr=cron_expr,
         run_at=run_at,
         interval_seconds=interval_seconds,
-        timezone="UTC",
+        timezone=timezone,
         next_run_at=next_run_at,
         catchup_policy="skip",
         catchup_window_seconds=catchup_window_seconds,

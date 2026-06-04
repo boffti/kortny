@@ -23,6 +23,7 @@ from kortny.scheduler.creation import (
     looks_like_schedule_request,
     parse_schedule_request,
 )
+from kortny.scheduler.llm_parser import LLMScheduleParser
 from kortny.scheduler.service import (
     ScheduleMaterialization,
     ScheduleMaterializer,
@@ -49,6 +50,7 @@ __all__ = [
     "ScheduleProposal",
     "SchedulerRunResult",
     "SchedulerWorker",
+    "LLMScheduleParser",
     "infer_schedule_delivery",
     "looks_like_schedule_request",
     "parse_schedule_command",

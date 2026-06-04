@@ -520,7 +520,7 @@ def _cron_supported(schedule: Schedule) -> bool:
 
 
 def _next_cron_after(schedule: Schedule, *, after: datetime) -> datetime:
-    minute, hour, cron_weekday = _parse_simple_cron(schedule)
+    minute, hour, cron_weekdays = _parse_simple_cron(schedule)
     tzinfo = _schedule_tzinfo(schedule)
     local_after = _coerce_utc(after).astimezone(tzinfo)
     candidate = local_after.replace(
@@ -534,12 +534,12 @@ def _next_cron_after(schedule: Schedule, *, after: datetime) -> datetime:
         current = candidate + timedelta(days=day_offset)
         if current <= local_after:
             continue
-        if cron_weekday is None or current.weekday() == cron_weekday:
+        if cron_weekdays is None or current.weekday() in cron_weekdays:
             return current.astimezone(UTC)
     raise ValueError(f"schedule {schedule.id} cron expression produced no next run")
 
 
-def _parse_simple_cron(schedule: Schedule) -> tuple[int, int, int | None]:
+def _parse_simple_cron(schedule: Schedule) -> tuple[int, int, frozenset[int] | None]:
     expr = (schedule.cron_expr or "").strip()
     fields = expr.split()
     if len(fields) != 5:
@@ -558,19 +558,44 @@ def _parse_simple_cron(schedule: Schedule) -> tuple[int, int, int | None]:
     if not 0 <= minute <= 59 or not 0 <= hour <= 23:
         raise ValueError(f"schedule {schedule.id} has unsupported cron expression")
 
-    if weekday_field == "*":
-        return minute, hour, None
+    return minute, hour, _parse_weekday_field(schedule, weekday_field)
+
+
+def _parse_weekday_field(
+    schedule: Schedule,
+    value: str,
+) -> frozenset[int] | None:
+    if value == "*":
+        return None
+    weekdays: set[int] = set()
+    for part in value.split(","):
+        part = part.strip()
+        if not part:
+            raise ValueError(f"schedule {schedule.id} has unsupported cron expression")
+        if "-" in part:
+            start_text, end_text = part.split("-", 1)
+            start = _cron_weekday_to_python(schedule, start_text)
+            end = _cron_weekday_to_python(schedule, end_text)
+            if start > end:
+                raise ValueError(
+                    f"schedule {schedule.id} has unsupported cron expression"
+                )
+            weekdays.update(range(start, end + 1))
+        else:
+            weekdays.add(_cron_weekday_to_python(schedule, part))
+    return frozenset(weekdays)
+
+
+def _cron_weekday_to_python(schedule: Schedule, value: str) -> int:
     try:
-        cron_weekday = int(weekday_field)
+        cron_weekday = int(value)
     except ValueError as exc:
         raise ValueError(
             f"schedule {schedule.id} has unsupported cron expression"
         ) from exc
     if not 0 <= cron_weekday <= 6:
         raise ValueError(f"schedule {schedule.id} has unsupported cron expression")
-
-    # Cron uses 0=Sunday. Python uses 0=Monday.
-    return minute, hour, (cron_weekday + 6) % 7
+    return (cron_weekday + 6) % 7
 
 
 def _schedule_tzinfo(schedule: Schedule) -> ZoneInfo:

@@ -7,6 +7,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import Protocol
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy.orm import Session
@@ -82,7 +83,9 @@ TIMEZONE_ALIASES = (
 SCHEDULE_RE = re.compile(
     r"\b("
     r"every|daily|weekly|monthly|schedule|scheduled|recurring|remind|reminder|"
-    r"tomorrow|later|in\s+\d+\s+(?:minutes?|hours?|days?|weeks?)"
+    r"tomorrow|later|weekday|weekdays?|business\s+days?|trading\s+days?|"
+    r"market\s+(?:open|close)|twice\s+a\s+day|"
+    r"in\s+\d+\s+(?:minutes?|hours?|days?|weeks?)"
     r")\b",
     re.IGNORECASE,
 )
@@ -231,6 +234,20 @@ class ScheduleCreationContext:
         return infer_schedule_delivery(context=self, text="").legacy_surface
 
 
+class ScheduleFallbackParser(Protocol):
+    """Optional parser used when deterministic schedule parsing cannot decide."""
+
+    def parse(
+        self,
+        *,
+        task: Task,
+        context: ScheduleCreationContext,
+        text: str,
+        now: datetime,
+    ) -> ScheduleDraft | None:
+        """Return a validated schedule draft, or None when parsing is unsafe."""
+
+
 class ScheduleCreationService:
     """Creates schedules from explicit scheduling requests."""
 
@@ -239,9 +256,11 @@ class ScheduleCreationService:
         session: Session,
         *,
         task_service: TaskService | None = None,
+        fallback_parser: ScheduleFallbackParser | None = None,
     ) -> None:
         self.session = session
         self.task_service = task_service or TaskService(session)
+        self.fallback_parser = fallback_parser
 
     def propose_from_text(
         self,
@@ -253,15 +272,26 @@ class ScheduleCreationService:
     ) -> ScheduleProposal | None:
         """Create a schedule if the text has a supported schedule."""
 
+        parse_time = now or datetime.now(UTC)
         draft = parse_schedule_request(
             text,
-            now=now or datetime.now(UTC),
+            now=parse_time,
             timezone=context.timezone,
         )
+        if draft is None and self.fallback_parser is not None:
+            draft = self.fallback_parser.parse(
+                task=task,
+                context=context,
+                text=text,
+                now=parse_time,
+            )
         if draft is None:
             return None
 
-        needs_confirmation = _needs_confirmation(text=text, draft=draft)
+        needs_confirmation = draft.needs_confirmation or _needs_confirmation(
+            text=text,
+            draft=draft,
+        )
         status = "proposed" if needs_confirmation else "active"
         delivery = infer_schedule_delivery(context=context, text=text)
         schedule = Schedule(

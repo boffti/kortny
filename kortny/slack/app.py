@@ -18,6 +18,7 @@ from kortny.intent import LLMIntentClassifier, should_classify_channel_message
 from kortny.llm import LLMService, ModelRouter, ModelRouteTier, create_llm_provider
 from kortny.logging_config import configure_logging
 from kortny.observability import configure_tracing, record_span_exception, start_span
+from kortny.scheduler import LLMScheduleParser
 from kortny.slack.acknowledgement import LLMAcknowledgementGenerator
 from kortny.slack.ingress import SlackIngress, is_bare_app_mention
 from kortny.slack.outbox import SlackSideEffectOutbox
@@ -69,6 +70,10 @@ def create_bolt_app(
                             client=client,
                             acknowledgement_generator=acknowledgement_generator,
                             intent_classifier=_intent_classifier(
+                                resolved_settings,
+                                session,
+                            ),
+                            schedule_fallback_parser=_schedule_fallback_parser(
                                 resolved_settings,
                                 session,
                             ),
@@ -127,6 +132,10 @@ def create_bolt_app(
                                     resolved_settings,
                                     session,
                                 ),
+                                schedule_fallback_parser=_schedule_fallback_parser(
+                                    resolved_settings,
+                                    session,
+                                ),
                             )
                             ingress.handle_dm(
                                 body=body,
@@ -139,6 +148,12 @@ def create_bolt_app(
                                 acknowledgement_generator=acknowledgement_generator,
                                 intent_classifier=_pre_task_intent_classifier(
                                     resolved_settings
+                                )
+                                if is_soft_mention_candidate
+                                else None,
+                                schedule_fallback_parser=_schedule_fallback_parser(
+                                    resolved_settings,
+                                    session,
                                 )
                                 if is_soft_mention_candidate
                                 else None,
@@ -278,6 +293,21 @@ def _pre_task_intent_classifier(settings: Settings) -> LLMIntentClassifier:
     )
     return LLMIntentClassifier(
         provider=create_llm_provider(settings, model=model_route.model)
+    )
+
+
+def _schedule_fallback_parser(settings: Settings, session: Session) -> LLMScheduleParser:
+    model_route = ModelRouter(settings).route_for_tier(
+        ModelRouteTier.cheap_fast,
+        reason="schedule_parsing",
+    )
+    return LLMScheduleParser(
+        llm=LLMService(
+            session=session,
+            provider=create_llm_provider(settings, model=model_route.model),
+            provider_name=DbLLMProvider(settings.llm_provider),
+            model_route=model_route,
+        )
     )
 
 

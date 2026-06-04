@@ -61,6 +61,7 @@ from kortny.scheduler import (
     ScheduleCreationService,
     looks_like_schedule_request,
 )
+from kortny.scheduler.creation import ScheduleFallbackParser
 from kortny.slack.acknowledgement import (
     AcknowledgementGenerator,
     StaticAcknowledgementGenerator,
@@ -187,6 +188,7 @@ class SlackIngress:
         acknowledgement_generator: AcknowledgementGenerator | None = None,
         reaction_provider: ReactionProvider | None = None,
         intent_classifier: IntentClassifier | None = None,
+        schedule_fallback_parser: ScheduleFallbackParser | None = None,
     ) -> None:
         self.session = session
         self.client = client
@@ -196,6 +198,7 @@ class SlackIngress:
         )
         self.reaction_provider = reaction_provider or LibraryReactionProvider()
         self.intent_classifier = intent_classifier
+        self.schedule_fallback_parser = schedule_fallback_parser
         self.inbound_events = SlackInboundEventService(session)
 
     def handle_schedule_action(
@@ -1385,6 +1388,7 @@ class SlackIngress:
         proposal = ScheduleCreationService(
             self.session,
             task_service=self.task_service,
+            fallback_parser=self.schedule_fallback_parser,
         ).propose_from_text(
             task=task,
             context=ScheduleCreationContext(

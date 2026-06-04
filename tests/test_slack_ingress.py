@@ -1,6 +1,7 @@
 import os
 import uuid
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -41,6 +42,7 @@ from kortny.intent import (
     ModelTier,
 )
 from kortny.observe.assessment import CHANNEL_ASSESSMENT_REQUESTED_MESSAGE
+from kortny.scheduler import ScheduleDraft
 from kortny.slack import SlackIngress, acknowledge_then_handle
 from kortny.slack.ingress import INTENT_CLASSIFIED_MESSAGE, is_bare_app_mention
 from kortny.slack.reactions import ACK_REACTION_ADDED_MESSAGE, ReactionChoice
@@ -202,6 +204,30 @@ class FakeIntentClassifier:
         if self.error is not None:
             raise self.error
         return self.decision
+
+
+class FakeScheduleFallbackParser:
+    def __init__(self, draft: ScheduleDraft) -> None:
+        self.draft = draft
+        self.calls: list[dict[str, object]] = []
+
+    def parse(
+        self,
+        *,
+        task: Task,
+        context: object,
+        text: str,
+        now: object,
+    ) -> ScheduleDraft | None:
+        self.calls.append(
+            {
+                "task_id": task.id,
+                "context": context,
+                "text": text,
+                "now": now,
+            }
+        )
+        return self.draft
 
 
 def test_acknowledge_then_handle_acks_before_work() -> None:
@@ -826,6 +852,53 @@ def test_dm_scheduling_request_creates_active_schedule(
         and event.payload.get("purpose") == "schedule_created"
     )
     assert message_event.payload["text"] == client.calls[0]["text"]
+
+
+def test_dm_scheduling_request_uses_llm_fallback_when_rules_do_not_parse(
+    db_session: Session,
+) -> None:
+    client = FakeSlackClient()
+    fallback = FakeScheduleFallbackParser(
+        ScheduleDraft(
+            title="Send a stock market update",
+            spec_kind="cron",
+            cron_expr="0 8 * * 1-5",
+            timezone="America/Chicago",
+            next_run_at=datetime(2026, 6, 5, 13, 0, tzinfo=UTC),
+            cadence_label="Every weekday at 8:00 AM Central time",
+            task_input="send a stock market update",
+            parse_strategy="llm_schedule_parser",
+        )
+    )
+
+    result = SlackIngress(
+        session=db_session,
+        client=client,
+        intent_classifier=FakeIntentClassifier(intent_decision()),
+        reaction_provider=FakeReactionProvider(name="calendar", intent="scheduled"),
+        schedule_fallback_parser=fallback,
+    ).handle_dm(
+        body=message_body(event_id="EvScheduleDmFallback"),
+        event=dm_event(
+            text="Every weekday at 8AM central time I want a stock market update",
+            ts="1716500110.000001",
+        ),
+    )
+    db_session.commit()
+
+    assert result is not None
+    task = db_session.get(Task, result.task.id)
+    schedule = db_session.scalar(select(Schedule))
+    assert task is not None
+    assert schedule is not None
+    assert len(fallback.calls) == 1
+    assert schedule.status == "active"
+    assert schedule.spec_kind == "cron"
+    assert schedule.cron_expr == "0 8 * * 1-5"
+    assert schedule.timezone == "America/Chicago"
+    assert schedule.metadata_json["parse_strategy"] == "llm_schedule_parser"
+    assert schedule.task_template["input"] == "send a stock market update"
+    assert "every weekday at 8:00 AM Central time" in client.calls[0]["text"]
 
 
 def test_schedule_pause_button_pauses_active_schedule(

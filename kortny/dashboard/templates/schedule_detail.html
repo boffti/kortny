@@ -146,4 +146,52 @@
       {% endif %}
     </article>
   </section>
+
+  {% if detail.health_notice %}
+    <div class="notice notice-warning schedule-health-notice" role="status">{{ detail.health_notice }}</div>
+  {% endif %}
+
+  <section class="card detail-section schedule-runs-panel" aria-label="Scheduled task run history">
+    <header>
+      <h2>Recent Runs</h2>
+      <p>Materialized tasks created by this schedule, including status, delivery, and recorded cost.</p>
+    </header>
+
+    {% if detail.runs %}
+      <div class="table-wrap schedule-runs-wrap">
+        <table class="table schedule-runs-table">
+          <caption>Recent scheduled task runs.</caption>
+          <thead>
+            <tr>
+              <th scope="col">Task</th>
+              <th scope="col">Status</th>
+              <th scope="col">Created</th>
+              <th scope="col">Finished</th>
+              <th scope="col">Delivery</th>
+              <th scope="col">Tokens</th>
+              <th scope="col">Cost</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for run in detail.runs %}
+              <tr>
+                <td class="schedule-run-task">
+                  <a href="{{ run.task_path }}">{{ run.task_input }}</a>
+                  <span class="identity-id">{{ run.task_id }}</span>
+                </td>
+                <td><span class="badge badge-{{ run.tone }}">{{ run.status }}</span></td>
+                <td>{{ run.created }}</td>
+                <td>{{ run.finished }}</td>
+                <td>{{ run.delivery }}</td>
+                <td>{{ run.tokens }}</td>
+                <td>{{ run.cost }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      <p class="empty schedule-runs-empty">No runs have been materialized for this schedule yet.</p>
+    {% endif %}
+  </section>
 {% endblock %}

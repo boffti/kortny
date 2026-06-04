@@ -12,10 +12,11 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from kortny.db.models import Schedule, SlackIdentity
+from kortny.db.models import Schedule, SlackIdentity, Task
 from kortny.scheduler.creation import parse_schedule_request
 
 SCHEDULE_PAGE_SIZE = 25
+SCHEDULE_RUN_LIMIT = 10
 SCHEDULE_STATUSES = {"all", "proposed", "active", "paused", "completed", "cancelled"}
 SCHEDULE_VIEWS = {"all", "my", "system"}
 SCHEDULE_ACTIONS = {"activate", "pause", "resume", "cancel"}
@@ -58,9 +59,25 @@ class ScheduleRow:
 
 
 @dataclass(frozen=True)
+class ScheduleRunRow:
+    task_id: uuid.UUID
+    task_path: str
+    task_input: str
+    status: str
+    tone: str
+    created: str
+    finished: str
+    delivery: str
+    cost: str
+    tokens: str
+
+
+@dataclass(frozen=True)
 class ScheduleDetail:
     schedule: Schedule
     row: ScheduleRow
+    runs: tuple[ScheduleRunRow, ...]
+    health_notice: str | None
     schedule_text: str
     task_input: str
     budget_value: str
@@ -258,6 +275,8 @@ def get_schedule_detail(
     return ScheduleDetail(
         schedule=schedule,
         row=_schedule_row(schedule, identities=identities),
+        runs=_schedule_runs(session, schedule=schedule, is_admin=is_admin),
+        health_notice=_schedule_health_notice(schedule),
         schedule_text=_cadence_label(schedule),
         task_input=_schedule_task_input(schedule),
         budget_value=_budget_form_value(schedule.planned_cost_ceiling_usd),
@@ -461,6 +480,182 @@ def _schedule_row(
         can_resume=schedule.status == "paused",
         can_cancel=schedule.status in {"proposed", "active", "paused"},
     )
+
+
+def _schedule_runs(
+    session: Session,
+    *,
+    schedule: Schedule,
+    is_admin: bool,
+) -> tuple[ScheduleRunRow, ...]:
+    tasks = tuple(
+        session.scalars(
+            select(Task)
+            .where(
+                Task.installation_id == schedule.installation_id,
+                Task.identity_kind == "scheduled",
+                Task.identity_payload["schedule_id"].as_string() == str(schedule.id),
+            )
+            .order_by(Task.created_at.desc(), Task.id.desc())
+            .limit(SCHEDULE_RUN_LIMIT)
+        )
+    )
+    if not tasks:
+        return ()
+
+    identities = _task_identity_map(session, tasks)
+    task_base_path = "/tasks" if is_admin else "/me/tasks"
+    return tuple(
+        _schedule_run_row(
+            task,
+            identities=identities,
+            task_base_path=task_base_path,
+        )
+        for task in tasks
+    )
+
+
+def _schedule_run_row(
+    task: Task,
+    *,
+    identities: dict[tuple[str, uuid.UUID, str], str],
+    task_base_path: str,
+) -> ScheduleRunRow:
+    status = _task_status_value(task)
+    return ScheduleRunRow(
+        task_id=task.id,
+        task_path=f"{task_base_path}/{task.id}",
+        task_input=task.input,
+        status=status.replace("_", " "),
+        tone=_task_status_tone(status),
+        created=_datetime_label(task.created_at),
+        finished=_task_finished_label(task),
+        delivery=_task_delivery_label(task, identities=identities),
+        cost=_budget_label(task.total_cost_usd),
+        tokens=f"{task.total_input_tokens + task.total_output_tokens:,}",
+    )
+
+
+def _task_identity_map(
+    session: Session,
+    tasks: tuple[Task, ...],
+) -> dict[tuple[str, uuid.UUID, str], str]:
+    pairs: set[tuple[str, uuid.UUID, str]] = set()
+    for task in tasks:
+        payload = task.identity_payload if isinstance(task.identity_payload, dict) else {}
+        user_id = payload.get("delivery_slack_user_id") or task.slack_user_id
+        channel_id = payload.get("delivery_slack_channel_id") or task.slack_channel_id
+        if isinstance(user_id, str) and user_id:
+            pairs.add(("user", task.installation_id, user_id))
+        if isinstance(channel_id, str) and channel_id:
+            pairs.add(("channel", task.installation_id, channel_id))
+
+    if not pairs:
+        return {}
+    installation_ids = {installation_id for _kind, installation_id, _slack_id in pairs}
+    slack_ids = {slack_id for _kind, _installation_id, slack_id in pairs}
+    kinds = {kind for kind, _installation_id, _slack_id in pairs}
+    identities = session.scalars(
+        select(SlackIdentity).where(
+            SlackIdentity.kind.in_(kinds),
+            SlackIdentity.installation_id.in_(installation_ids),
+            SlackIdentity.slack_id.in_(slack_ids),
+        )
+    )
+    return {
+        (identity.kind, identity.installation_id, identity.slack_id): identity.display_name
+        for identity in identities
+        if (identity.kind, identity.installation_id, identity.slack_id) in pairs
+    }
+
+
+def _task_status_value(task: Task) -> str:
+    value = task.status
+    return str(getattr(value, "value", value))
+
+
+def _task_status_tone(status: str) -> str:
+    return {
+        "succeeded": "success",
+        "pending": "warning",
+        "running": "warning",
+        "waiting_approval": "warning",
+        "failed": "danger",
+        "crashed": "danger",
+        "cancelled": "neutral",
+    }.get(status, "neutral")
+
+
+def _task_finished_label(task: Task) -> str:
+    if task.finished_at is not None:
+        return _datetime_label(task.finished_at)
+    status = _task_status_value(task)
+    if status == "pending":
+        return "Queued"
+    if status == "running":
+        return "Running"
+    if status == "waiting_approval":
+        return "Waiting approval"
+    return "Not finished"
+
+
+def _task_delivery_label(
+    task: Task,
+    *,
+    identities: dict[tuple[str, uuid.UUID, str], str],
+) -> str:
+    payload = task.identity_payload if isinstance(task.identity_payload, dict) else {}
+    delivery_kind = payload.get("delivery_kind")
+    user_id = _optional_string(payload.get("delivery_slack_user_id")) or task.slack_user_id
+    channel_id = (
+        _optional_string(payload.get("delivery_slack_channel_id"))
+        or task.slack_channel_id
+    )
+    user_label = (
+        identities.get(("user", task.installation_id, user_id))
+        if user_id
+        else None
+    ) or user_id
+    channel_label = (
+        identities.get(("channel", task.installation_id, channel_id))
+        if channel_id
+        else None
+    ) or channel_id
+
+    if delivery_kind == "slack_dm":
+        return f"DM to {user_label}"
+    if delivery_kind == "slack_channel":
+        return f"Channel {channel_label}"
+    if delivery_kind == "slack_thread":
+        return f"Thread in {channel_label}"
+    if delivery_kind == "dashboard_only":
+        return "Dashboard only"
+    return channel_label or "Unknown"
+
+
+def _schedule_health_notice(schedule: Schedule) -> str | None:
+    metadata = schedule.metadata_json if isinstance(schedule.metadata_json, dict) else {}
+    scheduler_error = _optional_string(metadata.get("last_scheduler_error"))
+    budget_status = _optional_string(metadata.get("last_budget_status"))
+    if scheduler_error == "missing_planned_cost_ceiling":
+        return (
+            "This schedule is paused because it needs a per-run budget before "
+            "the scheduler can materialize future runs."
+        )
+    if budget_status == "admission_failed":
+        return (
+            "This schedule is paused after a budget admission failure. Check the "
+            "per-run budget before resuming it."
+        )
+    if scheduler_error:
+        return f"Last scheduler issue: {scheduler_error.replace('_', ' ')}."
+    return None
+
+
+def _optional_string(value: object) -> str | None:
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
 
 
 def _can_access_schedule(

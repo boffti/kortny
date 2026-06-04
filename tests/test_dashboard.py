@@ -504,6 +504,15 @@ def test_dashboard_admin_can_edit_schedule_detail(
         owner_slack_user_id="UScheduleOwner",
         status="active",
     )
+    run = create_dashboard_schedule_run(
+        session,
+        installation=installation,
+        schedule=schedule,
+        input_text="send a stock market update",
+        cost_usd=Decimal("0.018500"),
+        input_tokens=3200,
+        output_tokens=450,
+    )
     session.commit()
     login(test_client)
 
@@ -527,6 +536,12 @@ def test_dashboard_admin_can_edit_schedule_detail(
 
     assert detail_response.status_code == 200
     assert "Edit Schedule" in detail_response.text
+    assert "Recent Runs" in detail_response.text
+    assert "send a stock market update" in detail_response.text
+    assert f'href="/tasks/{run.id}"' in detail_response.text
+    assert "DM to Schedule Owner" in detail_response.text
+    assert "$0.0185" in detail_response.text
+    assert "3,650" in detail_response.text
     assert "Every morning at 8:00 AM Central time" in detail_response.text
     assert edit_response.status_code == 303
     assert "notice=Scheduled+task+updated." in edit_response.headers["location"]
@@ -607,6 +622,14 @@ def test_dashboard_member_schedules_are_scoped_to_their_user(
         title="Member market update",
         owner_slack_user_id="UMemberSchedule",
         status="active",
+    )
+    own_run = create_dashboard_schedule_run(
+        db_session,
+        installation=installation,
+        schedule=own_schedule,
+        input_text="send my morning market update",
+        slack_user_name="Member Schedule",
+        cost_usd=Decimal("0.009900"),
     )
     other_schedule = create_dashboard_schedule(
         db_session,
@@ -714,6 +737,10 @@ def test_dashboard_member_schedules_are_scoped_to_their_user(
     assert "Other user's schedule" not in page_response.text
     assert "System heartbeat" not in page_response.text
     assert detail_response.status_code == 200
+    assert "Recent Runs" in detail_response.text
+    assert "send my morning market update" in detail_response.text
+    assert f'href="/me/tasks/{own_run.id}"' in detail_response.text
+    assert "$0.0099" in detail_response.text
     assert blocked_detail.status_code == 404
     assert admin_response.status_code == 403
     assert blocked_cancel.status_code == 303
@@ -3115,6 +3142,91 @@ def create_dashboard_schedule(
     session.add(schedule)
     session.flush()
     return schedule
+
+
+def create_dashboard_schedule_run(
+    session: Session,
+    *,
+    installation: Installation,
+    schedule: Schedule,
+    input_text: str,
+    slack_user_name: str = "Schedule Owner",
+    created_at: datetime | None = None,
+    status: TaskStatus = TaskStatus.succeeded,
+    cost_usd: Decimal = Decimal("0.012300"),
+    input_tokens: int = 900,
+    output_tokens: int = 120,
+) -> Task:
+    run_created_at = created_at or datetime(2026, 6, 5, 13, 0, tzinfo=UTC)
+    run_finished_at = (
+        run_created_at + timedelta(minutes=2)
+        if status in {TaskStatus.succeeded, TaskStatus.failed, TaskStatus.cancelled}
+        else None
+    )
+    user_id = schedule.delivery_slack_user_id or schedule.owner_slack_user_id or "USchedule"
+    channel_id = schedule.delivery_slack_channel_id or "DSchedule"
+    thread_ts = schedule.delivery_slack_thread_ts or channel_id
+    task = Task(
+        installation_id=installation.id,
+        slack_event_id=f"EvScheduleRun{uuid.uuid4().hex}",
+        slack_channel_id=channel_id,
+        slack_thread_ts=thread_ts,
+        slack_message_ts=None,
+        slack_user_id=user_id,
+        input=input_text,
+        status=status,
+        result_summary="Scheduled run completed",
+        total_input_tokens=input_tokens,
+        total_output_tokens=output_tokens,
+        total_cost_usd=cost_usd,
+        identity_kind="scheduled",
+        identity_key=f"scheduled:{schedule.id}:{run_created_at.isoformat()}",
+        identity_payload={
+            "schedule_id": str(schedule.id),
+            "fire_time": run_created_at.isoformat(),
+            "schedule_title": schedule.title,
+            "owner_type": schedule.owner_type,
+            "owner_slack_user_id": schedule.owner_slack_user_id,
+            "spec_kind": schedule.spec_kind,
+            "delivery_kind": schedule.delivery_kind,
+            "delivery_slack_user_id": user_id,
+            "delivery_slack_channel_id": channel_id,
+            "delivery_slack_thread_ts": thread_ts,
+            "artifact_delivery_policy": schedule.artifact_delivery_policy,
+            "planned_cost_ceiling_usd": str(schedule.planned_cost_ceiling_usd),
+        },
+        identity_fingerprint=f"scheduled-run-{uuid.uuid4().hex}",
+        created_at=run_created_at,
+        finished_at=run_finished_at,
+    )
+    session.add(task)
+    session.flush()
+    session.add_all(
+        [
+            SlackIdentity(
+                installation_id=installation.id,
+                kind="user",
+                slack_id=user_id,
+                display_name=slack_user_name,
+                raw_name=slack_user_name,
+                raw_json={"id": user_id, "profile": {"real_name": slack_user_name}},
+                refreshed_at=run_created_at,
+                last_seen_at=run_created_at,
+            ),
+            SlackIdentity(
+                installation_id=installation.id,
+                kind="channel",
+                slack_id=channel_id,
+                display_name="#scheduled-dm",
+                raw_name="scheduled-dm",
+                raw_json={"id": channel_id, "name": "scheduled-dm"},
+                refreshed_at=run_created_at,
+                last_seen_at=run_created_at,
+            ),
+        ]
+    )
+    session.flush()
+    return task
 
 
 def create_dashboard_memory_fact(

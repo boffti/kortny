@@ -2833,6 +2833,53 @@ pre {
   padding: 16px;
 }
 
+.schedule-health-notice,
+.schedule-runs-panel {
+  margin-top: 16px;
+}
+
+.schedule-runs-panel > header {
+  align-items: start;
+  display: flex;
+  justify-content: space-between;
+}
+
+.schedule-runs-wrap {
+  margin-top: 0;
+}
+
+.schedule-runs-table th,
+.schedule-runs-table td {
+  vertical-align: top;
+}
+
+.schedule-run-task {
+  min-width: 220px;
+}
+
+.schedule-run-task a {
+  color: var(--foreground);
+  display: block;
+  font-weight: 700;
+  max-width: 420px;
+  overflow-wrap: anywhere;
+  text-decoration: none;
+}
+
+.schedule-run-task a:hover {
+  color: var(--accent-strong);
+}
+
+.schedule-run-task .identity-id {
+  display: block;
+  margin-top: 5px;
+}
+
+.schedule-runs-empty {
+  margin: 0;
+  padding: 16px;
+}
+
 .system-checks,
 .system-note,
 .config-card {

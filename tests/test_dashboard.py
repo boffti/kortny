@@ -1398,6 +1398,7 @@ def test_dashboard_member_composio_connect_uses_logged_in_user_scope(
         "kortny.dashboard.app.SlackOpenIDClient",
         FakeSlackOpenIDClient,
     )
+    monkeypatch.setattr("kortny.dashboard.data.ComposioClient", FakeComposioClient)
     monkeypatch.setattr("kortny.dashboard.app.ComposioClient", FakeComposioClient)
 
     with TestClient(
@@ -1641,7 +1642,8 @@ def test_dashboard_task_list_shows_cost_models_and_turns(
     assert "$0.004200" in response.text
     assert f"/tasks/{task.id}" in response.text
     assert 'class="card"' in response.text
-    assert 'class="table"' in response.text
+    assert 'class="task-list"' in response.text
+    assert 'class="task-list-item task-status-succeeded"' in response.text
     assert 'class="badge status-succeeded"' in response.text
     assert 'class="sidebar"' in response.text
 
@@ -1865,7 +1867,9 @@ def test_dashboard_usage_rollups_by_model_user_and_day(
     assert "2026-05-24" in response.text
     assert "2,400" in response.text
     assert "$0.004200" in response.text
-    assert 'class="input" type="date"' in response.text
+    assert 'type="date"' in response.text
+    assert 'name="from"' in response.text
+    assert 'name="to"' in response.text
 
 
 def test_dashboard_usage_renders_visual_analytics(
@@ -2150,8 +2154,10 @@ def test_dashboard_knowledge_graph_page_shows_entities_relationships_and_evidenc
     assert "Knowledge Graph" in response.text
     assert "Graph Map" in response.text
     assert "2 nodes / 1 links" in response.text
-    assert 'data-kg-map-node="' in response.text
-    assert 'data-kg-edge="' in response.text
+    assert 'class="kg-data-node"' in response.text
+    assert 'class="kg-data-edge"' in response.text
+    assert 'data-source="' in response.text
+    assert 'data-target="' in response.text
     assert "Entities" in response.text
     assert "slack_channel:CCost" in response.text
     assert "#ops-desk" in response.text

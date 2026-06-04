@@ -106,6 +106,18 @@ class Settings(BaseSettings):
         validation_alias="TEMPORAL_TASK_QUEUE",
         min_length=1,
     )
+    scheduler_poll_interval_seconds: float = Field(
+        default=5.0,
+        validation_alias="KORTNY_SCHEDULER_POLL_INTERVAL_SECONDS",
+    )
+    scheduler_materialize_limit: int = Field(
+        default=50,
+        validation_alias="KORTNY_SCHEDULER_MATERIALIZE_LIMIT",
+    )
+    scheduler_advisory_lock_key: int = Field(
+        default=759340185,
+        validation_alias="KORTNY_SCHEDULER_ADVISORY_LOCK_KEY",
+    )
     tool_selector_max_external_candidates: int = Field(
         default=24, validation_alias="TOOL_SELECTOR_MAX_EXTERNAL_CANDIDATES"
     )
@@ -289,6 +301,22 @@ class Settings(BaseSettings):
         if value < 0 or value > 200:
             raise ValueError(
                 "KORTNY_PLANNED_WORKFLOW_MAX_TOTAL_TOOL_CALLS must be between 0 and 200"
+            )
+        return value
+
+    @field_validator("scheduler_poll_interval_seconds")
+    @classmethod
+    def _valid_scheduler_poll_interval_seconds(cls, value: float) -> float:
+        if value <= 0:
+            raise ValueError("KORTNY_SCHEDULER_POLL_INTERVAL_SECONDS must be positive")
+        return value
+
+    @field_validator("scheduler_materialize_limit")
+    @classmethod
+    def _valid_scheduler_materialize_limit(cls, value: int) -> int:
+        if value < 1 or value > 500:
+            raise ValueError(
+                "KORTNY_SCHEDULER_MATERIALIZE_LIMIT must be between 1 and 500"
             )
         return value
 

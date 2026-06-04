@@ -26,6 +26,7 @@ from kortny.db.models import (
 )
 from kortny.db.models import TaskStatus as DbTaskStatus
 from kortny.intent import (
+    IntentClassification,
     IntentClassifier,
     IntentDecision,
     IntentRequest,
@@ -52,6 +53,12 @@ from kortny.observe.assessment import (
     assessment_identity_source_id,
     build_channel_assessment_input,
     channel_assessment_request_event,
+)
+from kortny.scheduler import (
+    ScheduleCommandService,
+    ScheduleCreationContext,
+    ScheduleCreationService,
+    looks_like_schedule_request,
 )
 from kortny.slack.acknowledgement import (
     AcknowledgementGenerator,
@@ -1083,6 +1090,57 @@ class SlackIngress:
             user_id=user_id,
         )
 
+        schedule_command_ts = self._maybe_handle_schedule_command(
+            task=task,
+            installation=installation,
+            source=source,
+            input_text=input_text,
+            channel_id=channel_id,
+            thread_ts=thread_ts,
+            user_id=user_id,
+        )
+        if schedule_command_ts is not None:
+            logger.info(
+                "slack %s schedule command handled task_id=%s channel=%s thread_ts=%s message_ts=%s",
+                source,
+                task.id,
+                channel_id,
+                thread_ts,
+                schedule_command_ts,
+            )
+            return AppMentionResult(
+                task=task,
+                created=True,
+                thread_ts=thread_ts,
+                acknowledgement_ts=schedule_command_ts,
+            )
+
+        schedule_response_ts = self._maybe_post_schedule_proposal(
+            task=task,
+            installation=installation,
+            source=source,
+            input_text=input_text,
+            channel_id=channel_id,
+            thread_ts=thread_ts,
+            user_id=user_id,
+            intent_decision=intent_decision,
+        )
+        if schedule_response_ts is not None:
+            logger.info(
+                "slack %s schedule response posted task_id=%s channel=%s thread_ts=%s message_ts=%s",
+                source,
+                task.id,
+                channel_id,
+                thread_ts,
+                schedule_response_ts,
+            )
+            return AppMentionResult(
+                task=task,
+                created=True,
+                thread_ts=thread_ts,
+                acknowledgement_ts=schedule_response_ts,
+            )
+
         if _should_skip_visible_ack(event, source=source):
             logger.info(
                 "slack %s acknowledgement skipped task_id=%s channel=%s thread_ts=%s",
@@ -1131,6 +1189,109 @@ class SlackIngress:
             thread_ts=thread_ts,
             acknowledgement_ts=acknowledgement_ts,
         )
+
+    def _maybe_handle_schedule_command(
+        self,
+        *,
+        task: Task,
+        installation: Installation,
+        source: str,
+        input_text: str,
+        channel_id: str,
+        thread_ts: str,
+        user_id: str,
+    ) -> str | None:
+        result = ScheduleCommandService(
+            self.session,
+            task_service=self.task_service,
+        ).handle_text(
+            task=task,
+            context=ScheduleCreationContext(
+                installation_id=installation.id,
+                slack_channel_id=channel_id,
+                slack_user_id=user_id,
+                slack_thread_ts=thread_ts,
+                source_surface=source,
+                source_task_id=task.id,
+            ),
+            text=input_text,
+        )
+        if result is None:
+            return None
+
+        message_ts = SlackPoster(
+            session=self.session,
+            client=cast(SlackPostingClient, self.client),
+            task_service=self.task_service,
+        ).post_message(
+            SlackThread(
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+                task_id=task.id,
+            ),
+            result.response_text,
+            purpose=f"schedule_{result.action}",
+        )
+        task.result_summary = result.response_text
+        self.task_service.transition(task, DbTaskStatus.succeeded)
+        return message_ts
+
+    def _maybe_post_schedule_proposal(
+        self,
+        *,
+        task: Task,
+        installation: Installation,
+        source: str,
+        input_text: str,
+        channel_id: str,
+        thread_ts: str,
+        user_id: str,
+        intent_decision: IntentDecision | None,
+    ) -> str | None:
+        if not _should_attempt_schedule_proposal(
+            input_text=input_text,
+            intent_decision=intent_decision,
+        ):
+            return None
+
+        proposal = ScheduleCreationService(
+            self.session,
+            task_service=self.task_service,
+        ).propose_from_text(
+            task=task,
+            context=ScheduleCreationContext(
+                installation_id=installation.id,
+                slack_channel_id=channel_id,
+                slack_user_id=user_id,
+                slack_thread_ts=thread_ts,
+                source_surface=source,
+                source_task_id=task.id,
+            ),
+            text=input_text,
+        )
+        if proposal is None:
+            return None
+
+        message_ts = SlackPoster(
+            session=self.session,
+            client=cast(SlackPostingClient, self.client),
+            task_service=self.task_service,
+        ).post_message(
+            SlackThread(
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+                task_id=task.id,
+            ),
+            proposal.response_text,
+            purpose=(
+                "schedule_proposal"
+                if proposal.schedule.status == "proposed"
+                else "schedule_created"
+            ),
+        )
+        task.result_summary = proposal.response_text
+        self.task_service.transition(task, DbTaskStatus.succeeded)
+        return message_ts
 
     def _refresh_slack_identities(
         self,
@@ -2033,6 +2194,23 @@ def _intent_surface(source: str) -> IntentSurface:
     if source == "channel_message":
         return IntentSurface.channel_message
     return IntentSurface.app_mention
+
+
+def _should_attempt_schedule_proposal(
+    *,
+    input_text: str,
+    intent_decision: IntentDecision | None,
+) -> bool:
+    if not looks_like_schedule_request(input_text):
+        return False
+    if intent_decision is None:
+        return True
+    if not intent_decision.routing_should_create_task():
+        return False
+    return intent_decision.routing_classification() in {
+        IntentClassification.task_request,
+        IntentClassification.follow_up,
+    }
 
 
 def _should_skip_visible_ack(event: Mapping[str, Any], *, source: str) -> bool:

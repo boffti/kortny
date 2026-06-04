@@ -12,6 +12,7 @@ def test_mvp_schema_declares_all_core_tables() -> None:
         "slack_channel_memberships",
         "slack_inbound_events",
         "slack_side_effects",
+        "schedules",
         "dashboard_users",
         "dashboard_oauth_states",
         "composio_connections",
@@ -145,6 +146,29 @@ def test_slack_side_effects_table_has_outbox_constraints_and_indexes() -> None:
         "idx_slack_side_effects_status",
         "idx_slack_side_effects_task",
         "idx_slack_side_effects_target",
+    } <= index_names
+
+
+def test_schedules_table_has_schedule_policy_constraints_and_indexes() -> None:
+    schedules = Base.metadata.tables["schedules"]
+    constraint_names = {constraint.name for constraint in schedules.constraints}
+    index_names = {index.name for index in schedules.indexes}
+
+    assert {
+        "ck_schedules_owner_type",
+        "ck_schedules_owner",
+        "ck_schedules_spec_kind",
+        "ck_schedules_spec",
+        "ck_schedules_catchup_policy",
+        "ck_schedules_catchup_window",
+        "ck_schedules_overlap_policy",
+        "ck_schedules_status",
+        "ck_schedules_cost_ceiling",
+    } <= constraint_names
+    assert {
+        "idx_schedules_due",
+        "idx_schedules_owner",
+        "idx_schedules_status",
     } <= index_names
 
 

@@ -88,6 +88,33 @@ services:
       - .:/app
       - uv-cache:/tmp/uv-cache
 
+  scheduler:
+    image: ghcr.io/astral-sh/uv:python3.11-bookworm-slim
+    working_dir: /app
+    command: ["uv", "run", "python", "-m", "kortny.scheduler"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    env_file:
+      - .env
+    environment:
+      KORTNY_SCHEDULER_POLL_INTERVAL_SECONDS: ${KORTNY_SCHEDULER_POLL_INTERVAL_SECONDS:-5}
+      KORTNY_SCHEDULER_MATERIALIZE_LIMIT: ${KORTNY_SCHEDULER_MATERIALIZE_LIMIT:-50}
+      KORTNY_SCHEDULER_ADVISORY_LOCK_KEY: ${KORTNY_SCHEDULER_ADVISORY_LOCK_KEY:-759340185}
+      OBSERVABILITY_ENABLED: ${OBSERVABILITY_ENABLED:-true}
+      OBSERVABILITY_CAPTURE_CONTENT: ${OBSERVABILITY_CAPTURE_CONTENT:-metadata}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      OTEL_EXPORTER_OTLP_HEADERS: ${OTEL_EXPORTER_OTLP_HEADERS:-}
+      OTEL_SERVICE_NAME: ${OTEL_SCHEDULER_SERVICE_NAME:-kortny-scheduler}
+      OTEL_TRACE_SAMPLING_RATIO: ${OTEL_TRACE_SAMPLING_RATIO:-1.0}
+      POSTGRES_URL: postgresql://${POSTGRES_USER:-kortny}:${POSTGRES_PASSWORD:-kortny}@postgres:5432/${POSTGRES_DB:-kortny}
+      UV_CACHE_DIR: /tmp/uv-cache
+      UV_LINK_MODE: copy
+      UV_PROJECT_ENVIRONMENT: /tmp/kortny-venv
+    volumes:
+      - .:/app
+      - uv-cache:/tmp/uv-cache
+
   dashboard:
     image: ghcr.io/astral-sh/uv:python3.11-bookworm-slim
     working_dir: /app

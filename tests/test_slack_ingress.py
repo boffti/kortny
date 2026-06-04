@@ -22,6 +22,7 @@ from kortny.db.models import (
     ModelPricing,
     ObservationEvent,
     ObservePolicy,
+    Schedule,
     SlackChannelMembership,
     SlackIdentity,
     SlackInboundEvent,
@@ -739,6 +740,131 @@ def test_dm_creates_task_without_visible_ack(db_session: Session) -> None:
     ]
     assert acknowledgements.calls == []
     assert message_event is None
+
+
+def test_dm_scheduling_request_creates_active_schedule(
+    db_session: Session,
+) -> None:
+    client = FakeSlackClient()
+    result = SlackIngress(
+        session=db_session,
+        client=client,
+        intent_classifier=FakeIntentClassifier(intent_decision()),
+        reaction_provider=FakeReactionProvider(name="calendar", intent="scheduled"),
+    ).handle_dm(
+        body=message_body(event_id="EvScheduleDm"),
+        event=dm_event(
+            text=(
+                "Every morning can you check on PYPL ticker and give me a "
+                "market summary"
+            ),
+            ts="1716500100.000001",
+        ),
+    )
+    db_session.commit()
+
+    assert result is not None
+    task = db_session.get(Task, result.task.id)
+    schedule = db_session.scalar(select(Schedule))
+    assert task is not None
+    assert schedule is not None
+
+    assert task.status is TaskStatus.succeeded
+    assert schedule.status == "active"
+    assert schedule.owner_type == "user"
+    assert schedule.owner_slack_user_id == "U123"
+    assert schedule.spec_kind == "cron"
+    assert schedule.cron_expr == "0 9 * * *"
+    assert schedule.task_template["delivery_surface"] == "dm"
+    assert schedule.task_template["slack_channel_id"] == "D123"
+    assert schedule.task_template["slack_thread_ts"] == "D123"
+    assert schedule.task_template["input"] == (
+        "can you check on PYPL ticker and give me a market summary"
+    )
+    assert schedule.metadata_json["source_task_id"] == str(task.id)
+    assert schedule.metadata_json["confirmation_required"] is False
+
+    assert len(client.calls) == 1
+    assert client.calls[0]["channel"] == "D123"
+    assert client.calls[0]["thread_ts"] is None
+    assert "Done" in client.calls[0]["text"]
+    assert "PYPL" in client.calls[0]["text"]
+    assert "every morning" in client.calls[0]["text"].casefold()
+    assert "pause, change, or cancel" in client.calls[0]["text"]
+    assert "Schedule id" not in client.calls[0]["text"]
+    assert "Budget cap" not in client.calls[0]["text"]
+    assert "proposed schedule" not in client.calls[0]["text"]
+
+    events = task_events(db_session, task)
+    assert any(
+        event.payload.get("message") == "schedule_created"
+        and event.payload.get("schedule_id") == str(schedule.id)
+        and event.payload.get("schedule_status") == "active"
+        for event in events
+    )
+    message_event = next(
+        event
+        for event in events
+        if event.type == TaskEventType.message_posted
+        and event.payload.get("purpose") == "schedule_created"
+    )
+    assert message_event.payload["text"] == client.calls[0]["text"]
+
+
+def test_dm_confirmation_activates_latest_proposed_schedule(
+    db_session: Session,
+) -> None:
+    client = FakeSlackClient()
+    ingress = SlackIngress(
+        session=db_session,
+        client=client,
+        intent_classifier=FakeIntentClassifier(intent_decision()),
+        reaction_provider=FakeReactionProvider(name="calendar", intent="scheduled"),
+    )
+    proposed = ingress.handle_dm(
+        body=message_body(event_id="EvSchedulePropose"),
+        event=dm_event(
+            text=(
+                "Draft a schedule for every Monday morning to check unresolved "
+                "decisions, but wait for me to confirm before running it."
+            ),
+            ts="1716500100.000001",
+        ),
+    )
+    confirmed = ingress.handle_dm(
+        body=message_body(event_id="EvScheduleConfirm"),
+        event=dm_event(
+            text="yes set it up",
+            ts="1716500110.000001",
+        ),
+    )
+    db_session.commit()
+
+    assert proposed is not None
+    assert confirmed is not None
+    schedule = db_session.scalar(select(Schedule))
+    assert schedule is not None
+    assert schedule.status == "active"
+    assert schedule.metadata_json["activated_by"] == "U123"
+    assert schedule.metadata_json["activated_from_task_id"] == str(confirmed.task.id)
+
+    confirmed_task = db_session.get(Task, confirmed.task.id)
+    assert confirmed_task is not None
+    assert confirmed_task.status is TaskStatus.succeeded
+    assert len(client.calls) == 2
+    assert "activated that scheduled task" in client.calls[1]["text"]
+
+    events = task_events(db_session, confirmed_task)
+    assert any(
+        event.payload.get("message") == "schedule_activated"
+        and event.payload.get("schedule_id") == str(schedule.id)
+        for event in events
+    )
+    assert any(
+        event.type == TaskEventType.message_posted
+        and event.payload.get("purpose") == "schedule_activate"
+        for event in events
+    )
 
 
 def test_dm_from_bot_is_ignored(db_session: Session) -> None:
@@ -1868,6 +1994,7 @@ def cleanup_database(session: Session) -> None:
         TaskEvent,
         SlackSideEffect,
         Task,
+        Schedule,
         ModelPricing,
         ObservationEvent,
         ObservePolicy,

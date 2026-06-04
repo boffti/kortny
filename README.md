@@ -130,6 +130,8 @@ POSTGRES_USER=kortny
 POSTGRES_PASSWORD=kortny
 POSTGRES_HOST_PORT=5432
 KORTNY_WORKFLOW_BACKEND=temporal
+KORTNY_SCHEDULER_POLL_INTERVAL_SECONDS=5
+KORTNY_SCHEDULER_MATERIALIZE_LIMIT=50
 ```
 
 ### 3. Start Kortny
@@ -139,10 +141,11 @@ docker compose up -d --force-recreate
 ```
 
 This starts Postgres on `localhost:5432`, runs the Alembic migration, starts
-the Slack Socket Mode ingress service, starts the task worker, and serves the
-read-only operator dashboard at `http://localhost:8080`. It also starts the
-local Temporal dev server and Temporal worker so durable-workflow wiring is
-available during normal development.
+the Slack Socket Mode ingress service, starts the task worker, starts the
+Postgres-native schedule materializer, and serves the read-only operator
+dashboard at `http://localhost:8080`. It also starts the local Temporal dev
+server and Temporal worker so durable-workflow wiring is available during
+normal development.
 
 This does not start optional observability services such as Phoenix.
 
@@ -235,6 +238,10 @@ Temporal's local UI is available at `http://localhost:8233`.
 `KORTNY_WORKFLOW_BACKEND` defaults to `temporal` in `.env.example`. HIG-97
 currently records durable-candidate handoff events and shadow-starts Temporal
 workflows before moving real Slack execution ownership into Temporal.
+
+Scheduled work is still owned by Kortny/Postgres in this local stack. The
+`scheduler` service materializes due `schedules` rows into normal `tasks` rows;
+Temporal Schedules are deferred until Temporal runs with production persistence.
 
 ### 5. Invite your bot to a channel
 

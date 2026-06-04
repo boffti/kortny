@@ -1,0 +1,304 @@
+{
+  "version": 1,
+  "name": "Kortny Product Benchmark",
+  "purpose": "Keep Kortny engineering grounded in visible Slack coworker quality, latency and cost, context/tool correctness, and operator trust.",
+  "operating_rule": "New slices should improve Slack response quality, latency/cost, correct context/tool selection, or operator trust/debuggability.",
+  "default_manual_budget": {
+    "quick_target_seconds": 20,
+    "planned_target_seconds": 180,
+    "quick_max_llm_calls": 2,
+    "planned_max_cost_usd": "0.10"
+  },
+  "scenarios": [
+    {
+      "id": "quick_dm_availability",
+      "title": "Quick DM availability check",
+      "surface": "dm",
+      "prompt": "Are you up?",
+      "primary_guardrail": "latency_cost",
+      "desired_runtime_route": "inline",
+      "baseline_classifier_route": "inline",
+      "known_gap": null,
+      "expected": {
+        "slack": [
+          "Responds briefly and naturally.",
+          "Does not introduce itself as a separate runtime or agent.",
+          "Does not tag Kortny instead of the Slack user."
+        ],
+        "logs": [
+          "No adk_planned_workflow_selected event.",
+          "No Composio catalog fanout for this prompt."
+        ],
+        "db": [
+          "Task succeeds with one posted result message.",
+          "LLM usage has nonzero recorded cost when a model call is made."
+        ],
+        "dashboard": [
+          "Task detail shows Posted Slack Response.",
+          "No Planned Trace panel is shown."
+        ]
+      }
+    },
+    {
+      "id": "channel_context_usage",
+      "title": "Channel profile with provenance",
+      "surface": "channel_mention",
+      "prompt": "@Kortny what do you know about how this channel is used, and why do you believe that?",
+      "primary_guardrail": "correct_context_tool_selection",
+      "desired_runtime_route": "inline",
+      "baseline_classifier_route": "inline",
+      "known_gap": null,
+      "expected": {
+        "slack": [
+          "Explains the channel purpose and recurring work patterns.",
+          "States what evidence was used and any sampling caveat.",
+          "Does not invent stored graph facts when graph retrieval returns none."
+        ],
+        "logs": [
+          "Uses channel context, workspace graph, or Slack history where available.",
+          "Records kg_retrieval_completed or channel history tool evidence when used."
+        ],
+        "db": [
+          "Task event timeline includes context assembly.",
+          "Any graph facts used are scope-safe for the channel."
+        ],
+        "dashboard": [
+          "Timeline makes selected context and tools inspectable.",
+          "Posted response and raw result are both visible."
+        ]
+      }
+    },
+    {
+      "id": "channel_decision_summary",
+      "title": "Recent decisions and unresolved items",
+      "surface": "channel_mention",
+      "prompt": "@Kortny summarize the last few decisions in this channel and call out anything unresolved",
+      "primary_guardrail": "slack_response_quality",
+      "desired_runtime_route": "inline",
+      "baseline_classifier_route": "inline",
+      "known_gap": null,
+      "expected": {
+        "slack": [
+          "Separates decisions from unresolved items.",
+          "Avoids citing HIGs or project facts unless they are present in visible channel context.",
+          "Keeps answer concise enough for Slack."
+        ],
+        "logs": [
+          "Uses Slack/channel context when needed.",
+          "Does not run broad web research for a local channel-summary request."
+        ],
+        "db": [
+          "Task succeeds with source/tool trace if channel history is read.",
+          "Episode retrieval is scoped to thread, channel, or user."
+        ],
+        "dashboard": [
+          "Timeline shows channel context or tool-call provenance.",
+          "Cost stays within quick-task expectations."
+        ]
+      }
+    },
+    {
+      "id": "memory_preference_followup",
+      "title": "Follow-up memory instruction",
+      "surface": "dm",
+      "prompt": "Yeah, let's do that. Remember this preference for future reports.",
+      "primary_guardrail": "correct_context_tool_selection",
+      "desired_runtime_route": "inline",
+      "baseline_classifier_route": "inline",
+      "known_gap": "Intent handling can classify the memory candidate correctly while the later task path still performs unrelated follow-up work.",
+      "expected": {
+        "slack": [
+          "Acknowledges the memory candidate or asks one concise clarification.",
+          "Does not execute the previous analytical task again unless explicitly requested."
+        ],
+        "logs": [
+          "Records memory candidate or memory confirmation flow.",
+          "Does not route to planned workflow solely because the phrase is a follow-up."
+        ],
+        "db": [
+          "Creates or proposes one memory row only when the preference text is specific enough.",
+          "Does not create a duplicate analytical task from stale thread context."
+        ],
+        "dashboard": [
+          "Memory event is visible in task timeline.",
+          "Any skipped memory explains why it was skipped."
+        ]
+      }
+    },
+    {
+      "id": "linear_project_tasks",
+      "title": "Scoped Linear project task summary",
+      "surface": "channel_mention",
+      "prompt": "@Kortny can you summarize my open tasks in the Linear kortny project?",
+      "primary_guardrail": "correct_context_tool_selection",
+      "desired_runtime_route": "planned_candidate",
+      "baseline_classifier_route": "planned_candidate",
+      "known_gap": "Composio tool signatures can still cause weak Linear filtering or ask for details already present in the prompt.",
+      "expected": {
+        "slack": [
+          "Uses the connected Linear integration when eligible.",
+          "Does not ask for the project name when 'kortny project' is already supplied.",
+          "Clearly states if it cannot confirm assignment or open status."
+        ],
+        "logs": [
+          "Shows Linear Composio tool selection and execution.",
+          "Tool errors are recoverable and summarized rather than causing a generic failure."
+        ],
+        "db": [
+          "Connection scope respects channel/workspace vs DM/user policy.",
+          "Task records tools_used with Linear-related tool names."
+        ],
+        "dashboard": [
+          "Tool result payload is inspectable.",
+          "Any tool validation failure is visible with argument keys."
+        ]
+      }
+    },
+    {
+      "id": "observability_multi_source_plan",
+      "title": "Multi-source research plus workspace comparison",
+      "surface": "channel_mention",
+      "prompt": "@Kortny research AI observability tools, check Linear for existing HIGs, compare with our docs, and recommend next actions",
+      "primary_guardrail": "operator_trust_debuggability",
+      "desired_runtime_route": "planned_candidate",
+      "baseline_classifier_route": "planned_candidate",
+      "known_gap": null,
+      "expected": {
+        "slack": [
+          "Leads with recommendation and separates evidence from blockers.",
+          "Does not leak internal monologue or ADK role names.",
+          "Mentions material source/tool limitations."
+        ],
+        "logs": [
+          "Emits adk_planned_workflow_selected.",
+          "Records branch, tool, budget, and sanitizer events."
+        ],
+        "db": [
+          "LLM usage cost is nonzero for every priced model call.",
+          "Planned workflow budget events appear if caps are reached."
+        ],
+        "dashboard": [
+          "Planned Trace panel shows branches, budget controls, tool rollup, and raw-vs-posted response.",
+          "Timeline shows both raw planned output and final Slack-posted output."
+        ]
+      }
+    },
+    {
+      "id": "james_bond_ranked_research",
+      "title": "Deeper entertainment research synthesis",
+      "surface": "dm",
+      "prompt": "Do a deeper pass on the top James Bond films using ratings, critic consensus, and cultural impact.",
+      "primary_guardrail": "latency_cost",
+      "desired_runtime_route": "planned_candidate",
+      "baseline_classifier_route": "inline",
+      "known_gap": "Current planned-workflow classifier treats this as inline even though the user asked for a deeper multi-source synthesis.",
+      "expected": {
+        "slack": [
+          "Gives a ranked answer with a clear scoring lens.",
+          "Uses sources or states when relying on general knowledge.",
+          "Avoids excessive source dumping."
+        ],
+        "logs": [
+          "Should enter planned workflow or a bounded research path.",
+          "Should avoid runaway repeated search calls."
+        ],
+        "db": [
+          "Cost and token totals remain under the planned benchmark budget.",
+          "Tool calls stop at the configured total cap."
+        ],
+        "dashboard": [
+          "Planned Trace or equivalent research trace shows why sources were enough.",
+          "Budget hits are visible if the task stops early."
+        ]
+      }
+    },
+    {
+      "id": "website_cpt_audit",
+      "title": "Website audit with named framework",
+      "surface": "channel_mention",
+      "prompt": "@Kortny review harrypotter.com and audit it with the CPT framework. Point out gaps and suggested reframe opportunities.",
+      "primary_guardrail": "slack_response_quality",
+      "desired_runtime_route": "planned_candidate",
+      "baseline_classifier_route": "inline",
+      "known_gap": "Current planned-workflow classifier misses website audit plus named-framework requests as complex planned work.",
+      "expected": {
+        "slack": [
+          "Crawls or searches the site before making claims.",
+          "Uses the CPT framework explicitly and produces concrete reframes.",
+          "Formats a detailed but readable Slack answer."
+        ],
+        "logs": [
+          "Uses web/search/crawl integration when available.",
+          "Records tool evidence and any pages that could not be accessed."
+        ],
+        "db": [
+          "Source refs or tool output include inspected site pages.",
+          "No generic answer is recorded without external evidence."
+        ],
+        "dashboard": [
+          "Trace shows site inspection path and final synthesis.",
+          "Operator can see limitations if crawl/search failed."
+        ]
+      }
+    },
+    {
+      "id": "memory_forget_no_match",
+      "title": "Forget memory with no matching fact",
+      "surface": "dm",
+      "prompt": "forget my PDF branding preference",
+      "primary_guardrail": "slack_response_quality",
+      "desired_runtime_route": "inline",
+      "baseline_classifier_route": "planned_candidate",
+      "known_gap": "Current planned-workflow classifier can treat forget-memory requests as planned due keyword noise from 'PDF'.",
+      "expected": {
+        "slack": [
+          "If no matching memory exists, explains that naturally.",
+          "Does not generic-fail when the forget tool returns no match.",
+          "Does not claim deletion unless a fact was actually forgotten."
+        ],
+        "logs": [
+          "Uses forget_fact or inspect_memory only as needed.",
+          "No planned workflow event for a simple memory mutation."
+        ],
+        "db": [
+          "If a matching fact exists, status changes preserve audit history.",
+          "If no match exists, no unrelated memory rows are changed."
+        ],
+        "dashboard": [
+          "Timeline shows tool result and humanized final response.",
+          "Memory page reflects unchanged or forgotten state correctly."
+        ]
+      }
+    },
+    {
+      "id": "pypl_report_iteration",
+      "title": "Document iteration with current data",
+      "surface": "channel_mention",
+      "prompt": "@Kortny enhance the PYPL report with more company info, current price info, earnings call info, and generate a 3-page PDF.",
+      "primary_guardrail": "operator_trust_debuggability",
+      "desired_runtime_route": "planned_candidate",
+      "baseline_classifier_route": "planned_candidate",
+      "known_gap": "Document iterations still need stronger artifact versioning and proof that the new file materially differs from the prior file.",
+      "expected": {
+        "slack": [
+          "States what changed from the prior report.",
+          "Posts one versioned PDF artifact.",
+          "Does not rename the internal document title without reason."
+        ],
+        "logs": [
+          "Reads the attached/prior PDF when available.",
+          "Uses current-data tools for price and earnings evidence.",
+          "Records artifact creation and Slack file posting."
+        ],
+        "db": [
+          "Artifact row has stable filename lineage or version suffix.",
+          "Task source refs include the prior file and current-data source."
+        ],
+        "dashboard": [
+          "Artifacts table shows generated PDF.",
+          "Trace shows file-read, research/current-data, and PDF-generation steps."
+        ]
+      }
+    }
+  ]
+}

@@ -387,6 +387,115 @@ class SlackSideEffect(Base):
     )
 
 
+class Schedule(Base):
+    __tablename__ = "schedules"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    installation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("installations.id", ondelete="CASCADE"), nullable=False
+    )
+    owner_type: Mapped[str] = mapped_column(String, nullable=False)
+    owner_slack_user_id: Mapped[str | None] = mapped_column(String)
+    title: Mapped[str] = mapped_column(String, nullable=False)
+    spec_kind: Mapped[str] = mapped_column(String, nullable=False)
+    cron_expr: Mapped[str | None] = mapped_column(String)
+    interval_seconds: Mapped[int | None] = mapped_column(Integer)
+    run_at: Mapped[datetime | None] = mapped_column(TZ)
+    timezone: Mapped[str] = mapped_column(
+        String, nullable=False, server_default=text("'UTC'")
+    )
+    next_run_at: Mapped[datetime | None] = mapped_column(TZ)
+    last_run_at: Mapped[datetime | None] = mapped_column(TZ)
+    catchup_policy: Mapped[str] = mapped_column(
+        String, nullable=False, server_default=text("'skip'")
+    )
+    catchup_window_seconds: Mapped[int | None] = mapped_column(Integer)
+    overlap_policy: Mapped[str] = mapped_column(
+        String, nullable=False, server_default=text("'skip'")
+    )
+    status: Mapped[str] = mapped_column(
+        String, nullable=False, server_default=text("'active'")
+    )
+    task_template: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    planned_cost_ceiling_usd: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
+    idempotency_key_template: Mapped[str | None] = mapped_column(String)
+    created_by_slack_user_id: Mapped[str | None] = mapped_column(String)
+    metadata_json: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "owner_type in ('user', 'system')",
+            name="ck_schedules_owner_type",
+        ),
+        CheckConstraint(
+            "(owner_type = 'user' and owner_slack_user_id is not null) or "
+            "(owner_type = 'system')",
+            name="ck_schedules_owner",
+        ),
+        CheckConstraint(
+            "spec_kind in ('oneoff', 'interval', 'cron')",
+            name="ck_schedules_spec_kind",
+        ),
+        CheckConstraint(
+            "(spec_kind = 'oneoff' and run_at is not null) or "
+            "(spec_kind = 'interval' and interval_seconds is not null and "
+            "interval_seconds > 0) or "
+            "(spec_kind = 'cron' and cron_expr is not null and cron_expr <> '')",
+            name="ck_schedules_spec",
+        ),
+        CheckConstraint(
+            "catchup_policy in ('skip', 'run_once', 'backfill')",
+            name="ck_schedules_catchup_policy",
+        ),
+        CheckConstraint(
+            "catchup_window_seconds is null or catchup_window_seconds >= 0",
+            name="ck_schedules_catchup_window",
+        ),
+        CheckConstraint(
+            "overlap_policy in ('skip', 'allow')",
+            name="ck_schedules_overlap_policy",
+        ),
+        CheckConstraint(
+            "status in ('proposed', 'active', 'paused', 'completed', 'cancelled')",
+            name="ck_schedules_status",
+        ),
+        CheckConstraint(
+            "planned_cost_ceiling_usd is null or planned_cost_ceiling_usd > 0",
+            name="ck_schedules_cost_ceiling",
+        ),
+        Index(
+            "idx_schedules_due",
+            "next_run_at",
+            postgresql_where=text("status = 'active'"),
+        ),
+        Index(
+            "idx_schedules_owner",
+            "installation_id",
+            "owner_type",
+            "owner_slack_user_id",
+            "status",
+        ),
+        Index(
+            "idx_schedules_status",
+            "installation_id",
+            "status",
+            "next_run_at",
+        ),
+    )
+
+
 class WorkspaceState(Base):
     __tablename__ = "workspace_state"
 

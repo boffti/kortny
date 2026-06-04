@@ -27,6 +27,9 @@ SETTINGS_ENV_VARS = {
     "TEMPORAL_ADDRESS",
     "TEMPORAL_NAMESPACE",
     "TEMPORAL_TASK_QUEUE",
+    "KORTNY_SCHEDULER_POLL_INTERVAL_SECONDS",
+    "KORTNY_SCHEDULER_MATERIALIZE_LIMIT",
+    "KORTNY_SCHEDULER_ADVISORY_LOCK_KEY",
     "COMPOSIO_API_KEY",
     "COMPOSIO_CATALOG_ENABLED",
     "COMPOSIO_CATALOG_LIMIT",
@@ -89,6 +92,9 @@ def test_settings_loads_required_environment(monkeypatch: pytest.MonkeyPatch) ->
     assert settings.temporal_address == "temporal:7233"
     assert settings.temporal_namespace == "default"
     assert settings.temporal_task_queue == "kortny-workflows"
+    assert settings.scheduler_poll_interval_seconds == 5.0
+    assert settings.scheduler_materialize_limit == 50
+    assert settings.scheduler_advisory_lock_key == 759340185
     assert settings.composio_catalog_enabled is True
     assert settings.composio_catalog_limit == 60
     assert settings.composio_request_timeout_seconds == 10.0
@@ -128,6 +134,9 @@ def test_settings_loads_optional_environment(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setenv("TEMPORAL_ADDRESS", "temporal.example:7233")
     monkeypatch.setenv("TEMPORAL_NAMESPACE", "kortny-dev")
     monkeypatch.setenv("TEMPORAL_TASK_QUEUE", "kortny-dev-workflows")
+    monkeypatch.setenv("KORTNY_SCHEDULER_POLL_INTERVAL_SECONDS", "2.5")
+    monkeypatch.setenv("KORTNY_SCHEDULER_MATERIALIZE_LIMIT", "25")
+    monkeypatch.setenv("KORTNY_SCHEDULER_ADVISORY_LOCK_KEY", "123456")
     monkeypatch.setenv("OBSERVABILITY_CAPTURE_CONTENT", "summaries")
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://otel:4318")
     monkeypatch.setenv(
@@ -167,6 +176,9 @@ def test_settings_loads_optional_environment(monkeypatch: pytest.MonkeyPatch) ->
     assert settings.temporal_address == "temporal.example:7233"
     assert settings.temporal_namespace == "kortny-dev"
     assert settings.temporal_task_queue == "kortny-dev-workflows"
+    assert settings.scheduler_poll_interval_seconds == 2.5
+    assert settings.scheduler_materialize_limit == 25
+    assert settings.scheduler_advisory_lock_key == 123456
     assert settings.observability_capture_content == "summaries"
     assert settings.otel_exporter_otlp_endpoint == "http://otel:4318"
     assert (

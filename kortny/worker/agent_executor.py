@@ -107,6 +107,7 @@ from kortny.tools import (
 )
 from kortny.witness import (
     WITNESS_OPPORTUNITY_CANDIDATES_PROJECTED_MESSAGE,
+    WitnessChannelProfileExtractor,
     WitnessOpportunityService,
     WitnessTaskResponseExtractor,
 )
@@ -238,6 +239,7 @@ class AgentTaskExecutor:
                     result_summary=agent_result.result_summary,
                 )
                 self._mark_channel_assessment_completed(
+                    settings=settings,
                     session=session,
                     task=task,
                     task_service=task_service,
@@ -1607,6 +1609,7 @@ class AgentTaskExecutor:
     def _mark_channel_assessment_completed(
         self,
         *,
+        settings: Settings,
         session: Session,
         task: Task,
         task_service: TaskService,
@@ -1630,13 +1633,75 @@ class AgentTaskExecutor:
             membership=membership,
             profile=profile,
         )
-        witness_candidates = WitnessOpportunityService(
-            session
-        ).project_from_channel_profile(
-            task=task,
-            membership=membership,
-            profile=profile,
-        )
+        try:
+            model_route = ModelRouter(settings).route_for_tier(
+                ModelRouteTier.cheap_fast,
+                reason="witness_channel_profile_extraction",
+            )
+            provider: LLMProvider
+            if self.llm_provider is None:
+                selection = self._select_runtime_model(
+                    settings=settings,
+                    session=session,
+                    task=task,
+                    model_route=model_route,
+                )
+                model_route = selection.model_route
+                provider = create_provider_for_selection(
+                    settings=settings,
+                    selection=selection,
+                )
+                provider_name: DbLLMProvider | str = selection.provider_name
+            else:
+                provider = self.llm_provider
+                provider_name = self.provider_name or DbLLMProvider(
+                    settings.llm_provider.value
+                )
+            witness_extraction = WitnessChannelProfileExtractor(
+                LLMService(
+                    session=session,
+                    provider=provider,
+                    provider_name=provider_name,
+                    task_service=task_service,
+                    model_route=model_route,
+                )
+            ).extract(
+                task=task,
+                membership=membership,
+                profile=profile,
+            )
+            witness_candidates = WitnessOpportunityService(
+                session
+            ).project_from_channel_profile(
+                task=task,
+                membership=membership,
+                profile=profile,
+                candidates=witness_extraction.candidates,
+                extraction_metadata={
+                    "raw_candidate_count": witness_extraction.raw_candidate_count,
+                    "skipped_reason": witness_extraction.skipped_reason,
+                },
+            )
+        except Exception as exc:
+            task_service.append_event(
+                task,
+                TaskEventType.error,
+                {
+                    "message": "witness_opportunity_projection_failed",
+                    "source_type": "channel_profile",
+                    "channel_id": membership.channel_id,
+                    "profile_id": str(profile.id),
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                },
+            )
+            logger.exception(
+                "channel profile witness projection failed task_id=%s profile_id=%s",
+                task.id,
+                profile.id,
+            )
+            witness_extraction = None
+            witness_candidates = None
         task_service.append_event(
             task,
             TaskEventType.log,
@@ -1658,13 +1723,41 @@ class AgentTaskExecutor:
             TaskEventType.log,
             {
                 "message": WITNESS_OPPORTUNITY_CANDIDATES_PROJECTED_MESSAGE,
+                "source_type": "channel_profile",
+                "extractor": "llm",
                 "channel_id": membership.channel_id,
                 "membership_id": str(membership.id),
                 "profile_id": str(profile.id),
-                "created_count": witness_candidates.created_count,
-                "updated_count": witness_candidates.updated_count,
-                "skipped_count": witness_candidates.skipped_count,
-                "candidate_ids": list(witness_candidates.candidate_ids),
+                "raw_candidate_count": (
+                    witness_extraction.raw_candidate_count
+                    if witness_extraction is not None
+                    else 0
+                ),
+                "skipped_reason": (
+                    witness_extraction.skipped_reason
+                    if witness_extraction is not None
+                    else "extractor_failed"
+                ),
+                "created_count": (
+                    witness_candidates.created_count
+                    if witness_candidates is not None
+                    else 0
+                ),
+                "updated_count": (
+                    witness_candidates.updated_count
+                    if witness_candidates is not None
+                    else 0
+                ),
+                "skipped_count": (
+                    witness_candidates.skipped_count
+                    if witness_candidates is not None
+                    else 1
+                ),
+                "candidate_ids": (
+                    list(witness_candidates.candidate_ids)
+                    if witness_candidates is not None
+                    else []
+                ),
             },
         )
         task_service.append_event(

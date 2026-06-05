@@ -85,12 +85,19 @@ class WitnessOpportunityService:
         task: Task,
         membership: SlackChannelMembership,
         profile: ObserveChannelProfile,
+        candidates: tuple[WitnessOpportunityCandidateInput, ...],
+        extraction_metadata: dict[str, Any] | None = None,
     ) -> WitnessOpportunityCandidateResult:
-        """Create/update candidates from profile help opportunities."""
+        """Create/update candidates proposed from a channel profile."""
 
-        extraction = _semantic_extraction(profile)
-        opportunities = _bounded_text_list(extraction.get("help_opportunities"), limit=5)
-        if not opportunities:
+        valid_candidates = tuple(
+            candidate
+            for candidate in candidates
+            if candidate.candidate_type in ALLOWED_CANDIDATE_TYPES
+            and candidate.title.strip()
+            and candidate.summary.strip()
+        )
+        if not valid_candidates:
             return WitnessOpportunityCandidateResult(
                 created_count=0,
                 updated_count=0,
@@ -99,30 +106,22 @@ class WitnessOpportunityService:
             )
 
         now = datetime.now(UTC)
-        evidence_items = _evidence_items(
-            task=task,
-            membership=membership,
-            profile=profile,
-            extraction=extraction,
-        )
-        confidence_score = _confidence_score(
-            extraction.get("confidence"),
-            profile.confidence_score,
-        )
-        confidence_reason = _confidence_reason(profile, extraction.get("confidence"))
         scope_type, scope_id = _scope_for_membership(membership)
+        channel_label = (
+            f"#{membership.channel_name}" if membership.channel_name else membership.channel_id
+        )
 
         created_count = 0
         updated_count = 0
         skipped_count = 0
         candidate_ids: list[str] = []
 
-        for opportunity in opportunities[:MAX_PROFILE_OPPORTUNITIES]:
-            candidate_type = "general_help"
+        for candidate_input in valid_candidates[:MAX_PROFILE_OPPORTUNITIES]:
+            candidate_type = candidate_input.candidate_type
             dedupe_key = _dedupe_key(
                 channel_id=membership.channel_id,
                 candidate_type=candidate_type,
-                opportunity=opportunity,
+                opportunity=f"{candidate_input.title}:{candidate_input.summary}",
             )
             existing = self._find_existing(
                 installation_id=task.installation_id,
@@ -131,18 +130,35 @@ class WitnessOpportunityService:
                 candidate_type=candidate_type,
                 dedupe_key=dedupe_key,
             )
-            title = _title(opportunity, candidate_type)
-            summary = _summary(opportunity, membership=membership)
+            title = _bounded_text(candidate_input.title, 140)
+            summary = _bounded_text(candidate_input.summary, 1000)
+            suggested_action = (
+                _bounded_text(candidate_input.suggested_action, 500)
+                if candidate_input.suggested_action
+                else _suggested_action(summary)
+            )
+            suggested_message = (
+                _bounded_text(candidate_input.suggested_message, 500)
+                if candidate_input.suggested_message
+                else _suggested_message_for_label(summary, channel_label=channel_label)
+            )
             metadata = {
-                "source": "channel_profile_help_opportunity",
+                "source": "llm_channel_profile_extractor",
                 "profile_version": profile.profile_version,
                 "channel_name": membership.channel_name,
-                "semantic_confidence": extraction.get("confidence"),
                 "message_count": profile.message_count,
                 "file_count": profile.file_count,
                 "observed_range_start_ts": profile.observed_range_start_ts,
                 "observed_range_end_ts": profile.observed_range_end_ts,
+                **(extraction_metadata or {}),
+                **candidate_input.metadata_json,
             }
+            evidence_items = _channel_profile_candidate_evidence_items(
+                task=task,
+                membership=membership,
+                profile=profile,
+                candidate=candidate_input,
+            )
             if existing is None:
                 candidate = WitnessOpportunityCandidate(
                     installation_id=task.installation_id,
@@ -153,19 +169,21 @@ class WitnessOpportunityService:
                     candidate_type=candidate_type,
                     title=title,
                     summary=summary,
-                    suggested_action=_suggested_action(opportunity),
-                    suggested_message=_suggested_message(
-                        opportunity,
-                        membership=membership,
-                    ),
+                    suggested_action=suggested_action,
+                    suggested_message=suggested_message,
                     evidence_json=evidence_items,
                     source_type="channel_profile",
                     source_id=str(profile.id),
                     source_task_id=task.id,
                     source_profile_id=profile.id,
                     dedupe_key=dedupe_key,
-                    confidence_score=confidence_score,
-                    confidence_reason=confidence_reason,
+                    confidence_score=_bounded_confidence(
+                        candidate_input.confidence_score
+                    ),
+                    confidence_reason=_bounded_text(
+                        candidate_input.confidence_reason,
+                        500,
+                    ),
                     status="candidate",
                     feedback_json={},
                     metadata_json=metadata,
@@ -179,17 +197,20 @@ class WitnessOpportunityService:
                 candidate = existing
                 candidate.title = title
                 candidate.summary = summary
-                candidate.suggested_action = _suggested_action(opportunity)
-                candidate.suggested_message = _suggested_message(
-                    opportunity,
-                    membership=membership,
-                )
+                candidate.suggested_action = suggested_action
+                candidate.suggested_message = suggested_message
                 candidate.evidence_json = evidence_items
                 candidate.source_id = str(profile.id)
                 candidate.source_task_id = task.id
                 candidate.source_profile_id = profile.id
-                candidate.confidence_score = confidence_score
-                candidate.confidence_reason = confidence_reason
+                candidate.confidence_score = max(
+                    candidate.confidence_score or Decimal("0.000"),
+                    _bounded_confidence(candidate_input.confidence_score),
+                )
+                candidate.confidence_reason = (
+                    _bounded_text(candidate_input.confidence_reason, 500)
+                    or "Reinforced by the Witness channel profile extractor."
+                )
                 candidate.metadata_json = {
                     **(candidate.metadata_json or {}),
                     **metadata,
@@ -412,22 +433,12 @@ class WitnessOpportunityService:
         )
 
 
-def _semantic_extraction(profile: ObserveChannelProfile) -> dict[str, Any]:
-    profile_payload = profile.profile_json if isinstance(profile.profile_json, dict) else {}
-    extraction = profile_payload.get("semantic_extraction")
-    if isinstance(extraction, dict):
-        return extraction
-    metadata = profile.metadata_json if isinstance(profile.metadata_json, dict) else {}
-    extraction = metadata.get("semantic_extraction")
-    return extraction if isinstance(extraction, dict) else {}
-
-
-def _evidence_items(
+def _channel_profile_candidate_evidence_items(
     *,
     task: Task,
     membership: SlackChannelMembership,
     profile: ObserveChannelProfile,
-    extraction: dict[str, Any],
+    candidate: WitnessOpportunityCandidateInput,
 ) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = [
         {
@@ -436,15 +447,18 @@ def _evidence_items(
             "profile_version": profile.profile_version,
             "source_task_id": str(task.id),
             "channel_id": membership.channel_id,
-            "summary": _bounded_text(profile.summary or "", 500),
+            "snippet": _bounded_text(candidate.summary, 300),
+            "profile_summary": _bounded_text(profile.summary or "", 500),
         }
     ]
-    evidence = _bounded_text_list(extraction.get("evidence"), limit=5)
-    for snippet in evidence:
+    for snippet in candidate.evidence[:5]:
+        bounded = _bounded_text(snippet, 300)
+        if not bounded:
+            continue
         items.append(
             {
-                "type": "semantic_evidence",
-                "snippet": snippet,
+                "type": "llm_evidence",
+                "snippet": bounded,
                 "profile_id": str(profile.id),
                 "channel_id": membership.channel_id,
             }
@@ -505,29 +519,6 @@ def _channel_label(
     return "this workspace"
 
 
-def _confidence_score(
-    semantic_confidence: object,
-    profile_confidence_score: Decimal | None,
-) -> Decimal:
-    base = profile_confidence_score or Decimal("0.500")
-    if semantic_confidence == "high":
-        return max(base, Decimal("0.750"))
-    if semantic_confidence == "medium":
-        return max(base, Decimal("0.600"))
-    if semantic_confidence == "low":
-        return min(base, Decimal("0.450"))
-    return base
-
-
-def _confidence_reason(
-    profile: ObserveChannelProfile,
-    semantic_confidence: object,
-) -> str:
-    semantic = semantic_confidence if isinstance(semantic_confidence, str) else "unknown"
-    profile_reason = profile.confidence_reason or "Channel profile generated a help opportunity."
-    return f"{profile_reason} Semantic extraction confidence: {semantic}."
-
-
 def _dedupe_key(
     *,
     channel_id: str,
@@ -542,46 +533,8 @@ def _normalize_for_key(value: str) -> str:
     return _WHITESPACE_RE.sub(" ", value.strip().lower())
 
 
-def _title(opportunity: str, candidate_type: str) -> str:
-    prefix = {
-        "workflow_gap": "Workflow opportunity",
-        "artifact_followup": "Artifact follow-up",
-        "unresolved_decision": "Unresolved decision",
-        "data_quality_issue": "Data quality watch",
-        "recurring_check": "Recurring check",
-        "project_status_gap": "Project status gap",
-        "general_help": "Help opportunity",
-    }[candidate_type]
-    return _bounded_text(f"{prefix}: {opportunity}", 140)
-
-
-def _summary(
-    opportunity: str,
-    *,
-    membership: SlackChannelMembership,
-) -> str:
-    channel = f"#{membership.channel_name}" if membership.channel_name else membership.channel_id
-    return _summary_for_label(opportunity, channel_label=channel)
-
-
-def _summary_for_label(opportunity: str, *, channel_label: str) -> str:
-    return _bounded_text(
-        f"Kortny may be able to help in {channel_label}: {opportunity}",
-        1000,
-    )
-
-
 def _suggested_action(opportunity: str) -> str:
     return _bounded_text(f"Offer help with: {opportunity}", 500)
-
-
-def _suggested_message(
-    opportunity: str,
-    *,
-    membership: SlackChannelMembership,
-) -> str:
-    channel = f"#{membership.channel_name}" if membership.channel_name else "this channel"
-    return _suggested_message_for_label(opportunity, channel_label=channel)
 
 
 def _suggested_message_for_label(opportunity: str, *, channel_label: str) -> str:
@@ -627,25 +580,6 @@ def _candidate_evidence_items(
         }
     )
     return items[:10]
-
-
-def _bounded_text_list(value: object, *, limit: int) -> tuple[str, ...]:
-    if not isinstance(value, list):
-        return ()
-    output: list[str] = []
-    seen: set[str] = set()
-    for item in value:
-        if not isinstance(item, str):
-            continue
-        text = _bounded_text(item, 220)
-        key = text.lower()
-        if not text or key in seen:
-            continue
-        seen.add(key)
-        output.append(text)
-        if len(output) >= limit:
-            break
-    return tuple(output)
 
 
 def _bounded_text(value: str, max_chars: int) -> str:

@@ -65,11 +65,14 @@ def test_project_from_channel_profile_creates_and_dedupes_candidates(
 ) -> None:
     task, membership, profile = create_profile_fixture(db_session)
     service = WitnessOpportunityService(db_session)
+    candidate_inputs = channel_profile_candidate_inputs()
 
     result = service.project_from_channel_profile(
         task=task,
         membership=membership,
         profile=profile,
+        candidates=candidate_inputs,
+        extraction_metadata={"raw_candidate_count": 2},
     )
     db_session.commit()
 
@@ -85,14 +88,27 @@ def test_project_from_channel_profile_creates_and_dedupes_candidates(
     assert result.updated_count == 0
     assert result.skipped_count == 0
     assert len(result.candidate_ids) == 2
-    assert {candidate.candidate_type for candidate in candidates} == {"general_help"}
+    assert {candidate.candidate_type for candidate in candidates} == {
+        "data_quality_issue",
+        "recurring_check",
+    }
     assert all(candidate.status == "candidate" for candidate in candidates)
     assert all(candidate.visibility_scope_type == "channel" for candidate in candidates)
     assert all(candidate.visibility_scope_id == "CWitness" for candidate in candidates)
     assert all(candidate.source_profile_id == profile.id for candidate in candidates)
-    assert all(candidate.confidence_score >= Decimal("0.650") for candidate in candidates)
+    assert all(candidate.source_type == "channel_profile" for candidate in candidates)
+    assert all(candidate.source_task_id == task.id for candidate in candidates)
+    assert all(candidate.metadata_json["raw_candidate_count"] == 2 for candidate in candidates)
+    assert all(
+        candidate.metadata_json["source"] == "llm_channel_profile_extractor"
+        for candidate in candidates
+    )
+    assert not any(
+        candidate.metadata_json.get("source") == "channel_profile_help_opportunity"
+        for candidate in candidates
+    )
     assert any(
-        item.get("type") == "semantic_evidence"
+        item.get("type") == "llm_evidence"
         for candidate in candidates
         for item in candidate.evidence_json
     )
@@ -105,6 +121,8 @@ def test_project_from_channel_profile_creates_and_dedupes_candidates(
         task=task,
         membership=membership,
         profile=profile,
+        candidates=candidate_inputs,
+        extraction_metadata={"raw_candidate_count": 2},
     )
     db_session.commit()
 
@@ -222,6 +240,8 @@ def test_eligible_private_suggestions_respects_status_and_cooldown(
         task=task,
         membership=membership,
         profile=profile,
+        candidates=channel_profile_candidate_inputs(),
+        extraction_metadata={"raw_candidate_count": 2},
     )
     candidates = tuple(db_session.scalars(select(WitnessOpportunityCandidate)))
     assert len(candidates) == 2
@@ -339,3 +359,30 @@ def create_profile_fixture(
     session.add(profile)
     session.flush()
     return task, membership, profile
+
+
+def channel_profile_candidate_inputs() -> tuple[WitnessOpportunityCandidateInput, ...]:
+    return (
+        WitnessOpportunityCandidateInput(
+            candidate_type="recurring_check",
+            title="Daily blotter review",
+            summary="Offer to summarize daily blotter changes before review.",
+            suggested_action="Watch for daily blotter report posts.",
+            suggested_message="I can summarize daily blotter changes when they land.",
+            evidence=("The channel profile names recurring daily blotter review.",),
+            confidence_score=Decimal("0.700"),
+            confidence_reason="The profile has repeated report evidence.",
+            metadata_json={"extractor": "test_channel_profile_extractor"},
+        ),
+        WitnessOpportunityCandidateInput(
+            candidate_type="data_quality_issue",
+            title="CSV placeholder checks",
+            summary="Flag missing CSV placeholders and failed file formatting.",
+            suggested_action="Watch for broken report output.",
+            suggested_message="I can flag broken placeholders in report files.",
+            evidence=("The profile names missing CSV placeholders.",),
+            confidence_score=Decimal("0.760"),
+            confidence_reason="The profile includes direct evidence.",
+            metadata_json={"extractor": "test_channel_profile_extractor"},
+        ),
+    )

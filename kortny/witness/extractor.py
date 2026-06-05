@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 
-from kortny.db.models import Task
+from kortny.db.models import ObserveChannelProfile, SlackChannelMembership, Task
 from kortny.llm import ChatMessage, LLMService
 from kortny.tools.types import JsonObject
 from kortny.witness.opportunities import (
@@ -18,6 +18,12 @@ WITNESS_TASK_RESPONSE_EXTRACTOR_PROMPT_NAME = (
     "kortny.witness_task_response_extractor"
 )
 WITNESS_TASK_RESPONSE_EXTRACTOR_RESPONSE_FORMAT: JsonObject = {
+    "type": "json_object"
+}
+WITNESS_CHANNEL_PROFILE_EXTRACTOR_PROMPT_NAME = (
+    "kortny.witness_channel_profile_extractor"
+)
+WITNESS_CHANNEL_PROFILE_EXTRACTOR_RESPONSE_FORMAT: JsonObject = {
     "type": "json_object"
 }
 MAX_EXTRACTED_CANDIDATES = 5
@@ -46,17 +52,67 @@ class WitnessTaskResponseExtractor:
     ) -> WitnessTaskResponseExtraction:
         completion = self.llm.complete(
             task_id=task.id,
-            messages=_messages(task=task, response_text=response_text),
+            messages=_task_response_messages(task=task, response_text=response_text),
             response_format=WITNESS_TASK_RESPONSE_EXTRACTOR_RESPONSE_FORMAT,
             prompt_name=WITNESS_TASK_RESPONSE_EXTRACTOR_PROMPT_NAME,
         )
         return parse_witness_task_response_extraction(completion.content)
 
 
+class WitnessChannelProfileExtractor:
+    """Ask an LLM whether a channel profile contains Witness opportunities."""
+
+    def __init__(self, llm: LLMService) -> None:
+        self.llm = llm
+
+    def extract(
+        self,
+        *,
+        task: Task,
+        membership: SlackChannelMembership,
+        profile: ObserveChannelProfile,
+    ) -> WitnessTaskResponseExtraction:
+        completion = self.llm.complete(
+            task_id=task.id,
+            messages=_channel_profile_messages(
+                task=task,
+                membership=membership,
+                profile=profile,
+            ),
+            response_format=WITNESS_CHANNEL_PROFILE_EXTRACTOR_RESPONSE_FORMAT,
+            prompt_name=WITNESS_CHANNEL_PROFILE_EXTRACTOR_PROMPT_NAME,
+        )
+        return parse_witness_channel_profile_extraction(completion.content)
+
+
 def parse_witness_task_response_extraction(
     content: str | None,
 ) -> WitnessTaskResponseExtraction:
     """Parse and validate model output from the Witness extractor."""
+
+    return _parse_witness_extraction(
+        content,
+        extractor_prompt_name=WITNESS_TASK_RESPONSE_EXTRACTOR_PROMPT_NAME,
+    )
+
+
+def parse_witness_channel_profile_extraction(
+    content: str | None,
+) -> WitnessTaskResponseExtraction:
+    """Parse and validate model output from the channel profile extractor."""
+
+    return _parse_witness_extraction(
+        content,
+        extractor_prompt_name=WITNESS_CHANNEL_PROFILE_EXTRACTOR_PROMPT_NAME,
+    )
+
+
+def _parse_witness_extraction(
+    content: str | None,
+    *,
+    extractor_prompt_name: str,
+) -> WitnessTaskResponseExtraction:
+    """Parse and validate model output from a Witness extractor."""
 
     if not content:
         return WitnessTaskResponseExtraction(
@@ -89,7 +145,10 @@ def parse_witness_task_response_extraction(
 
     candidates: list[WitnessOpportunityCandidateInput] = []
     for raw_candidate in raw_candidates:
-        candidate = _candidate_from_payload(raw_candidate)
+        candidate = _candidate_from_payload(
+            raw_candidate,
+            extractor_prompt_name=extractor_prompt_name,
+        )
         if candidate is None:
             continue
         candidates.append(candidate)
@@ -103,7 +162,11 @@ def parse_witness_task_response_extraction(
     )
 
 
-def _messages(*, task: Task, response_text: str) -> tuple[ChatMessage, ...]:
+def _task_response_messages(
+    *,
+    task: Task,
+    response_text: str,
+) -> tuple[ChatMessage, ...]:
     return (
         ChatMessage(
             role="system",
@@ -150,7 +213,173 @@ def _messages(*, task: Task, response_text: str) -> tuple[ChatMessage, ...]:
     )
 
 
-def _candidate_from_payload(value: object) -> WitnessOpportunityCandidateInput | None:
+def _channel_profile_messages(
+    *,
+    task: Task,
+    membership: SlackChannelMembership,
+    profile: ObserveChannelProfile,
+) -> tuple[ChatMessage, ...]:
+    return (
+        ChatMessage(
+            role="system",
+            content=(
+                "You are Kortny's Witness extractor for channel assessments. "
+                "Kortny is an AI coworker in Slack. Decide whether a saved channel "
+                "profile contains future things Kortny should watch for, "
+                "proactively help with, or remember as candidate opportunities. "
+                "Use semantic judgment from the provided evidence; do not depend "
+                "on headings, regexes, or fixed phrases. Do not infer private DMs "
+                "or cross-channel facts that are not in the payload. Return JSON "
+                "only. Schema: {\"candidates\":[{\"candidate_type\":\""
+                "workflow_gap|artifact_followup|unresolved_decision|"
+                "data_quality_issue|recurring_check|project_status_gap|"
+                "general_help\",\"title\":\"short title\",\"summary\":\"what "
+                "Kortny should watch for or help with\",\"suggested_action\":"
+                "\"operator-facing action\",\"suggested_message\":\"low-pressure "
+                "Slack DM or channel suggestion\",\"evidence\":[\"short evidence "
+                "from the profile\"],\"confidence_score\":0.0,"
+                "\"confidence_reason\":\"why\"}],\"skipped_reason\":\"only when "
+                "no candidates\"}. Only create candidates that would make Kortny "
+                "more useful later. Return no candidates when the profile is too "
+                "thin, too speculative, or lacks actionable future help."
+            ),
+        ),
+        ChatMessage(
+            role="user",
+            content=json.dumps(
+                _channel_profile_payload(
+                    task=task,
+                    membership=membership,
+                    profile=profile,
+                ),
+                default=str,
+                separators=(",", ":"),
+                sort_keys=True,
+            ),
+        ),
+    )
+
+
+def _channel_profile_payload(
+    *,
+    task: Task,
+    membership: SlackChannelMembership,
+    profile: ObserveChannelProfile,
+) -> JsonObject:
+    return {
+        "slack_surface": "channel",
+        "channel_id": membership.channel_id,
+        "channel_name": membership.channel_name,
+        "channel_type": membership.channel_type,
+        "added_by_user_id": membership.added_by_user_id,
+        "assessment_request": task.input,
+        "profile": {
+            "id": str(profile.id),
+            "version": profile.profile_version,
+            "status": profile.profile_status,
+            "summary": _optional_text(profile.summary, max_chars=4000),
+            "message_count": profile.message_count,
+            "file_count": profile.file_count,
+            "fresh_window_days": profile.fresh_window_days,
+            "archive_window_days": profile.archive_window_days,
+            "observed_range_start_ts": profile.observed_range_start_ts,
+            "observed_range_end_ts": profile.observed_range_end_ts,
+            "confidence_score": str(profile.confidence_score),
+            "confidence_reason": _optional_text(
+                profile.confidence_reason,
+                max_chars=500,
+            ),
+        },
+        "semantic_extraction": _semantic_extraction_payload(profile),
+        "assumptions": _json_list(profile.assumptions_json, limit=5, max_chars=240),
+        "evidence_refs": _json_list(profile.evidence_refs_json, limit=8, max_chars=500),
+        "allowed_candidate_types": sorted(ALLOWED_CANDIDATE_TYPES),
+        "max_candidates": MAX_EXTRACTED_CANDIDATES,
+    }
+
+
+def _semantic_extraction_payload(profile: ObserveChannelProfile) -> JsonObject:
+    profile_payload = profile.profile_json if isinstance(profile.profile_json, dict) else {}
+    extraction = profile_payload.get("semantic_extraction")
+    if not isinstance(extraction, dict):
+        metadata = profile.metadata_json if isinstance(profile.metadata_json, dict) else {}
+        extraction = metadata.get("semantic_extraction")
+    if not isinstance(extraction, dict):
+        return {}
+    return {
+        "likely_purpose": _optional_text(extraction.get("likely_purpose"), max_chars=260),
+        "recurring_topics": _string_tuple(
+            extraction.get("recurring_topics"),
+            max_items=5,
+            max_chars=180,
+        ),
+        "workflows": _string_tuple(
+            extraction.get("workflows"),
+            max_items=5,
+            max_chars=220,
+        ),
+        "important_entities": _string_tuple(
+            extraction.get("important_entities"),
+            max_items=8,
+            max_chars=180,
+        ),
+        "assumptions": _string_tuple(
+            extraction.get("assumptions"),
+            max_items=5,
+            max_chars=220,
+        ),
+        "help_opportunities": _string_tuple(
+            extraction.get("help_opportunities"),
+            max_items=5,
+            max_chars=220,
+        ),
+        "evidence": _string_tuple(
+            extraction.get("evidence"),
+            max_items=8,
+            max_chars=240,
+        ),
+        "confidence": _optional_text(extraction.get("confidence"), max_chars=40),
+    }
+
+
+def _json_list(
+    value: object,
+    *,
+    limit: int,
+    max_chars: int,
+) -> tuple[object, ...]:
+    if not isinstance(value, list):
+        return ()
+    output: list[object] = []
+    for item in value[:limit]:
+        if isinstance(item, str):
+            text = _optional_text(item, max_chars=max_chars)
+            if text is not None:
+                output.append(text)
+        elif isinstance(item, dict):
+            output.append(_compact_json_object(item, max_chars=max_chars))
+    return tuple(output)
+
+
+def _compact_json_object(value: dict[object, object], *, max_chars: int) -> JsonObject:
+    output: JsonObject = {}
+    for key, item in value.items():
+        if not isinstance(key, str):
+            continue
+        if isinstance(item, str):
+            text = _optional_text(item, max_chars=max_chars)
+            if text is not None:
+                output[key] = text
+        elif isinstance(item, int | float | bool) or item is None:
+            output[key] = item
+    return output
+
+
+def _candidate_from_payload(
+    value: object,
+    *,
+    extractor_prompt_name: str,
+) -> WitnessOpportunityCandidateInput | None:
     if not isinstance(value, dict):
         return None
     candidate_type = _optional_text(value.get("candidate_type"), max_chars=80)
@@ -178,7 +407,7 @@ def _candidate_from_payload(value: object) -> WitnessOpportunityCandidateInput |
         confidence_score=confidence_score,
         confidence_reason=confidence_reason or "Witness extractor proposed this.",
         metadata_json={
-            "extractor": WITNESS_TASK_RESPONSE_EXTRACTOR_PROMPT_NAME,
+            "extractor": extractor_prompt_name,
         },
     )
 

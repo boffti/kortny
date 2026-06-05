@@ -1,7 +1,11 @@
 import json
 from decimal import Decimal
 
-from kortny.witness import parse_witness_task_response_extraction
+from kortny.witness import (
+    WITNESS_CHANNEL_PROFILE_EXTRACTOR_PROMPT_NAME,
+    parse_witness_channel_profile_extraction,
+    parse_witness_task_response_extraction,
+)
 
 
 def test_parse_witness_task_response_extraction_validates_model_candidates() -> None:
@@ -57,3 +61,34 @@ def test_parse_witness_task_response_extraction_allows_no_candidates() -> None:
     assert result.candidates == ()
     assert result.raw_candidate_count == 0
     assert result.skipped_reason == "routine greeting with no future watch item"
+
+
+def test_parse_witness_channel_profile_extraction_tags_profile_extractor() -> None:
+    result = parse_witness_channel_profile_extraction(
+        json.dumps(
+            {
+                "candidates": [
+                    {
+                        "candidate_type": "data_quality_issue",
+                        "title": "Blotter placeholders",
+                        "summary": "Watch for unresolved placeholders in reports.",
+                        "suggested_action": "Flag broken report placeholders.",
+                        "suggested_message": "I can flag report placeholders here.",
+                        "evidence": ["The profile mentioned {TICKER} placeholders."],
+                        "confidence_score": 0.81,
+                        "confidence_reason": "Profile evidence names this issue.",
+                    }
+                ],
+                "skipped_reason": None,
+            }
+        )
+    )
+
+    assert result.skipped_reason is None
+    assert result.raw_candidate_count == 1
+    assert len(result.candidates) == 1
+    candidate = result.candidates[0]
+    assert candidate.candidate_type == "data_quality_issue"
+    assert candidate.metadata_json["extractor"] == (
+        WITNESS_CHANNEL_PROFILE_EXTRACTOR_PROMPT_NAME
+    )

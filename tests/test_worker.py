@@ -3478,8 +3478,52 @@ def test_agent_executor_records_channel_profile_when_assessment_completes(
         },
     )
     db_session.commit()
+    settings = make_settings()
+    extractor_response = json.dumps(
+        {
+            "candidates": [
+                {
+                    "candidate_type": "recurring_check",
+                    "title": "Daily report review",
+                    "summary": "Watch for daily reports that need review.",
+                    "suggested_action": "Offer report review help.",
+                    "suggested_message": "I can help review the daily report here.",
+                    "evidence": ["The profile names daily report review."],
+                    "confidence_score": 0.74,
+                    "confidence_reason": "Assessment evidence names the workflow.",
+                },
+                {
+                    "candidate_type": "data_quality_issue",
+                    "title": "Attached file quality",
+                    "summary": "Flag attached report files that need review.",
+                    "suggested_action": "Watch attached report quality.",
+                    "suggested_message": "I can flag report file issues when I see them.",
+                    "evidence": ["The profile found an attached report file."],
+                    "confidence_score": 0.69,
+                    "confidence_reason": "Assessment evidence includes a file.",
+                },
+            ],
+            "skipped_reason": None,
+        }
+    )
+    provider = FakeAgentProvider(
+        [
+            Completion(
+                content=extractor_response,
+                tool_calls=(),
+                usage=TokenUsage(input_tokens=380, output_tokens=120),
+                cost_usd=Decimal("0"),
+                model="openai/gpt-4o-mini",
+            )
+        ]
+    )
 
-    AgentTaskExecutor()._mark_channel_assessment_completed(
+    AgentTaskExecutor(
+        settings=settings,
+        llm_provider=provider,
+        provider_name=LLMProvider.openrouter,
+    )._mark_channel_assessment_completed(
+        settings=settings,
         session=db_session,
         task=task,
         task_service=task_service,
@@ -3504,6 +3548,12 @@ def test_agent_executor_records_channel_profile_when_assessment_completes(
         for event in task_events(db_session, task)
         if event.payload.get("message") == KG_CHANNEL_PROFILE_PROJECTED_MESSAGE
     )
+    witness_projection_event = next(
+        event
+        for event in task_events(db_session, task)
+        if event.payload.get("message")
+        == WITNESS_OPPORTUNITY_CANDIDATES_PROJECTED_MESSAGE
+    )
     channel_entity = db_session.scalar(
         select(KnowledgeGraphEntity).where(
             KnowledgeGraphEntity.installation_id == task.installation_id,
@@ -3518,6 +3568,14 @@ def test_agent_executor_records_channel_profile_when_assessment_completes(
             KnowledgeGraphEntity.is_current.is_(True),
         )
     )
+    witness_candidates = tuple(
+        db_session.scalars(
+            select(WitnessOpportunityCandidate).order_by(
+                WitnessOpportunityCandidate.candidate_type
+            )
+        )
+    )
+    usage_row = db_session.scalar(select(LLMUsage).where(LLMUsage.task_id == task.id))
 
     assert membership.metadata_json["assessment_status"] == "posted"
     assert profile is not None
@@ -3531,6 +3589,32 @@ def test_agent_executor_records_channel_profile_when_assessment_completes(
     assert projection_event.payload["entity_count"] == 2
     assert projection_event.payload["edge_count"] == 1
     assert projection_event.payload["evidence_count"] == 3
+    assert witness_projection_event.payload["source_type"] == "channel_profile"
+    assert witness_projection_event.payload["extractor"] == "llm"
+    assert witness_projection_event.payload["raw_candidate_count"] == 2
+    assert witness_projection_event.payload["created_count"] == 2
+    assert witness_projection_event.payload["updated_count"] == 0
+    assert set(witness_projection_event.payload["candidate_ids"]) == {
+        str(candidate.id) for candidate in witness_candidates
+    }
+    assert len(provider.calls) == 1
+    assert usage_row is not None
+    assert usage_row.model_tier == "cheap_fast"
+    assert len(witness_candidates) == 2
+    assert {candidate.candidate_type for candidate in witness_candidates} == {
+        "data_quality_issue",
+        "recurring_check",
+    }
+    assert all(
+        candidate.source_type == "channel_profile" for candidate in witness_candidates
+    )
+    assert all(
+        candidate.source_profile_id == profile.id for candidate in witness_candidates
+    )
+    assert all(
+        candidate.metadata_json["source"] == "llm_channel_profile_extractor"
+        for candidate in witness_candidates
+    )
     assert channel_entity is not None
     assert channel_entity.entity_type == "channel"
     assert channel_entity.lifecycle_state == "active"

@@ -54,6 +54,9 @@ class Settings(BaseSettings):
     llm_high_reasoning_model: str | None = Field(
         default=None, validation_alias="LLM_HIGH_REASONING_MODEL"
     )
+    llm_config_force_env: bool = Field(
+        default=False, validation_alias="LLM_CONFIG_FORCE_ENV"
+    )
     response_humanizer_enabled: bool = Field(
         default=True, validation_alias="RESPONSE_HUMANIZER_ENABLED"
     )

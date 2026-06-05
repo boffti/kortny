@@ -126,6 +126,269 @@ class EncryptedSecret(Base):
     )
 
 
+class LLMProviderAccount(Base):
+    __tablename__ = "llm_provider_accounts"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    installation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("installations.id", ondelete="CASCADE"), nullable=False
+    )
+    provider_kind: Mapped[str] = mapped_column(String, nullable=False)
+    display_name: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String, nullable=False, server_default=text("'active'")
+    )
+    health_status: Mapped[str] = mapped_column(
+        String, nullable=False, server_default=text("'unknown'")
+    )
+    base_url: Mapped[str | None] = mapped_column(Text)
+    encrypted_secret_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("encrypted_secrets.id", ondelete="SET NULL")
+    )
+    metadata_json: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "status in ('active', 'disabled', 'testing')",
+            name="ck_llm_provider_accounts_status",
+        ),
+        CheckConstraint(
+            "health_status in ('ok', 'degraded', 'down', 'unknown')",
+            name="ck_llm_provider_accounts_health_status",
+        ),
+        Index(
+            "idx_llm_provider_accounts_installation",
+            "installation_id",
+            "status",
+        ),
+        Index(
+            "idx_llm_provider_accounts_kind",
+            "installation_id",
+            "provider_kind",
+        ),
+    )
+
+
+class LLMModelCatalog(Base):
+    __tablename__ = "llm_model_catalog"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    provider_account_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("llm_provider_accounts.id", ondelete="CASCADE"), nullable=False
+    )
+    model_identifier: Mapped[str] = mapped_column(String, nullable=False)
+    display_name: Mapped[str] = mapped_column(String, nullable=False)
+    is_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("true")
+    )
+    capabilities_json: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    source: Mapped[str] = mapped_column(
+        String, nullable=False, server_default=text("'manual'")
+    )
+    metadata_json: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "source in ('manual', 'env_bootstrap', 'litellm_catalog', 'provider_api')",
+            name="ck_llm_model_catalog_source",
+        ),
+        UniqueConstraint(
+            "provider_account_id",
+            "model_identifier",
+            name="idx_llm_model_catalog_provider_model",
+        ),
+        Index("idx_llm_model_catalog_enabled", "provider_account_id", "is_enabled"),
+    )
+
+
+class LLMTierAssignment(Base):
+    __tablename__ = "llm_tier_assignments"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    installation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("installations.id", ondelete="CASCADE"), nullable=False
+    )
+    tier: Mapped[str] = mapped_column(String, nullable=False)
+    model_catalog_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("llm_model_catalog.id", ondelete="CASCADE"), nullable=False
+    )
+    priority: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("1")
+    )
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("true")
+    )
+    routing_json: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "tier in ('cheap_fast', 'standard', 'analysis', 'document', "
+            "'high_reasoning')",
+            name="ck_llm_tier_assignments_tier",
+        ),
+        CheckConstraint("priority >= 1", name="ck_llm_tier_assignments_priority"),
+        UniqueConstraint(
+            "installation_id",
+            "tier",
+            "priority",
+            name="idx_llm_tier_assignment_priority",
+        ),
+        Index(
+            "idx_llm_tier_assignments_active",
+            "installation_id",
+            "tier",
+            "is_active",
+        ),
+    )
+
+
+class LLMModelPricing(Base):
+    __tablename__ = "llm_model_pricing"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    provider_account_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("llm_provider_accounts.id", ondelete="CASCADE"), nullable=False
+    )
+    model_identifier: Mapped[str] = mapped_column(String, nullable=False)
+    input_price_per_mtok: Mapped[Decimal | None] = mapped_column(Numeric(12, 6))
+    output_price_per_mtok: Mapped[Decimal | None] = mapped_column(Numeric(12, 6))
+    currency: Mapped[str] = mapped_column(
+        String, nullable=False, server_default=text("'USD'")
+    )
+    pricing_source: Mapped[str] = mapped_column(String, nullable=False)
+    effective_from: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now()
+    )
+    metadata_json: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "provider_account_id",
+            "model_identifier",
+            "effective_from",
+            name="idx_llm_model_pricing_lookup",
+        ),
+        Index("idx_llm_model_pricing_model", "provider_account_id", "model_identifier"),
+    )
+
+
+class LLMBudgetPolicy(Base):
+    __tablename__ = "llm_budget_policies"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    installation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("installations.id", ondelete="CASCADE"), nullable=False
+    )
+    tier: Mapped[str | None] = mapped_column(String)
+    daily_budget_usd: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
+    monthly_budget_usd: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
+    alert_threshold_pct: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("80")
+    )
+    behavior: Mapped[str] = mapped_column(
+        String, nullable=False, server_default=text("'soft_stop'")
+    )
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("true")
+    )
+    metadata_json: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "tier is null or tier in ('cheap_fast', 'standard', 'analysis', "
+            "'document', 'high_reasoning')",
+            name="ck_llm_budget_policies_tier",
+        ),
+        CheckConstraint(
+            "alert_threshold_pct between 1 and 100",
+            name="ck_llm_budget_policies_alert_threshold",
+        ),
+        CheckConstraint(
+            "behavior in ('soft_stop', 'hard_stop')",
+            name="ck_llm_budget_policies_behavior",
+        ),
+        Index("idx_llm_budget_policies_installation", "installation_id", "is_active"),
+    )
+
+
+class LLMConfigAudit(Base):
+    __tablename__ = "llm_config_audit"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    installation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("installations.id", ondelete="CASCADE"), nullable=False
+    )
+    actor_slack_user_id: Mapped[str | None] = mapped_column(String)
+    action: Mapped[str] = mapped_column(String, nullable=False)
+    entity_type: Mapped[str] = mapped_column(String, nullable=False)
+    entity_id: Mapped[str | None] = mapped_column(String)
+    previous_value: Mapped[dict | None] = mapped_column(JSONB)
+    new_value: Mapped[dict | None] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "action in ('create', 'update', 'disable', 'enable', 'delete', "
+            "'bootstrap')",
+            name="ck_llm_config_audit_action",
+        ),
+        Index("idx_llm_config_audit_installation", "installation_id", "created_at"),
+    )
+
+
 class Task(Base):
     __tablename__ = "tasks"
 

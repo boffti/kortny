@@ -44,6 +44,7 @@ from kortny.db.models import (
     TaskEvent,
     TaskEventType,
     TaskStatus,
+    WitnessOpportunityCandidate,
 )
 from kortny.db.session import make_engine, make_session_factory, normalize_database_url
 from kortny.knowledge_graph import (
@@ -83,6 +84,7 @@ from kortny.slack.synthesis import EvidenceKind, EvidenceTrust, SynthesisOutcome
 from kortny.tasks import TaskService
 from kortny.tools import ToolRegistry, ToolResult
 from kortny.tools.types import JsonObject, JsonSchema
+from kortny.witness import WITNESS_OPPORTUNITY_CANDIDATES_PROJECTED_MESSAGE
 from kortny.worker import (
     AgentTaskExecutor,
     TaskExecutionResult,
@@ -2947,6 +2949,12 @@ def test_worker_runs_dashboard_graph_refresh_without_agent_runtime(
         for event in events
         if event.payload.get("message") == KG_CHANNEL_PROFILE_PROJECTED_MESSAGE
     )
+    witness_event = next(
+        event
+        for event in events
+        if event.payload.get("message")
+        == WITNESS_OPPORTUNITY_CANDIDATES_PROJECTED_MESSAGE
+    )
     semantic_entities = tuple(
         db_session.scalars(
             select(KnowledgeGraphEntity).where(
@@ -2980,6 +2988,7 @@ def test_worker_runs_dashboard_graph_refresh_without_agent_runtime(
     assert KG_CHANNEL_REFRESH_SEMANTIC_EXTRACTED_MESSAGE in event_messages
     assert KG_CHANNEL_REFRESH_PROFILE_SYNTHESIZED_MESSAGE in event_messages
     assert KG_CHANNEL_PROFILE_PROJECTED_MESSAGE in event_messages
+    assert WITNESS_OPPORTUNITY_CANDIDATES_PROJECTED_MESSAGE in event_messages
     assert "tool_selection_completed" not in event_messages
     assert "adk_runtime_started" not in event_messages
     assert "planned_workflow_classified" not in event_messages
@@ -3015,6 +3024,19 @@ def test_worker_runs_dashboard_graph_refresh_without_agent_runtime(
     assert projection_event.payload["entity_count"] > 2
     assert projection_event.payload["edge_count"] > 1
     assert projection_event.payload["evidence_count"] > 3
+    assert witness_event.payload["created_count"] >= 1
+    assert witness_event.payload["updated_count"] == 0
+    assert witness_event.payload["candidate_ids"]
+    witness_candidates = tuple(
+        db_session.scalars(
+            select(WitnessOpportunityCandidate).where(
+                WitnessOpportunityCandidate.installation_id == task.installation_id,
+                WitnessOpportunityCandidate.channel_id == "CGraph",
+            )
+        )
+    )
+    assert witness_candidates
+    assert {candidate.status for candidate in witness_candidates} == {"candidate"}
     semantic_keys = {entity.canonical_key for entity in semantic_entities}
     assert "channel_topic:CGraph:trade-blotter" in semantic_keys
     assert "channel_entity:CGraph:nvda" in semantic_keys
@@ -3493,6 +3515,7 @@ def test_agent_executor_records_channel_profile_when_assessment_completes(
 
 def cleanup_database(session: Session) -> None:
     for model in (
+        WitnessOpportunityCandidate,
         KnowledgeGraphEvidence,
         KnowledgeGraphEdge,
         KnowledgeGraphEntity,

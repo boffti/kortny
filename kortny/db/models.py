@@ -1604,6 +1604,130 @@ class KnowledgeGraphEdge(Base):
     )
 
 
+class WitnessOpportunityCandidate(Base):
+    __tablename__ = "witness_opportunity_candidates"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    installation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("installations.id", ondelete="CASCADE"), nullable=False
+    )
+    channel_id: Mapped[str | None] = mapped_column(String)
+    target_slack_user_id: Mapped[str | None] = mapped_column(String)
+    visibility_scope_type: Mapped[str] = mapped_column(String, nullable=False)
+    visibility_scope_id: Mapped[str | None] = mapped_column(String)
+    candidate_type: Mapped[str] = mapped_column(String, nullable=False)
+    title: Mapped[str] = mapped_column(String, nullable=False)
+    summary: Mapped[str] = mapped_column(Text, nullable=False)
+    suggested_action: Mapped[str | None] = mapped_column(Text)
+    suggested_message: Mapped[str | None] = mapped_column(Text)
+    evidence_json: Mapped[list] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb")
+    )
+    source_type: Mapped[str] = mapped_column(String, nullable=False)
+    source_id: Mapped[str | None] = mapped_column(String)
+    source_task_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("tasks.id", ondelete="SET NULL")
+    )
+    source_profile_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("observe_channel_profiles.id", ondelete="SET NULL")
+    )
+    dedupe_key: Mapped[str] = mapped_column(String, nullable=False)
+    confidence_score: Mapped[Decimal] = mapped_column(
+        Numeric(4, 3), nullable=False, server_default=text("0.500")
+    )
+    confidence_reason: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(
+        String, nullable=False, server_default=text("'candidate'")
+    )
+    cooldown_until: Mapped[datetime | None] = mapped_column(TZ)
+    last_suggested_at: Mapped[datetime | None] = mapped_column(TZ)
+    feedback_json: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    metadata_json: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "visibility_scope_type in "
+            "('workspace', 'channel', 'private_channel', 'dm', 'user')",
+            name="ck_witness_opportunity_candidates_scope_type",
+        ),
+        CheckConstraint(
+            "(visibility_scope_type = 'workspace' and visibility_scope_id is null) or "
+            "(visibility_scope_type in ('channel', 'private_channel', 'dm', 'user') "
+            "and visibility_scope_id is not null)",
+            name="ck_witness_opportunity_candidates_scope_id",
+        ),
+        CheckConstraint(
+            "candidate_type in "
+            "('workflow_gap', 'artifact_followup', 'unresolved_decision', "
+            "'data_quality_issue', 'recurring_check', 'project_status_gap', "
+            "'general_help')",
+            name="ck_witness_opportunity_candidates_type",
+        ),
+        CheckConstraint(
+            "source_type in "
+            "('channel_profile', 'knowledge_graph', 'task_summary', "
+            "'scheduled_witness', 'manual')",
+            name="ck_witness_opportunity_candidates_source_type",
+        ),
+        CheckConstraint(
+            "status in "
+            "('candidate', 'sent', 'accepted', 'dismissed', 'cooldown', "
+            "'superseded', 'archived')",
+            name="ck_witness_opportunity_candidates_status",
+        ),
+        CheckConstraint(
+            "confidence_score >= 0 and confidence_score <= 1",
+            name="ck_witness_opportunity_candidates_confidence",
+        ),
+        Index(
+            "idx_witness_opportunity_candidates_unique",
+            "installation_id",
+            "visibility_scope_type",
+            text("coalesce(visibility_scope_id, '')"),
+            "candidate_type",
+            "dedupe_key",
+            unique=True,
+        ),
+        Index(
+            "idx_witness_opportunity_candidates_status",
+            "installation_id",
+            "status",
+            "cooldown_until",
+        ),
+        Index(
+            "idx_witness_opportunity_candidates_channel",
+            "installation_id",
+            "channel_id",
+            "status",
+        ),
+        Index(
+            "idx_witness_opportunity_candidates_scope",
+            "installation_id",
+            "visibility_scope_type",
+            "visibility_scope_id",
+        ),
+        Index("idx_witness_opportunity_candidates_task", "source_task_id"),
+        Index("idx_witness_opportunity_candidates_profile", "source_profile_id"),
+        Index(
+            "idx_witness_opportunity_candidates_evidence",
+            "evidence_json",
+            postgresql_using="gin",
+        ),
+    )
+
+
 class KnowledgeGraphEvidence(Base):
     __tablename__ = "kg_evidence"
 

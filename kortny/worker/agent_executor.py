@@ -104,6 +104,10 @@ from kortny.tools import (
     ToolRegistry,
     WebSearchTool,
 )
+from kortny.witness import (
+    WITNESS_OPPORTUNITY_CANDIDATES_PROJECTED_MESSAGE,
+    WitnessOpportunityService,
+)
 from kortny.workflow.handoff import evaluate_runtime_handoff
 from kortny.workflow.planning_classifier import classify_planned_workflow
 
@@ -1413,6 +1417,13 @@ class AgentTaskExecutor:
             membership=membership,
             profile=profile,
         )
+        witness_candidates = WitnessOpportunityService(
+            session
+        ).project_from_channel_profile(
+            task=task,
+            membership=membership,
+            profile=profile,
+        )
         task_service.append_event(
             task,
             TaskEventType.log,
@@ -1427,6 +1438,20 @@ class AgentTaskExecutor:
                 "entity_count": projection.entity_count,
                 "edge_count": projection.edge_count,
                 "evidence_count": projection.evidence_count,
+            },
+        )
+        task_service.append_event(
+            task,
+            TaskEventType.log,
+            {
+                "message": WITNESS_OPPORTUNITY_CANDIDATES_PROJECTED_MESSAGE,
+                "channel_id": membership.channel_id,
+                "membership_id": str(membership.id),
+                "profile_id": str(profile.id),
+                "created_count": witness_candidates.created_count,
+                "updated_count": witness_candidates.updated_count,
+                "skipped_count": witness_candidates.skipped_count,
+                "candidate_ids": list(witness_candidates.candidate_ids),
             },
         )
         task_service.append_event(

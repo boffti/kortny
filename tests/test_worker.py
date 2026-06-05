@@ -12,7 +12,7 @@ from alembic import command
 from alembic.config import Config
 from google.adk.models.llm_response import LlmResponse
 from google.genai import types as genai_types
-from sqlalchemy import Engine, delete, select
+from sqlalchemy import Engine, delete, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from kortny.agent.adk_runtime import AdkAgentRuntime
@@ -3574,14 +3574,54 @@ def test_agent_executor_projects_witness_candidates_from_posted_watch_answer(
     settings = make_settings()
     slack_client = FakeSlackClient()
     response_text = (
-        "What this channel is used for\n"
-        "- Kortny testing and real project execution.\n\n"
-        "What I watch for\n"
-        "- Linear summaries: surface unresolved decisions and blockers.\n"
-        "- Integration output quality: flag missing CSV files or broken tool data.\n"
+        "This channel is used for Kortny testing and real project execution. "
+        "I should keep an eye on unresolved Linear decisions and broken "
+        "integration output."
+    )
+    extractor_response = json.dumps(
+        {
+            "candidates": [
+                {
+                    "candidate_type": "unresolved_decision",
+                    "title": "Linear decision follow-ups",
+                    "summary": "Surface unresolved Linear decisions and blockers.",
+                    "suggested_action": "Track unresolved Linear decisions.",
+                    "suggested_message": (
+                        "I can keep an eye on unresolved Linear decisions here."
+                    ),
+                    "evidence": ["The answer named unresolved Linear decisions."],
+                    "confidence_score": 0.72,
+                    "confidence_reason": "The final answer explicitly identified it.",
+                },
+                {
+                    "candidate_type": "data_quality_issue",
+                    "title": "Integration output quality",
+                    "summary": "Flag broken integration output.",
+                    "suggested_action": "Watch integration output quality.",
+                    "suggested_message": "I can flag broken tool output when I see it.",
+                    "evidence": ["The answer named broken integration output."],
+                    "confidence_score": 0.68,
+                    "confidence_reason": "The final answer explicitly identified it.",
+                },
+            ],
+            "skipped_reason": None,
+        }
+    )
+    provider = FakeAgentProvider(
+        [
+            Completion(
+                content=extractor_response,
+                tool_calls=(),
+                usage=TokenUsage(input_tokens=420, output_tokens=150),
+                cost_usd=Decimal("0"),
+                model="openai/gpt-4o-mini",
+            )
+        ]
     )
     executor = AgentTaskExecutor(
         settings=settings,
+        llm_provider=provider,
+        provider_name=LLMProvider.openrouter,
         response_synthesizer=StaticResponseSynthesizer(),
         slack_client=slack_client,
     )
@@ -3594,6 +3634,7 @@ def test_agent_executor_projects_witness_candidates_from_posted_watch_answer(
         result_summary=response_text,
     )
     executor._project_witness_opportunities_from_result(
+        settings=settings,
         session=db_session,
         task=task,
         task_service=task_service,
@@ -3614,9 +3655,14 @@ def test_agent_executor_projects_witness_candidates_from_posted_watch_answer(
         if event.payload.get("message")
         == WITNESS_OPPORTUNITY_CANDIDATES_PROJECTED_MESSAGE
     )
+    usage_row = db_session.scalar(select(LLMUsage).where(LLMUsage.task_id == task.id))
 
     assert slack_client.messages[-1]["text"] == response_text.strip()
     assert posted_text == response_text.strip()
+    assert len(provider.calls) == 1
+    assert provider.calls[0][2] == {"type": "json_object"}
+    assert usage_row is not None
+    assert usage_row.model_tier == "cheap_fast"
     assert len(candidates) == 2
     assert {candidate.candidate_type for candidate in candidates} == {
         "data_quality_issue",
@@ -3629,11 +3675,69 @@ def test_agent_executor_projects_witness_candidates_from_posted_watch_answer(
     assert all(candidate.source_type == "task_summary" for candidate in candidates)
     assert all(candidate.source_task_id == task.id for candidate in candidates)
     assert projection_event.payload["source_type"] == "task_summary"
+    assert projection_event.payload["extractor"] == "llm"
     assert projection_event.payload["created_count"] == 2
     assert projection_event.payload["updated_count"] == 0
     assert set(projection_event.payload["candidate_ids"]) == {
         str(candidate.id) for candidate in candidates
     }
+
+
+def test_agent_executor_skips_witness_extractor_for_adk_quick_response(
+    db_session: Session,
+) -> None:
+    task = create_task(db_session, event_id="EvWitnessQuickSkip")
+    task.input = "are you up?"
+    task_service = TaskService(db_session)
+    task_service.append_event(
+        task,
+        TaskEventType.log,
+        {
+            "message": "adk_quick_response_selected",
+            "runtime": "adk",
+            "agent": "quick_response_agent",
+            "reason": "runtime_handoff_quick_conversation",
+        },
+    )
+    db_session.commit()
+    settings = make_settings()
+    slack_client = FakeSlackClient()
+    provider = FakeAgentProvider([])
+    executor = AgentTaskExecutor(
+        settings=settings,
+        llm_provider=provider,
+        provider_name=LLMProvider.openrouter,
+        response_synthesizer=StaticResponseSynthesizer(),
+        slack_client=slack_client,
+    )
+
+    posted_text = executor._post_outputs(
+        settings=settings,
+        session=db_session,
+        task=task,
+        task_service=task_service,
+        result_summary="Yep, I'm up.",
+    )
+    executor._project_witness_opportunities_from_result(
+        settings=settings,
+        session=db_session,
+        task=task,
+        task_service=task_service,
+        posted_response_text=posted_text,
+    )
+    db_session.commit()
+
+    assert slack_client.messages[-1]["text"] == "Yep, I'm up."
+    assert provider.calls == []
+    assert (
+        db_session.scalar(select(func.count()).select_from(WitnessOpportunityCandidate))
+        == 0
+    )
+    assert not any(
+        event.payload.get("message")
+        == WITNESS_OPPORTUNITY_CANDIDATES_PROJECTED_MESSAGE
+        for event in task_events(db_session, task)
+    )
 
 
 def cleanup_database(session: Session) -> None:

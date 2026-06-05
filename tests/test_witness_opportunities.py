@@ -20,7 +20,10 @@ from kortny.db.models import (
 )
 from kortny.db.session import make_engine, make_session_factory, normalize_database_url
 from kortny.tasks import TaskService
-from kortny.witness import WitnessOpportunityService
+from kortny.witness import (
+    WitnessOpportunityCandidateInput,
+    WitnessOpportunityService,
+)
 
 TEST_POSTGRES_URL = os.environ.get("KORTNY_TEST_POSTGRES_URL")
 
@@ -82,10 +85,7 @@ def test_project_from_channel_profile_creates_and_dedupes_candidates(
     assert result.updated_count == 0
     assert result.skipped_count == 0
     assert len(result.candidate_ids) == 2
-    assert {candidate.candidate_type for candidate in candidates} == {
-        "data_quality_issue",
-        "recurring_check",
-    }
+    assert {candidate.candidate_type for candidate in candidates} == {"general_help"}
     assert all(candidate.status == "candidate" for candidate in candidates)
     assert all(candidate.visibility_scope_type == "channel" for candidate in candidates)
     assert all(candidate.visibility_scope_id == "CWitness" for candidate in candidates)
@@ -121,26 +121,45 @@ def test_project_from_channel_profile_creates_and_dedupes_candidates(
     assert all("last_reinforced_at" in candidate.metadata_json for candidate in refreshed)
 
 
-def test_project_from_task_response_uses_watch_section(
+def test_project_from_task_candidates_persists_llm_proposals(
     db_session: Session,
 ) -> None:
     task, membership, _profile = create_profile_fixture(db_session)
     membership.channel_name = "rag"
     membership.channel_type = "private_channel"
     task.input = "what do you know about how this channel is used?"
-    response_text = (
-        "What this channel is used for\n"
-        "- Kortny testing and real project execution.\n\n"
-        "What I watch for\n"
-        "\u2022 Linear summaries: surface unresolved decisions and blockers.\n"
-        "- Data quality issues: catch missing CSV files or broken integration output.\n\n"
-        "Happy to dig deeper if needed.\n"
+    response_text = "Kortny identified a few useful future watch areas."
+    candidate_inputs = (
+        WitnessOpportunityCandidateInput(
+            candidate_type="unresolved_decision",
+            title="Linear decision follow-ups",
+            summary="Surface unresolved Linear decisions and blockers in this channel.",
+            suggested_action="Track unresolved Linear decisions.",
+            suggested_message="I can keep an eye on unresolved Linear decisions here.",
+            evidence=("The answer called out Linear summaries and blockers.",),
+            confidence_score=Decimal("0.720"),
+            confidence_reason="The completed answer directly named this watch area.",
+            metadata_json={"extractor": "test"},
+        ),
+        WitnessOpportunityCandidateInput(
+            candidate_type="data_quality_issue",
+            title="Integration output quality",
+            summary="Flag missing CSV files or broken integration output.",
+            suggested_action="Watch for integration output quality issues.",
+            suggested_message="I can flag broken tool output when I see it.",
+            evidence=("The answer mentioned missing CSV files and broken output.",),
+            confidence_score=Decimal("0.680"),
+            confidence_reason="The completed answer provided specific evidence.",
+            metadata_json={"extractor": "test"},
+        ),
     )
     service = WitnessOpportunityService(db_session)
 
-    result = service.project_from_task_response(
+    result = service.project_from_task_candidates(
         task=task,
+        candidates=candidate_inputs,
         response_text=response_text,
+        extraction_metadata={"raw_candidate_count": 2},
     )
     db_session.commit()
 
@@ -168,18 +187,21 @@ def test_project_from_task_response_uses_watch_section(
     assert all(candidate.source_task_id == task.id for candidate in candidates)
     assert all(candidate.source_profile_id is None for candidate in candidates)
     assert all(
-        candidate.metadata_json["source"] == "task_watch_section"
+        candidate.metadata_json["source"] == "llm_task_response_extractor"
         for candidate in candidates
     )
+    assert all(candidate.metadata_json["raw_candidate_count"] == 2 for candidate in candidates)
     assert any(
-        item.get("type") == "task_response"
+        item.get("type") == "llm_evidence"
         for candidate in candidates
         for item in candidate.evidence_json
     )
 
-    second = service.project_from_task_response(
+    second = service.project_from_task_candidates(
         task=task,
+        candidates=candidate_inputs,
         response_text=response_text,
+        extraction_metadata={"raw_candidate_count": 2},
     )
     db_session.commit()
 

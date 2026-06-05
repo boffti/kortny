@@ -28,40 +28,20 @@ WITNESS_OPPORTUNITY_CANDIDATES_PROJECTED_MESSAGE = (
     "witness_opportunity_candidates_projected"
 )
 MAX_PROFILE_OPPORTUNITIES = 5
-MAX_TASK_RESPONSE_OPPORTUNITIES = 5
 ELIGIBLE_STATUSES = ("candidate",)
+ALLOWED_CANDIDATE_TYPES = frozenset(
+    (
+        "workflow_gap",
+        "artifact_followup",
+        "unresolved_decision",
+        "data_quality_issue",
+        "recurring_check",
+        "project_status_gap",
+        "general_help",
+    )
+)
 
 _WHITESPACE_RE = re.compile(r"\s+")
-_BULLET_RE = re.compile("^\\s*(?:[-*]|\\u2022|\\d+[.)])\\s+(.+)")
-_DATA_QUALITY_RE = re.compile(
-    r"\b(csv|file|placeholder|missing|stale|format|data quality|reconcile|error|"
-    r"failed|broken|invalid|quality|diff)\b",
-    re.I,
-)
-_ARTIFACT_RE = re.compile(
-    r"\b(doc|document|deck|brief|one[- ]pager|memo|report|pdf|artifact|draft|"
-    r"page|write|revise)\b",
-    re.I,
-)
-_DECISION_RE = re.compile(
-    r"\b(decision|unresolved|open question|follow[- ]?up|pending|blocker|owner|"
-    r"next step)\b",
-    re.I,
-)
-_RECURRING_RE = re.compile(
-    r"\b(every|daily|weekly|monthly|recurring|repeat|periodic|cadence|schedule|"
-    r"heartbeat|monitor)\b",
-    re.I,
-)
-_PROJECT_STATUS_RE = re.compile(
-    r"\b(project|roadmap|status|milestone|launch|workstream|tracker)\b",
-    re.I,
-)
-_WORKFLOW_RE = re.compile(
-    r"\b(workflow|automate|automation|process|handoff|review|summari[sz]e|"
-    r"compare|check)\b",
-    re.I,
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,6 +56,21 @@ class WitnessOpportunityCandidateResult:
     @property
     def total_count(self) -> int:
         return self.created_count + self.updated_count
+
+
+@dataclass(frozen=True, slots=True)
+class WitnessOpportunityCandidateInput:
+    """LLM-proposed candidate that has not yet been persisted."""
+
+    candidate_type: str
+    title: str
+    summary: str
+    suggested_action: str | None
+    suggested_message: str | None
+    evidence: tuple[str, ...]
+    confidence_score: Decimal
+    confidence_reason: str
+    metadata_json: dict[str, Any]
 
 
 class WitnessOpportunityService:
@@ -123,7 +118,7 @@ class WitnessOpportunityService:
         candidate_ids: list[str] = []
 
         for opportunity in opportunities[:MAX_PROFILE_OPPORTUNITIES]:
-            candidate_type = _candidate_type(opportunity)
+            candidate_type = "general_help"
             dedupe_key = _dedupe_key(
                 channel_id=membership.channel_id,
                 candidate_type=candidate_type,
@@ -214,16 +209,24 @@ class WitnessOpportunityService:
             candidate_ids=tuple(candidate_ids),
         )
 
-    def project_from_task_response(
+    def project_from_task_candidates(
         self,
         *,
         task: Task,
+        candidates: tuple[WitnessOpportunityCandidateInput, ...],
         response_text: str,
+        extraction_metadata: dict[str, Any] | None = None,
     ) -> WitnessOpportunityCandidateResult:
-        """Create/update candidates from a delivered answer's watch-for section."""
+        """Create/update candidates proposed by the Witness extractor."""
 
-        opportunities = _task_response_opportunities(response_text)
-        if not opportunities:
+        valid_candidates = tuple(
+            candidate
+            for candidate in candidates
+            if candidate.candidate_type in ALLOWED_CANDIDATE_TYPES
+            and candidate.title.strip()
+            and candidate.summary.strip()
+        )
+        if not valid_candidates:
             return WitnessOpportunityCandidateResult(
                 created_count=0,
                 updated_count=0,
@@ -248,12 +251,12 @@ class WitnessOpportunityService:
         updated_count = 0
         candidate_ids: list[str] = []
 
-        for opportunity in opportunities:
-            candidate_type = _candidate_type(opportunity)
+        for candidate_input in valid_candidates:
+            candidate_type = candidate_input.candidate_type
             dedupe_key = _dedupe_key(
                 channel_id=channel_id,
                 candidate_type=candidate_type,
-                opportunity=opportunity,
+                opportunity=f"{candidate_input.title}:{candidate_input.summary}",
             )
             existing = self._find_existing(
                 installation_id=task.installation_id,
@@ -262,16 +265,29 @@ class WitnessOpportunityService:
                 candidate_type=candidate_type,
                 dedupe_key=dedupe_key,
             )
-            title = _title(opportunity, candidate_type)
+            title = _bounded_text(candidate_input.title, 140)
+            summary = _bounded_text(candidate_input.summary, 1000)
+            suggested_action = (
+                _bounded_text(candidate_input.suggested_action, 500)
+                if candidate_input.suggested_action
+                else _suggested_action(summary)
+            )
+            suggested_message = (
+                _bounded_text(candidate_input.suggested_message, 500)
+                if candidate_input.suggested_message
+                else _suggested_message_for_label(summary, channel_label=channel_label)
+            )
             metadata = {
-                "source": "task_watch_section",
+                "source": "llm_task_response_extractor",
                 "channel_name": membership.channel_name if membership else None,
                 "input": _bounded_text(task.input, 280),
                 "response_chars": len(response_text),
+                **(extraction_metadata or {}),
+                **candidate_input.metadata_json,
             }
-            evidence_items = _task_response_evidence(
+            evidence_items = _candidate_evidence_items(
                 task=task,
-                opportunity=opportunity,
+                candidate=candidate_input,
                 response_text=response_text,
                 channel_id=channel_id,
             )
@@ -286,25 +302,21 @@ class WitnessOpportunityService:
                     visibility_scope_id=scope_id,
                     candidate_type=candidate_type,
                     title=title,
-                    summary=_summary_for_label(
-                        opportunity,
-                        channel_label=channel_label,
-                    ),
-                    suggested_action=_suggested_action(opportunity),
-                    suggested_message=_suggested_message_for_label(
-                        opportunity,
-                        channel_label=channel_label,
-                    ),
+                    summary=summary,
+                    suggested_action=suggested_action,
+                    suggested_message=suggested_message,
                     evidence_json=evidence_items,
                     source_type="task_summary",
                     source_id=str(task.id),
                     source_task_id=task.id,
                     source_profile_id=None,
                     dedupe_key=dedupe_key,
-                    confidence_score=Decimal("0.620"),
-                    confidence_reason=(
-                        "Derived from Kortny's completed answer for a "
-                        "channel-profile/watch-for request."
+                    confidence_score=_bounded_confidence(
+                        candidate_input.confidence_score
+                    ),
+                    confidence_reason=_bounded_text(
+                        candidate_input.confidence_reason,
+                        500,
                     ),
                     status="candidate",
                     feedback_json={},
@@ -318,26 +330,20 @@ class WitnessOpportunityService:
             else:
                 candidate = existing
                 candidate.title = title
-                candidate.summary = _summary_for_label(
-                    opportunity,
-                    channel_label=channel_label,
-                )
-                candidate.suggested_action = _suggested_action(opportunity)
-                candidate.suggested_message = _suggested_message_for_label(
-                    opportunity,
-                    channel_label=channel_label,
-                )
+                candidate.summary = summary
+                candidate.suggested_action = suggested_action
+                candidate.suggested_message = suggested_message
                 candidate.evidence_json = evidence_items
                 if candidate.source_type == "task_summary":
                     candidate.source_id = str(task.id)
                 candidate.source_task_id = task.id
                 candidate.confidence_score = max(
                     candidate.confidence_score or Decimal("0.000"),
-                    Decimal("0.620"),
+                    _bounded_confidence(candidate_input.confidence_score),
                 )
                 candidate.confidence_reason = (
-                    "Reinforced by Kortny's completed answer for a "
-                    "channel-profile/watch-for request."
+                    _bounded_text(candidate_input.confidence_reason, 500)
+                    or "Reinforced by the Witness extractor."
                 )
                 candidate.metadata_json = {
                     **(candidate.metadata_json or {}),
@@ -448,22 +454,6 @@ def _evidence_items(
             if isinstance(ref, dict):
                 items.append({"type": "profile_ref", **ref})
     return items[:10]
-
-
-def _candidate_type(opportunity: str) -> str:
-    if _DATA_QUALITY_RE.search(opportunity):
-        return "data_quality_issue"
-    if _ARTIFACT_RE.search(opportunity):
-        return "artifact_followup"
-    if _DECISION_RE.search(opportunity):
-        return "unresolved_decision"
-    if _RECURRING_RE.search(opportunity):
-        return "recurring_check"
-    if _PROJECT_STATUS_RE.search(opportunity):
-        return "project_status_gap"
-    if _WORKFLOW_RE.search(opportunity):
-        return "workflow_gap"
-    return "general_help"
 
 
 def _scope_for_membership(membership: SlackChannelMembership) -> tuple[str, str]:
@@ -602,83 +592,41 @@ def _suggested_message_for_label(opportunity: str, *, channel_label: str) -> str
     )
 
 
-def _task_response_opportunities(response_text: str) -> tuple[str, ...]:
-    active = False
-    output: list[str] = []
-    seen: set[str] = set()
-    for raw_line in response_text.splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        bullet_match = _BULLET_RE.match(line)
-        if _is_watch_heading(line):
-            active = True
-            continue
-        if active and bullet_match is None and output:
-            break
-        if not active or bullet_match is None:
-            continue
-        opportunity = _clean_task_opportunity(bullet_match.group(1))
-        key = opportunity.lower()
-        if not opportunity or key in seen:
-            continue
-        seen.add(key)
-        output.append(opportunity)
-        if len(output) >= MAX_TASK_RESPONSE_OPPORTUNITIES:
-            break
-    return tuple(output)
-
-
-def _is_watch_heading(line: str) -> bool:
-    heading = _normalize_for_key(line.strip("*_:"))
-    return any(
-        phrase in heading
-        for phrase in (
-            "what i watch for",
-            "what i'll watch for",
-            "what i should watch",
-            "what should i watch",
-            "what to watch for",
-            "watch for here",
-            "watching for",
-        )
-    )
-
-
-def _clean_task_opportunity(value: str) -> str:
-    text = (
-        value.replace("\u00a0", " ")
-        .replace("\u2011", "-")
-        .replace("\u2013", "-")
-        .replace("\u2014", "-")
-    )
-    text = re.sub(r"^\*([^*]{1,80})\*\s*[-:]\s*", r"\1: ", text)
-    text = re.sub(r"^([^:]{1,80})\s+-\s+", r"\1: ", text)
-    text = text.strip("* ")
-    return _bounded_text(text, 220)
-
-
-def _task_response_evidence(
+def _candidate_evidence_items(
     *,
     task: Task,
-    opportunity: str,
+    candidate: WitnessOpportunityCandidateInput,
     response_text: str,
     channel_id: str,
 ) -> list[dict[str, Any]]:
-    return [
+    items: list[dict[str, Any]] = [
         {
             "type": "task_response",
             "source_task_id": str(task.id),
             "channel_id": channel_id,
-            "snippet": _bounded_text(opportunity, 300),
+            "snippet": _bounded_text(candidate.summary, 300),
         },
+    ]
+    for snippet in candidate.evidence[:5]:
+        bounded = _bounded_text(snippet, 300)
+        if bounded:
+            items.append(
+                {
+                    "type": "llm_evidence",
+                    "source_task_id": str(task.id),
+                    "channel_id": channel_id,
+                    "snippet": bounded,
+                }
+            )
+    items.append(
         {
             "type": "task_response_context",
             "source_task_id": str(task.id),
             "channel_id": channel_id,
             "summary": _bounded_text(response_text, 700),
-        },
-    ]
+        }
+    )
+    return items[:10]
 
 
 def _bounded_text_list(value: object, *, limit: int) -> tuple[str, ...]:
@@ -702,3 +650,11 @@ def _bounded_text_list(value: object, *, limit: int) -> tuple[str, ...]:
 
 def _bounded_text(value: str, max_chars: int) -> str:
     return _WHITESPACE_RE.sub(" ", value).strip()[:max_chars].strip()
+
+
+def _bounded_confidence(value: Decimal) -> Decimal:
+    if value < 0:
+        return Decimal("0.000")
+    if value > 1:
+        return Decimal("1.000")
+    return value.quantize(Decimal("0.001"))

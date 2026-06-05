@@ -108,6 +108,7 @@ from kortny.tools import (
 from kortny.witness import (
     WITNESS_OPPORTUNITY_CANDIDATES_PROJECTED_MESSAGE,
     WitnessOpportunityService,
+    WitnessTaskResponseExtractor,
 )
 from kortny.workflow.handoff import evaluate_runtime_handoff
 from kortny.workflow.planning_classifier import classify_planned_workflow
@@ -219,6 +220,7 @@ class AgentTaskExecutor:
                     result_summary=agent_result.result_summary,
                 )
                 self._project_witness_opportunities_from_result(
+                    settings=settings,
                     session=session,
                     task=task,
                     task_service=task_service,
@@ -1511,6 +1513,7 @@ class AgentTaskExecutor:
     def _project_witness_opportunities_from_result(
         self,
         *,
+        settings: Settings,
         session: Session,
         task: Task,
         task_service: TaskService,
@@ -1518,12 +1521,56 @@ class AgentTaskExecutor:
     ) -> None:
         """Best-effort Witness candidates from delivered watch-for answers."""
 
-        if not posted_response_text or is_channel_assessment_task(session, task):
+        if (
+            not posted_response_text
+            or is_channel_assessment_task(session, task)
+            or _should_skip_witness_extraction(session, task)
+        ):
             return
         try:
-            result = WitnessOpportunityService(session).project_from_task_response(
+            model_route = ModelRouter(settings).route_for_tier(
+                ModelRouteTier.cheap_fast,
+                reason="witness_task_response_extraction",
+            )
+            provider: LLMProvider
+            if self.llm_provider is None:
+                selection = self._select_runtime_model(
+                    settings=settings,
+                    session=session,
+                    task=task,
+                    model_route=model_route,
+                )
+                model_route = selection.model_route
+                provider = create_provider_for_selection(
+                    settings=settings,
+                    selection=selection,
+                )
+                provider_name: DbLLMProvider | str = selection.provider_name
+            else:
+                provider = self.llm_provider
+                provider_name = self.provider_name or DbLLMProvider(
+                    settings.llm_provider.value
+                )
+            extraction = WitnessTaskResponseExtractor(
+                LLMService(
+                    session=session,
+                    provider=provider,
+                    provider_name=provider_name,
+                    task_service=task_service,
+                    model_route=model_route,
+                )
+            ).extract(
                 task=task,
                 response_text=posted_response_text,
+            )
+            result = WitnessOpportunityService(session).project_from_task_candidates(
+                task=task,
+                candidates=extraction.candidates,
+                response_text=posted_response_text,
+                extraction_metadata={
+                    "raw_candidate_count": extraction.raw_candidate_count,
+                    "skipped_reason": extraction.skipped_reason,
+                },
             )
         except Exception as exc:
             task_service.append_event(
@@ -1548,6 +1595,7 @@ class AgentTaskExecutor:
             {
                 "message": WITNESS_OPPORTUNITY_CANDIDATES_PROJECTED_MESSAGE,
                 "source_type": "task_summary",
+                "extractor": "llm",
                 "channel_id": task.slack_channel_id,
                 "created_count": result.created_count,
                 "updated_count": result.updated_count,
@@ -2009,6 +2057,16 @@ def _response_humanizer_skip_reason(
     if final_author in ADK_QUICK_FINAL_AUTHORS:
         return "adk_quick_fast_path"
     return None
+
+
+def _should_skip_witness_extraction(session: Session, task: Task) -> bool:
+    events = _task_events(session, task)
+    if _latest_payload_event(events, message="adk_quick_response_selected") is not None:
+        return True
+    completed = _latest_payload_event(events, message="adk_runtime_completed")
+    if completed is None:
+        return False
+    return completed.get("final_author") in ADK_QUICK_FINAL_AUTHORS
 
 
 def _latest_payload_event(

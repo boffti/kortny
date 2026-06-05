@@ -1,11 +1,11 @@
 {% extends "base.html" %}
 
-{% block title %}Models - Kortny Dashboard{% endblock %}
+{% block title %}LLM Providers - Kortny Dashboard{% endblock %}
 
 {% block content %}
   <section class="page-heading">
     <div>
-      <h1>Models</h1>
+      <h1>LLM Providers</h1>
       <p>Manage provider accounts, model catalog rows, and tier routing used by Kortny at runtime.</p>
     </div>
     <div class="heading-actions">
@@ -222,7 +222,7 @@
     {% endfor %}
   </section>
 
-  <section class="model-config-grid" aria-label="Provider and model catalog">
+  <section class="model-config-grid" aria-label="Provider accounts">
     <article class="card detail-section model-config-panel">
       <header>
         <h2>Provider Accounts</h2>
@@ -246,7 +246,9 @@
             {% for row in model_config.providers %}
               <tr>
                 <td>
-                  <strong>{{ row.provider.display_name }}</strong>
+                  <a class="model-config-provider-link" href="/admin/models/providers/{{ row.provider.id }}">
+                    {{ row.provider.display_name }}
+                  </a>
                   <span class="identity-id">{{ row.provider.provider_kind }}</span>
                 </td>
                 <td><span class="badge badge-{{ row.status_tone }}">{{ row.provider.status }}</span></td>
@@ -255,6 +257,7 @@
                 <td>{{ row.credential_label }}</td>
                 <td>{{ row.source_label }}</td>
                 <td class="model-config-controls">
+                  <a class="btn-ghost" href="/admin/models/providers/{{ row.provider.id }}">Open</a>
                   <form method="post" action="/admin/models/providers/{{ row.provider.id }}/status" onsubmit="return confirm('Update {{ row.provider.display_name }} provider status?');">
                     <input type="hidden" name="next" value="/admin/models">
                     <select class="input compact-input" name="status">
@@ -279,71 +282,6 @@
       </div>
     </article>
 
-    <article class="card detail-section model-config-panel">
-      <header>
-        <h2>Model Catalog</h2>
-        <p>Models available for tier assignment. Disabled models remain visible for auditability.</p>
-      </header>
-      <div class="table-wrap">
-        <table class="table model-config-table">
-          <caption>Model catalog rows, pricing state, tier use, and controls.</caption>
-          <thead>
-            <tr>
-              <th>Model</th>
-              <th>Provider</th>
-              <th>Status</th>
-              <th>Used By</th>
-              <th>Pricing</th>
-              <th>Controls</th>
-            </tr>
-          </thead>
-          <tbody>
-            {% for row in model_config.models %}
-              <tr>
-                <td>
-                  <strong>{{ row.model.display_name }}</strong>
-                  <code class="inline-code">{{ row.model.model_identifier }}</code>
-                </td>
-                <td>{{ row.provider.display_name }}</td>
-                <td><span class="badge badge-{{ row.tone }}">{{ "enabled" if row.model.is_enabled else "disabled" }}</span></td>
-                <td>
-                  {% if row.assignment_labels %}
-                    <div class="model-tag-list">
-                      {% for label in row.assignment_labels %}
-                        <span class="badge badge-neutral">{{ label }}</span>
-                      {% endfor %}
-                    </div>
-                  {% else %}
-                    <span class="identity-id">Unused</span>
-                  {% endif %}
-                </td>
-                <td>
-                  {% if row.latest_pricing %}
-                    <span>{{ row.latest_pricing.input_price_per_mtok or "?" }} / {{ row.latest_pricing.output_price_per_mtok or "?" }} {{ row.latest_pricing.currency }}</span>
-                  {% else %}
-                    <span class="badge badge-warning">Missing</span>
-                  {% endif %}
-                </td>
-                <td>
-                  <form method="post" action="/admin/models/catalog/{{ row.model.id }}/status" onsubmit="return confirm('Update {{ row.model.display_name }} model status?');">
-                    <input type="hidden" name="next" value="/admin/models">
-                    <select class="input compact-input" name="is_enabled">
-                      <option value="true" {{ "selected" if row.model.is_enabled else "" }}>Enabled</option>
-                      <option value="false" {{ "selected" if not row.model.is_enabled else "" }}>Disabled</option>
-                    </select>
-                    <button class="btn-ghost" type="submit">Save</button>
-                  </form>
-                </td>
-              </tr>
-            {% else %}
-              <tr>
-                <td colspan="6">No model catalog rows have been configured yet.</td>
-              </tr>
-            {% endfor %}
-          </tbody>
-        </table>
-      </div>
-    </article>
   </section>
 
   <section class="card detail-section model-config-panel">

@@ -43,6 +43,7 @@ from kortny.dashboard.data import (
     get_integration_dashboard,
     get_knowledge_graph_dashboard,
     get_llm_model_config_dashboard,
+    get_llm_provider_config_detail,
     get_memory_dashboard,
     get_system_health,
     get_task_detail,
@@ -95,6 +96,7 @@ from kortny.llm.litellm_catalog import (
     litellm_endpoint_model_candidates,
     litellm_model_candidates,
     litellm_provider_option,
+    model_candidate_for_identifier,
 )
 from kortny.llm.provider_config import (
     ENV_CREDENTIAL_SOURCE,
@@ -743,6 +745,35 @@ def register_routes(app: FastAPI) -> None:
             },
         )
 
+    @app.get(
+        "/admin/models/providers/{provider_account_id}", response_class=HTMLResponse
+    )
+    def model_config_provider_detail(
+        request: Request,
+        provider_account_id: UUID,
+        principal: Annotated[DashboardPrincipal, Depends(require_admin)],
+        session: Annotated[Session, Depends(get_session)],
+        notice: Annotated[str | None, Query()] = None,
+        notice_tone: Annotated[str, Query()] = "success",
+    ) -> Response:
+        provider_detail = get_llm_provider_config_detail(
+            session=session,
+            provider_account_id=provider_account_id,
+            installation_id=_dashboard_installation_id(session, principal),
+        )
+        if provider_detail is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+        return templates.TemplateResponse(
+            request=request,
+            name="model_provider_detail.html",
+            context={
+                **_dashboard_context(principal, active_page="model_config"),
+                "detail": provider_detail,
+                "notice": notice,
+                "notice_tone": _notice_tone(notice_tone),
+            },
+        )
+
     @app.post("/admin/models/bootstrap")
     async def model_config_bootstrap(
         request: Request,
@@ -770,15 +801,34 @@ def register_routes(app: FastAPI) -> None:
             installation_id=installation_id,
             settings=runtime_settings,
         )
+        pricing_count = 0
+        if result.provider_account_id is not None:
+            provider = session.get(LLMProviderAccount, result.provider_account_id)
+            if provider is not None:
+                pricing_count = _backfill_model_pricing_for_provider(
+                    session,
+                    provider=provider,
+                    include_provider_catalog=True,
+                )
         session.commit()
         if result.created:
+            pricing_suffix = (
+                f" Synced {pricing_count} pricing row{'' if pricing_count == 1 else 's'}."
+                if pricing_count
+                else ""
+            )
             return _redirect_with_notice(
                 next_path,
-                "Seeded model provider config from env.",
+                f"Seeded model provider config from env.{pricing_suffix}",
             )
+        pricing_suffix = (
+            f" Backfilled {pricing_count} pricing row{'' if pricing_count == 1 else 's'}."
+            if pricing_count
+            else ""
+        )
         return _redirect_with_notice(
             next_path,
-            f"Bootstrap skipped: {result.skipped_reason or 'config already exists'}.",
+            f"Bootstrap skipped: {result.skipped_reason or 'config already exists'}.{pricing_suffix}",
             tone="neutral",
         )
 
@@ -1061,6 +1111,11 @@ def register_routes(app: FastAPI) -> None:
             provider=provider,
             candidates=tuple(candidates[:limit]),
         )
+        pricing_count += _backfill_model_pricing_for_provider(
+            session,
+            provider=provider,
+            include_provider_catalog=True,
+        )
         _append_llm_config_audit(
             session,
             installation_id=provider.installation_id,
@@ -1090,6 +1145,58 @@ def register_routes(app: FastAPI) -> None:
             next_path,
             f"Imported {imported_count} model row{'' if imported_count == 1 else 's'} and {pricing_count} pricing row{'' if pricing_count == 1 else 's'} for {provider.display_name}.{suffix}",
             tone=tone,
+        )
+
+    @app.post("/admin/models/providers/{provider_account_id}/update-pricing")
+    async def model_config_update_provider_pricing(
+        request: Request,
+        provider_account_id: UUID,
+        principal: Annotated[DashboardPrincipal, Depends(require_admin)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> RedirectResponse:
+        form = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
+        next_path = _safe_next_path(_form_value(form, "next") or "/admin/models")
+        installation_id = _dashboard_installation_id(session, principal)
+        provider = _get_scoped_provider_account(
+            session,
+            provider_account_id=provider_account_id,
+            installation_id=installation_id,
+        )
+        if provider is None:
+            return _redirect_with_notice(
+                next_path, "Provider not found.", tone="danger"
+            )
+
+        pricing_count = _backfill_model_pricing_for_provider(
+            session,
+            provider=provider,
+            include_provider_catalog=True,
+            missing_only=True,
+        )
+        _append_llm_config_audit(
+            session,
+            installation_id=provider.installation_id,
+            principal=principal,
+            action="update",
+            entity_type="llm_provider_account",
+            entity_id=str(provider.id),
+            previous_value=None,
+            new_value={
+                "operation": "update_missing_pricing",
+                "provider_account_id": str(provider.id),
+                "provider_kind": provider.provider_kind,
+                "pricing_count": pricing_count,
+            },
+        )
+        session.commit()
+        return _redirect_with_notice(
+            next_path,
+            (
+                f"Updated pricing for {pricing_count} model row{'' if pricing_count == 1 else 's'}."
+                if pricing_count
+                else "No missing pricing could be updated for this provider."
+            ),
+            tone="success" if pricing_count else "neutral",
         )
 
     @app.post("/admin/models/catalog")
@@ -3395,6 +3502,74 @@ def _upsert_model_candidates(
             candidate=candidate,
         )
     return imported_count, pricing_count
+
+
+def _backfill_model_pricing_for_provider(
+    session: Session,
+    *,
+    provider: LLMProviderAccount,
+    include_provider_catalog: bool,
+    missing_only: bool = False,
+) -> int:
+    pricing_count = 0
+    models = session.scalars(
+        select(LLMModelCatalog).where(
+            LLMModelCatalog.provider_account_id == provider.id
+        )
+    ).all()
+    for model in models:
+        if missing_only and _model_has_pricing(
+            session,
+            provider=provider,
+            model_identifier=model.model_identifier,
+        ):
+            continue
+        candidate = model_candidate_for_identifier(
+            provider.provider_kind,
+            model.model_identifier,
+            include_provider_catalog=include_provider_catalog,
+        )
+        if candidate is None:
+            continue
+        if candidate.display_name and model.display_name == model.model_identifier:
+            model.display_name = candidate.display_name
+        model.capabilities_json = {
+            **(
+                model.capabilities_json
+                if isinstance(model.capabilities_json, dict)
+                else {}
+            ),
+            **candidate.capabilities,
+        }
+        model.metadata_json = {
+            **(model.metadata_json if isinstance(model.metadata_json, dict) else {}),
+            "litellm_metadata": candidate.metadata,
+        }
+        pricing_count += _upsert_pricing_from_candidate(
+            session,
+            provider=provider,
+            candidate=candidate,
+        )
+    return pricing_count
+
+
+def _model_has_pricing(
+    session: Session,
+    *,
+    provider: LLMProviderAccount,
+    model_identifier: str,
+) -> bool:
+    return (
+        session.scalar(
+            select(LLMModelPricing.id)
+            .where(
+                LLMModelPricing.provider_account_id == provider.id,
+                LLMModelPricing.model_identifier == model_identifier,
+            )
+            .limit(1)
+        )
+        is not None
+    )
 
 
 def _upsert_pricing_from_candidate(

@@ -983,6 +983,22 @@ class LLMModelConfigDashboard:
     empty_message: str | None
 
 
+@dataclass(frozen=True)
+class LLMProviderConfigDetail:
+    installation_id: uuid.UUID
+    installation_label: str
+    provider: LLMProviderAccount
+    provider_row: LLMProviderConfigRow
+    models: tuple[LLMModelConfigRow, ...]
+    routed_models: tuple[LLMModelConfigRow, ...]
+    attention_models: tuple[LLMModelConfigRow, ...]
+    missing_pricing_count: int
+    audits: tuple[LLMAuditConfigRow, ...]
+    metrics: tuple[SystemMetric, ...]
+    api_version_label: str
+    base_url_label: str
+
+
 def list_tasks(
     session: Session,
     *,
@@ -2385,6 +2401,166 @@ def get_llm_model_config_dashboard(
         empty_message=None
         if providers
         else "No DB-managed model config exists yet. Bootstrap from env to seed the current provider and tier assignments.",
+    )
+
+
+def get_llm_provider_config_detail(
+    *,
+    session: Session,
+    provider_account_id: uuid.UUID,
+    installation_id: uuid.UUID | None = None,
+) -> LLMProviderConfigDetail | None:
+    """Return one LLM provider account with diagnostic model/config detail."""
+
+    provider = session.get(LLMProviderAccount, provider_account_id)
+    if provider is None:
+        return None
+    if installation_id is not None and provider.installation_id != installation_id:
+        return None
+
+    installation_label = _installation_label(session, provider.installation_id)
+    models = tuple(
+        session.scalars(
+            select(LLMModelCatalog)
+            .where(LLMModelCatalog.provider_account_id == provider.id)
+            .order_by(
+                LLMModelCatalog.is_enabled.desc(),
+                LLMModelCatalog.display_name.asc(),
+                LLMModelCatalog.model_identifier.asc(),
+            )
+        )
+    )
+    model_ids = tuple(model.id for model in models)
+    assignments = (
+        tuple(
+            session.scalars(
+                select(LLMTierAssignment)
+                .where(
+                    LLMTierAssignment.installation_id == provider.installation_id,
+                    LLMTierAssignment.model_catalog_id.in_(model_ids),
+                )
+                .order_by(
+                    LLMTierAssignment.tier.asc(),
+                    LLMTierAssignment.priority.asc(),
+                    LLMTierAssignment.created_at.asc(),
+                )
+            )
+        )
+        if model_ids
+        else ()
+    )
+    assignments_by_model: dict[uuid.UUID, list[LLMTierAssignment]] = defaultdict(list)
+    for assignment in assignments:
+        assignments_by_model[assignment.model_catalog_id].append(assignment)
+
+    pricing_by_model = _latest_llm_pricing_by_model(session, (provider.id,))
+    pricing_count = int(
+        session.scalar(
+            select(func.count())
+            .select_from(LLMModelPricing)
+            .where(LLMModelPricing.provider_account_id == provider.id)
+        )
+        or 0
+    )
+    model_rows = tuple(
+        LLMModelConfigRow(
+            model=model,
+            provider=provider,
+            assignment_labels=tuple(
+                _tier_assignment_label(assignment)
+                for assignment in assignments_by_model.get(model.id, ())
+            ),
+            latest_pricing=pricing_by_model.get((provider.id, model.model_identifier)),
+            tone="success" if model.is_enabled else "neutral",
+        )
+        for model in models
+    )
+    routed_models = tuple(row for row in model_rows if row.assignment_labels)
+    missing_pricing_count = sum(1 for row in model_rows if row.latest_pricing is None)
+    attention_models = tuple(
+        row
+        for row in model_rows
+        if row.assignment_labels
+        and (row.latest_pricing is None or not row.model.is_enabled)
+    )
+    if not attention_models:
+        attention_models = tuple(
+            row
+            for row in model_rows
+            if row.model.is_enabled and row.latest_pricing is None
+        )[:5]
+    active_assignment_count = sum(
+        1 for assignment in assignments if assignment.is_active
+    )
+    provider_row = LLMProviderConfigRow(
+        provider=provider,
+        model_count=len(models),
+        enabled_model_count=sum(1 for model in models if model.is_enabled),
+        tier_count=active_assignment_count,
+        credential_label=_provider_credential_label(provider),
+        source_label=_provider_source_label(provider),
+        status_tone=_provider_status_tone(provider.status),
+        health_tone=_provider_health_tone(provider.health_status),
+    )
+
+    audit_entity_ids = {
+        str(provider.id),
+        *(str(model.id) for model in models),
+        *(str(assignment.id) for assignment in assignments),
+    }
+    audits = tuple(
+        session.scalars(
+            select(LLMConfigAudit)
+            .where(
+                LLMConfigAudit.installation_id == provider.installation_id,
+                LLMConfigAudit.entity_id.in_(tuple(audit_entity_ids)),
+            )
+            .order_by(LLMConfigAudit.created_at.desc())
+            .limit(12)
+        )
+    )
+    metadata = (
+        provider.metadata_json if isinstance(provider.metadata_json, dict) else {}
+    )
+    metrics = (
+        SystemMetric(
+            label="Status",
+            value=provider.status.title(),
+            detail="Provider runtime availability",
+            tone=provider_row.status_tone,
+        ),
+        SystemMetric(
+            label="Health",
+            value=provider.health_status.title(),
+            detail="Latest dashboard credential test",
+            tone=provider_row.health_tone,
+        ),
+        SystemMetric(
+            label="Models",
+            value=f"{len(models):,}",
+            detail=f"{provider_row.enabled_model_count:,} enabled, {pricing_count:,} priced",
+            tone="success" if models else "warning",
+        ),
+        SystemMetric(
+            label="Tier Routes",
+            value=f"{active_assignment_count:,}",
+            detail="Active assignments using this provider",
+            tone="success" if active_assignment_count else "neutral",
+        ),
+    )
+    return LLMProviderConfigDetail(
+        installation_id=provider.installation_id,
+        installation_label=installation_label,
+        provider=provider,
+        provider_row=provider_row,
+        models=model_rows,
+        routed_models=routed_models,
+        attention_models=attention_models[:5],
+        missing_pricing_count=missing_pricing_count,
+        audits=tuple(_audit_config_row(audit) for audit in audits),
+        metrics=metrics,
+        api_version_label=str(metadata.get("api_version") or "Not configured"),
+        base_url_label=provider.base_url or "Default LiteLLM endpoint",
     )
 
 

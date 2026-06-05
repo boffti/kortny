@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from decimal import Decimal
+from functools import lru_cache
 from typing import Any, cast
 
 
@@ -29,6 +30,10 @@ class LiteLLMModelCandidate:
     metadata: dict[str, object]
     input_price_per_mtok: Decimal | None
     output_price_per_mtok: Decimal | None
+
+
+OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
+OPENROUTER_MODELS_TIMEOUT_SECONDS = 5.0
 
 
 LITELLM_PROVIDER_OPTIONS: tuple[LiteLLMProviderOption, ...] = (
@@ -132,6 +137,31 @@ def litellm_model_candidates(
     return tuple(_rank_candidates(provider_kind, candidates)[:limit])
 
 
+def model_candidate_for_identifier(
+    provider_kind: str,
+    model_identifier: str,
+    *,
+    include_provider_catalog: bool = False,
+) -> LiteLLMModelCandidate | None:
+    """Return pricing/capability metadata for one provider model identifier.
+
+    DB-backed model config stores the provider-native identifier. OpenRouter is
+    the main wrinkle: LiteLLM runtime calls need an ``openrouter/`` prefix, but
+    env tier config commonly stores ``anthropic/...`` or ``deepseek/...``. This
+    helper preserves the caller's identifier while searching both shapes.
+    """
+
+    local = _local_model_candidate_for_identifier(
+        provider_kind=provider_kind,
+        model_identifier=model_identifier,
+    )
+    if local is not None:
+        return local
+    if include_provider_catalog and provider_kind == "openrouter":
+        return _openrouter_model_candidate_for_identifier(model_identifier)
+    return None
+
+
 def litellm_endpoint_model_candidates(
     provider_kind: str,
     *,
@@ -230,6 +260,55 @@ def _litellm_model_cost() -> Mapping[str, Mapping[str, Any]]:
     return cast(Mapping[str, Mapping[str, Any]], litellm.model_cost)
 
 
+def _local_model_candidate_for_identifier(
+    *,
+    provider_kind: str,
+    model_identifier: str,
+) -> LiteLLMModelCandidate | None:
+    model_cost = _litellm_model_cost()
+    for lookup_identifier in _provider_lookup_identifiers(
+        provider_kind, model_identifier
+    ):
+        info = model_cost.get(lookup_identifier)
+        if not isinstance(info, Mapping):
+            continue
+        if not _model_cost_row_matches(provider_kind, lookup_identifier, info):
+            continue
+        candidate = _candidate_from_model_cost(
+            model_identifier=model_identifier,
+            provider_kind=provider_kind,
+            info=info,
+            source="litellm_catalog",
+        )
+        if lookup_identifier == model_identifier:
+            return candidate
+        return LiteLLMModelCandidate(
+            model_identifier=candidate.model_identifier,
+            display_name=candidate.display_name,
+            provider_kind=candidate.provider_kind,
+            source=candidate.source,
+            capabilities=candidate.capabilities,
+            metadata={
+                **candidate.metadata,
+                "litellm_model_identifier": lookup_identifier,
+            },
+            input_price_per_mtok=candidate.input_price_per_mtok,
+            output_price_per_mtok=candidate.output_price_per_mtok,
+        )
+    return None
+
+
+def _provider_lookup_identifiers(
+    provider_kind: str, model_identifier: str
+) -> tuple[str, ...]:
+    normalized = model_identifier.strip()
+    if provider_kind != "openrouter":
+        return (normalized,)
+    if normalized.startswith("openrouter/"):
+        return (normalized, normalized.removeprefix("openrouter/"))
+    return (normalized, f"openrouter/{normalized}")
+
+
 def _model_cost_row_matches(
     provider_kind: str,
     model_identifier: str,
@@ -240,6 +319,115 @@ def _model_cost_row_matches(
     if info.get("litellm_provider") != provider_kind:
         return False
     return info.get("mode") in {None, "chat", "completion"}
+
+
+def _openrouter_model_candidate_for_identifier(
+    model_identifier: str,
+) -> LiteLLMModelCandidate | None:
+    lookup_values = set(_provider_lookup_identifiers("openrouter", model_identifier))
+    lookup_values.update(
+        value.removeprefix("openrouter/")
+        for value in tuple(lookup_values)
+        if value.startswith("openrouter/")
+    )
+    for item in _openrouter_model_items():
+        if not isinstance(item, dict):
+            continue
+        keys = {
+            value.strip()
+            for value in (item.get("id"), item.get("canonical_slug"))
+            if isinstance(value, str) and value.strip()
+        }
+        keys.update(f"openrouter/{value}" for value in tuple(keys))
+        if keys.isdisjoint(lookup_values):
+            continue
+        pricing = item.get("pricing")
+        if not isinstance(pricing, dict):
+            return None
+        input_price = _price_per_mtok(pricing.get("prompt"))
+        output_price = _price_per_mtok(pricing.get("completion"))
+        if input_price is None and output_price is None:
+            return None
+        return LiteLLMModelCandidate(
+            model_identifier=model_identifier,
+            display_name=(
+                str(item.get("name")).strip()
+                if isinstance(item.get("name"), str) and str(item.get("name")).strip()
+                else _display_name(model_identifier)
+            ),
+            provider_kind="openrouter",
+            source="provider_api",
+            capabilities=_openrouter_capabilities(item),
+            metadata=_openrouter_metadata(item),
+            input_price_per_mtok=input_price,
+            output_price_per_mtok=output_price,
+        )
+    return None
+
+
+@lru_cache(maxsize=1)
+def _openrouter_model_items() -> tuple[Mapping[str, Any], ...]:
+    try:
+        import httpx
+    except ImportError:
+        return ()
+    try:
+        response = httpx.get(
+            OPENROUTER_MODELS_URL,
+            params={"output_modalities": "all"},
+            timeout=OPENROUTER_MODELS_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+    except Exception:
+        return ()
+    payload = response.json()
+    if not isinstance(payload, dict):
+        return ()
+    data = payload.get("data")
+    if not isinstance(data, list):
+        return ()
+    return tuple(item for item in data if isinstance(item, Mapping))
+
+
+def _openrouter_capabilities(item: Mapping[str, Any]) -> dict[str, object]:
+    capabilities: dict[str, object] = {}
+    context_length = item.get("context_length")
+    if isinstance(context_length, int):
+        capabilities["max_input_tokens"] = context_length
+    supported_parameters = item.get("supported_parameters")
+    if isinstance(supported_parameters, list):
+        capabilities["supported_parameters"] = [
+            value for value in supported_parameters if isinstance(value, str)
+        ]
+    architecture = item.get("architecture")
+    if isinstance(architecture, dict):
+        for key in (
+            "input_modalities",
+            "output_modalities",
+            "tokenizer",
+            "instruct_type",
+        ):
+            value = architecture.get(key)
+            if value is not None:
+                capabilities[key] = value
+    return capabilities
+
+
+def _openrouter_metadata(item: Mapping[str, Any]) -> dict[str, object]:
+    metadata: dict[str, object] = {"litellm_provider": "openrouter"}
+    for key in (
+        "id",
+        "canonical_slug",
+        "created",
+        "description",
+        "architecture",
+        "top_provider",
+        "per_request_limits",
+    ):
+        value = item.get(key)
+        if value is not None:
+            metadata[f"openrouter_{key}"] = value
+    return metadata
 
 
 def _candidate_from_model_cost(

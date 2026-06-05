@@ -860,7 +860,7 @@ def test_dashboard_admin_model_config_page_shows_provider_state(
     response = test_client.get("/admin/models")
 
     assert response.status_code == 200
-    assert "Models" in response.text
+    assert "LLM Providers" in response.text
     assert "Models Team" in response.text
     assert "OpenRouter env provider" in response.text
     assert "DeepSeek Flash" in response.text
@@ -872,6 +872,93 @@ def test_dashboard_admin_model_config_page_shows_provider_state(
     assert "Routing Workflow" in response.text
     assert "Connect & Sync Models" in response.text
     assert "Import Models" not in response.text
+    assert "Model Catalog" not in response.text
+
+
+def test_dashboard_admin_bootstrap_backfills_env_model_pricing(
+    client: tuple[TestClient, Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    test_client, session = client
+    set_runtime_settings_env(monkeypatch)
+    monkeypatch.setenv("LLM_MODEL", "fallback/model")
+    monkeypatch.setenv("LLM_CHEAP_MODEL", "deepseek/deepseek-v4-flash")
+    monkeypatch.setenv("LLM_STANDARD_MODEL", "deepseek/deepseek-v4-pro")
+    monkeypatch.setenv("LLM_ANALYSIS_MODEL", "anthropic/claude-sonnet-4.6")
+    monkeypatch.setenv("LLM_DOCUMENT_MODEL", "openai/gpt-5.1")
+    monkeypatch.setenv("LLM_HIGH_REASONING_MODEL", "anthropic/claude-opus-4.8")
+    installation = Installation(
+        slack_team_id="TProviderBootstrap", team_name="Bootstrap Team"
+    )
+    session.add(installation)
+    session.commit()
+
+    prices = {
+        "deepseek/deepseek-v4-flash": ("0.010000", "0.020000"),
+        "deepseek/deepseek-v4-pro": ("0.030000", "0.040000"),
+        "anthropic/claude-sonnet-4.6": ("3.000000", "15.000000"),
+        "openai/gpt-5.1": ("1.250000", "10.000000"),
+        "anthropic/claude-opus-4.8": ("15.000000", "75.000000"),
+    }
+
+    def candidate_for_identifier(
+        provider_kind: str,
+        model_identifier: str,
+        *,
+        include_provider_catalog: bool = False,
+    ) -> LiteLLMModelCandidate | None:
+        assert provider_kind == "openrouter"
+        assert include_provider_catalog is True
+        input_price, output_price = prices[model_identifier]
+        return LiteLLMModelCandidate(
+            model_identifier=model_identifier,
+            display_name=f"{model_identifier} display",
+            provider_kind=provider_kind,
+            source="provider_api",
+            capabilities={"max_input_tokens": 128000},
+            metadata={"litellm_provider": provider_kind},
+            input_price_per_mtok=Decimal(input_price),
+            output_price_per_mtok=Decimal(output_price),
+        )
+
+    monkeypatch.setattr(
+        "kortny.dashboard.app.model_candidate_for_identifier",
+        candidate_for_identifier,
+    )
+    login(test_client)
+
+    response = test_client.post(
+        "/admin/models/bootstrap",
+        data={"next": "/admin/models"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    session.expire_all()
+    provider = session.scalar(select(LLMProviderAccount))
+    assert provider is not None
+    models = session.scalars(
+        select(LLMModelCatalog).where(
+            LLMModelCatalog.provider_account_id == provider.id
+        )
+    ).all()
+    pricing_rows = session.scalars(
+        select(LLMModelPricing).where(
+            LLMModelPricing.provider_account_id == provider.id
+        )
+    ).all()
+    assert {model.model_identifier for model in models} == set(prices)
+    assert len(pricing_rows) == len(prices)
+    assert {
+        row.model_identifier: (
+            row.input_price_per_mtok,
+            row.output_price_per_mtok,
+        )
+        for row in pricing_rows
+    }["deepseek/deepseek-v4-pro"] == (
+        Decimal("0.030000"),
+        Decimal("0.040000"),
+    )
 
 
 def test_dashboard_admin_can_update_primary_model_tier_and_audit(
@@ -1126,6 +1213,241 @@ def test_dashboard_admin_can_test_provider_and_import_models(
     )
     assert pricing is not None
     assert pricing.input_price_per_mtok == Decimal("0.250000")
+
+
+def test_dashboard_admin_can_inspect_provider_detail_page(
+    client: tuple[TestClient, Session],
+) -> None:
+    test_client, session = client
+    installation = Installation(
+        slack_team_id="TProviderDetail", team_name="Detail Team"
+    )
+    session.add(installation)
+    session.flush()
+    provider = LLMProviderAccount(
+        installation_id=installation.id,
+        provider_kind="openrouter",
+        display_name="OpenRouter detail provider",
+        status="active",
+        health_status="ok",
+        base_url="https://openrouter.ai/api/v1",
+        metadata_json={"credential_source": "env", "source": "env_bootstrap"},
+    )
+    session.add(provider)
+    session.flush()
+    model = LLMModelCatalog(
+        provider_account_id=provider.id,
+        model_identifier="deepseek/deepseek-v4-flash",
+        display_name="DeepSeek Flash",
+        is_enabled=True,
+        source="env_bootstrap",
+    )
+    session.add(model)
+    session.flush()
+    assignment = LLMTierAssignment(
+        installation_id=installation.id,
+        tier="cheap_fast",
+        model_catalog_id=model.id,
+        priority=1,
+        is_active=True,
+    )
+    pricing = LLMModelPricing(
+        provider_account_id=provider.id,
+        model_identifier=model.model_identifier,
+        input_price_per_mtok=Decimal("0.100000"),
+        output_price_per_mtok=Decimal("0.200000"),
+        currency="USD",
+        pricing_source="litellm_catalog",
+    )
+    audit = LLMConfigAudit(
+        installation_id=installation.id,
+        action="update",
+        entity_type="llm_provider_account",
+        entity_id=str(provider.id),
+        new_value={"operation": "test_provider"},
+    )
+    session.add_all([assignment, pricing, audit])
+    session.commit()
+    login(test_client)
+
+    list_response = test_client.get("/admin/models")
+    detail_response = test_client.get(f"/admin/models/providers/{provider.id}")
+
+    assert list_response.status_code == 200
+    assert f"/admin/models/providers/{provider.id}" in list_response.text
+    assert detail_response.status_code == 200
+    assert "OpenRouter detail provider" in detail_response.text
+    assert "Test Connection" in detail_response.text
+    assert "Refresh Models" in detail_response.text
+    assert "Update Missing Pricing" in detail_response.text
+    assert (
+        "All synced model rows already have pricing metadata." in detail_response.text
+    )
+    assert "All Providers" in detail_response.text
+    assert "Routed Models" in detail_response.text
+    assert "Search models" not in detail_response.text
+    assert "Needs Attention" in detail_response.text
+    assert "Model Catalog" in detail_response.text
+    assert "Add Manual Model" in detail_response.text
+    assert "DeepSeek Flash" in detail_response.text
+    assert "Cheap Fast P1" in detail_response.text
+    assert "0.100000 / 0.200000 USD" in detail_response.text
+    assert "https://openrouter.ai/api/v1" in detail_response.text
+
+
+def test_dashboard_admin_can_update_missing_provider_model_pricing(
+    client: tuple[TestClient, Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    test_client, session = client
+    installation = Installation(
+        slack_team_id="TProviderPricing", team_name="Pricing Team"
+    )
+    session.add(installation)
+    session.flush()
+    provider = LLMProviderAccount(
+        installation_id=installation.id,
+        provider_kind="openrouter",
+        display_name="OpenRouter pricing provider",
+        status="active",
+        health_status="ok",
+        metadata_json={"credential_source": "env", "source": "env_bootstrap"},
+    )
+    session.add(provider)
+    session.flush()
+    priced_model = LLMModelCatalog(
+        provider_account_id=provider.id,
+        model_identifier="openrouter/already-priced",
+        display_name="Already Priced",
+        is_enabled=True,
+        source="provider_api",
+    )
+    missing_model = LLMModelCatalog(
+        provider_account_id=provider.id,
+        model_identifier="openrouter/missing-price",
+        display_name="Missing Price",
+        is_enabled=True,
+        source="provider_api",
+    )
+    session.add_all([priced_model, missing_model])
+    session.flush()
+    session.add(
+        LLMModelPricing(
+            provider_account_id=provider.id,
+            model_identifier=priced_model.model_identifier,
+            input_price_per_mtok=Decimal("0.100000"),
+            output_price_per_mtok=Decimal("0.200000"),
+            currency="USD",
+            pricing_source="litellm_catalog",
+        )
+    )
+    session.commit()
+
+    looked_up_models: list[str] = []
+
+    def candidate_for_identifier(
+        provider_kind: str,
+        model_identifier: str,
+        *,
+        include_provider_catalog: bool = False,
+    ) -> LiteLLMModelCandidate | None:
+        looked_up_models.append(model_identifier)
+        assert provider_kind == "openrouter"
+        assert include_provider_catalog is True
+        assert model_identifier == "openrouter/missing-price"
+        return LiteLLMModelCandidate(
+            model_identifier=model_identifier,
+            display_name="Missing Price",
+            provider_kind=provider_kind,
+            source="provider_api",
+            capabilities={"max_input_tokens": 128000},
+            metadata={"litellm_provider": provider_kind},
+            input_price_per_mtok=Decimal("0.300000"),
+            output_price_per_mtok=Decimal("0.400000"),
+        )
+
+    monkeypatch.setattr(
+        "kortny.dashboard.app.model_candidate_for_identifier",
+        candidate_for_identifier,
+    )
+    login(test_client)
+
+    detail_response = test_client.get(f"/admin/models/providers/{provider.id}")
+    update_response = test_client.post(
+        f"/admin/models/providers/{provider.id}/update-pricing",
+        data={"next": f"/admin/models/providers/{provider.id}"},
+        follow_redirects=False,
+    )
+
+    assert detail_response.status_code == 200
+    assert "Looks up pricing for 1 model missing cost metadata." in detail_response.text
+    assert update_response.status_code == 303
+    session.expire_all()
+    pricing_rows = session.scalars(
+        select(LLMModelPricing).where(
+            LLMModelPricing.provider_account_id == provider.id
+        )
+    ).all()
+    assert looked_up_models == ["openrouter/missing-price"]
+    assert len(pricing_rows) == 2
+    pricing_by_model = {row.model_identifier: row for row in pricing_rows}
+    assert pricing_by_model[
+        "openrouter/already-priced"
+    ].input_price_per_mtok == Decimal("0.100000")
+    assert pricing_by_model["openrouter/missing-price"].input_price_per_mtok == Decimal(
+        "0.300000"
+    )
+    audit = session.scalar(
+        select(LLMConfigAudit).where(
+            LLMConfigAudit.installation_id == installation.id,
+            LLMConfigAudit.entity_type == "llm_provider_account",
+        )
+    )
+    assert audit is not None
+    assert audit.new_value["operation"] == "update_missing_pricing"
+    assert audit.new_value["pricing_count"] == 1
+
+
+def test_dashboard_provider_detail_shows_model_catalog_search_after_ten_rows(
+    client: tuple[TestClient, Session],
+) -> None:
+    test_client, session = client
+    installation = Installation(
+        slack_team_id="TProviderSearch", team_name="Search Team"
+    )
+    session.add(installation)
+    session.flush()
+    provider = LLMProviderAccount(
+        installation_id=installation.id,
+        provider_kind="openrouter",
+        display_name="OpenRouter search provider",
+        status="active",
+        health_status="ok",
+        metadata_json={"credential_source": "env", "source": "env_bootstrap"},
+    )
+    session.add(provider)
+    session.flush()
+    for index in range(11):
+        session.add(
+            LLMModelCatalog(
+                provider_account_id=provider.id,
+                model_identifier=f"openrouter/search-model-{index}",
+                display_name=f"Search Model {index}",
+                is_enabled=True,
+                source="provider_api",
+            )
+        )
+    session.commit()
+    login(test_client)
+
+    detail_response = test_client.get(f"/admin/models/providers/{provider.id}")
+
+    assert detail_response.status_code == 200
+    assert "Search models" in detail_response.text
+    assert "Search models by name, id, tier, pricing, or source" in detail_response.text
+    assert "11 models" in detail_response.text
+    assert "data-model-catalog-row" in detail_response.text
+    assert "No models match this search." in detail_response.text
 
 
 def test_dashboard_admin_can_assign_fallback_model_tier(

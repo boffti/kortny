@@ -6,11 +6,12 @@ import json
 import math
 import uuid
 from collections import defaultdict
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from typing import Any
+from typing import cast as type_cast
 from urllib.parse import urlencode, urlsplit, urlunsplit
 
 from sqlalchemy import Select, Text, case, cast, exists, func, or_, select
@@ -32,9 +33,15 @@ from kortny.db.models import (
     Artifact,
     ComposioConnection,
     Episode,
+    Installation,
     KnowledgeGraphEdge,
     KnowledgeGraphEntity,
     KnowledgeGraphEvidence,
+    LLMConfigAudit,
+    LLMModelCatalog,
+    LLMModelPricing,
+    LLMProviderAccount,
+    LLMTierAssignment,
     LLMUsage,
     ObserveChannelProfile,
     ProceduralSkillInvocation,
@@ -52,6 +59,7 @@ from kortny.knowledge_graph.provenance import (
     provenance_label,
     review_status,
 )
+from kortny.llm.provider_config import CONFIG_TIERS
 from kortny.tools.pdf_generator import PdfGeneratorTool
 from kortny.tools.slack_channel_history import SlackChannelHistoryTool
 from kortny.tools.slack_file_read import SlackFileReadTool
@@ -902,6 +910,72 @@ class IntegrationDashboard:
     composio_catalog: ComposioCatalogView
     tool_groups: tuple[ToolCapabilityGroup, ...]
     runtime_error: str | None
+
+
+@dataclass(frozen=True)
+class LLMProviderConfigRow:
+    provider: LLMProviderAccount
+    model_count: int
+    enabled_model_count: int
+    tier_count: int
+    credential_label: str
+    source_label: str
+    status_tone: str
+    health_tone: str
+
+
+@dataclass(frozen=True)
+class LLMModelConfigOption:
+    id: uuid.UUID
+    label: str
+    detail: str
+    enabled: bool
+
+
+@dataclass(frozen=True)
+class LLMTierConfigRow:
+    tier: str
+    label: str
+    description: str
+    primary_assignment: LLMTierAssignment | None
+    primary_model: LLMModelCatalog | None
+    primary_provider: LLMProviderAccount | None
+    fallback_assignments: tuple[
+        tuple[LLMTierAssignment, LLMModelCatalog, LLMProviderAccount], ...
+    ]
+    options: tuple[LLMModelConfigOption, ...]
+    tone: str
+
+
+@dataclass(frozen=True)
+class LLMModelConfigRow:
+    model: LLMModelCatalog
+    provider: LLMProviderAccount
+    assignment_labels: tuple[str, ...]
+    latest_pricing: LLMModelPricing | None
+    tone: str
+
+
+@dataclass(frozen=True)
+class LLMAuditConfigRow:
+    audit: LLMConfigAudit
+    label: str
+    detail: str
+    tone: str
+
+
+@dataclass(frozen=True)
+class LLMModelConfigDashboard:
+    installation_id: uuid.UUID | None
+    installation_label: str
+    metrics: tuple[SystemMetric, ...]
+    providers: tuple[LLMProviderConfigRow, ...]
+    tiers: tuple[LLMTierConfigRow, ...]
+    models: tuple[LLMModelConfigRow, ...]
+    audits: tuple[LLMAuditConfigRow, ...]
+    runtime_error: str | None
+    can_bootstrap: bool
+    empty_message: str | None
 
 
 def list_tasks(
@@ -2081,6 +2155,229 @@ def get_integration_dashboard(
         composio_catalog=composio_catalog,
         tool_groups=tool_groups,
         runtime_error=runtime_error,
+    )
+
+
+def get_llm_model_config_dashboard(
+    *,
+    session: Session,
+    runtime_settings: Settings | None = None,
+    runtime_error: str | None = None,
+    installation_id: uuid.UUID | None = None,
+) -> LLMModelConfigDashboard:
+    """Return DB-managed LLM provider/model/tier configuration state."""
+
+    resolved_installation_id = installation_id or _single_installation_id(session)
+    installation_label = _installation_label(session, resolved_installation_id)
+    if resolved_installation_id is None:
+        return LLMModelConfigDashboard(
+            installation_id=None,
+            installation_label="No Slack workspace installed",
+            metrics=(
+                SystemMetric(
+                    label="Providers",
+                    value="0",
+                    detail="Install Kortny in Slack first",
+                    tone="warning",
+                ),
+                SystemMetric(
+                    label="Models",
+                    value="0",
+                    detail="No model catalog yet",
+                    tone="neutral",
+                ),
+                SystemMetric(
+                    label="Assigned Tiers",
+                    value="0 / 5",
+                    detail="No active tier assignments",
+                    tone="warning",
+                ),
+                SystemMetric(
+                    label="Config Source",
+                    value="Unavailable",
+                    detail="No installation scope",
+                    tone="warning",
+                ),
+            ),
+            providers=(),
+            tiers=_empty_tier_rows(),
+            models=(),
+            audits=(),
+            runtime_error=runtime_error,
+            can_bootstrap=False,
+            empty_message="Kortny needs a Slack installation before model routing can be configured.",
+        )
+
+    providers = tuple(
+        session.scalars(
+            select(LLMProviderAccount)
+            .where(LLMProviderAccount.installation_id == resolved_installation_id)
+            .order_by(
+                LLMProviderAccount.status.asc(),
+                LLMProviderAccount.provider_kind.asc(),
+                LLMProviderAccount.display_name.asc(),
+            )
+        )
+    )
+    provider_ids = tuple(provider.id for provider in providers)
+    models = (
+        tuple(
+            session.scalars(
+                select(LLMModelCatalog)
+                .where(LLMModelCatalog.provider_account_id.in_(provider_ids))
+                .order_by(
+                    LLMModelCatalog.is_enabled.desc(),
+                    LLMModelCatalog.display_name.asc(),
+                    LLMModelCatalog.model_identifier.asc(),
+                )
+            )
+        )
+        if provider_ids
+        else ()
+    )
+    model_ids = tuple(model.id for model in models)
+    assignments = (
+        tuple(
+            session.scalars(
+                select(LLMTierAssignment)
+                .where(
+                    LLMTierAssignment.installation_id == resolved_installation_id,
+                    LLMTierAssignment.model_catalog_id.in_(model_ids),
+                )
+                .order_by(
+                    LLMTierAssignment.tier.asc(),
+                    LLMTierAssignment.priority.asc(),
+                    LLMTierAssignment.created_at.asc(),
+                )
+            )
+        )
+        if model_ids
+        else ()
+    )
+    audits = tuple(
+        session.scalars(
+            select(LLMConfigAudit)
+            .where(LLMConfigAudit.installation_id == resolved_installation_id)
+            .order_by(LLMConfigAudit.created_at.desc())
+            .limit(12)
+        )
+    )
+
+    provider_by_id = {provider.id: provider for provider in providers}
+    model_by_id = {model.id: model for model in models}
+    models_by_provider: dict[uuid.UUID, list[LLMModelCatalog]] = defaultdict(list)
+    for model in models:
+        models_by_provider[model.provider_account_id].append(model)
+    assignments_by_model: dict[uuid.UUID, list[LLMTierAssignment]] = defaultdict(list)
+    assignments_by_tier: dict[str, list[LLMTierAssignment]] = defaultdict(list)
+    for assignment in assignments:
+        assignments_by_model[assignment.model_catalog_id].append(assignment)
+        assignments_by_tier[assignment.tier].append(assignment)
+
+    pricing_by_model = _latest_llm_pricing_by_model(session, provider_ids)
+    provider_rows = tuple(
+        LLMProviderConfigRow(
+            provider=provider,
+            model_count=len(models_by_provider[provider.id]),
+            enabled_model_count=sum(
+                1 for model in models_by_provider[provider.id] if model.is_enabled
+            ),
+            tier_count=sum(
+                1
+                for assignment in assignments
+                if assignment.is_active
+                and model_by_id.get(assignment.model_catalog_id) is not None
+                and model_by_id[assignment.model_catalog_id].provider_account_id
+                == provider.id
+            ),
+            credential_label=_provider_credential_label(provider),
+            source_label=_provider_source_label(provider),
+            status_tone=_provider_status_tone(provider.status),
+            health_tone=_provider_health_tone(provider.health_status),
+        )
+        for provider in providers
+    )
+    model_rows = tuple(
+        LLMModelConfigRow(
+            model=model,
+            provider=provider_by_id[model.provider_account_id],
+            assignment_labels=tuple(
+                _tier_assignment_label(assignment)
+                for assignment in assignments_by_model.get(model.id, ())
+            ),
+            latest_pricing=pricing_by_model.get(
+                (model.provider_account_id, model.model_identifier)
+            ),
+            tone="success" if model.is_enabled else "neutral",
+        )
+        for model in models
+        if model.provider_account_id in provider_by_id
+    )
+    enabled_options = tuple(
+        LLMModelConfigOption(
+            id=model.id,
+            label=model.display_name or model.model_identifier,
+            detail=(
+                f"{provider_by_id[model.provider_account_id].display_name} / "
+                f"{model.model_identifier}"
+            ),
+            enabled=model.is_enabled
+            and provider_by_id[model.provider_account_id].status == "active",
+        )
+        for model in models
+        if model.provider_account_id in provider_by_id
+    )
+    tier_rows = tuple(
+        _tier_config_row(
+            tier=tier.value,
+            assignments=assignments_by_tier.get(tier.value, ()),
+            model_by_id=model_by_id,
+            provider_by_id=provider_by_id,
+            options=enabled_options,
+        )
+        for tier in CONFIG_TIERS
+    )
+    active_tier_count = sum(1 for row in tier_rows if row.primary_assignment)
+    config_source = _llm_config_source_label(providers, runtime_settings, runtime_error)
+    metrics = (
+        SystemMetric(
+            label="Providers",
+            value=f"{len(providers):,}",
+            detail=f"{sum(1 for provider in providers if provider.status == 'active'):,} active",
+            tone="success" if providers else "warning",
+        ),
+        SystemMetric(
+            label="Models",
+            value=f"{len(models):,}",
+            detail=f"{sum(1 for model in models if model.is_enabled):,} enabled",
+            tone="success" if models else "warning",
+        ),
+        SystemMetric(
+            label="Assigned Tiers",
+            value=f"{active_tier_count:,} / {len(CONFIG_TIERS):,}",
+            detail="Primary tier routes configured",
+            tone="success" if active_tier_count == len(CONFIG_TIERS) else "warning",
+        ),
+        SystemMetric(
+            label="Config Source",
+            value=config_source,
+            detail=installation_label,
+            tone="success" if providers else "warning",
+        ),
+    )
+    return LLMModelConfigDashboard(
+        installation_id=resolved_installation_id,
+        installation_label=installation_label,
+        metrics=metrics,
+        providers=provider_rows,
+        tiers=tier_rows,
+        models=model_rows,
+        audits=tuple(_audit_config_row(audit) for audit in audits),
+        runtime_error=runtime_error,
+        can_bootstrap=runtime_settings is not None,
+        empty_message=None
+        if providers
+        else "No DB-managed model config exists yet. Bootstrap from env to seed the current provider and tier assignments.",
     )
 
 
@@ -5065,11 +5362,15 @@ def _planned_workflow_trace(
             classifier_payload = payload
         if message in PLANNED_TRACE_MESSAGES and event.seq in timeline_by_seq:
             phase_events.append(timeline_by_seq[event.seq])
-        if message in {
-            "planned_task_budget_reached",
-            "planned_workflow_cost_ceiling_exceeded",
-            "scheduled_task_cost_ceiling_exceeded",
-        } and event.seq in timeline_by_seq:
+        if (
+            message
+            in {
+                "planned_task_budget_reached",
+                "planned_workflow_cost_ceiling_exceeded",
+                "scheduled_task_cost_ceiling_exceeded",
+            }
+            and event.seq in timeline_by_seq
+        ):
             budget_events.append(timeline_by_seq[event.seq])
 
     if not present:
@@ -5312,14 +5613,19 @@ def _planned_branch_trace(
     )
 
 
-def _is_planned_trace_payload(payload: dict[str, Any], event_type: TaskEventType) -> bool:
+def _is_planned_trace_payload(
+    payload: dict[str, Any], event_type: TaskEventType
+) -> bool:
     message = _payload_string(payload, "message")
     if message in PLANNED_TRACE_MESSAGES or message == "planned_workflow_classified":
         return True
     if _payload_string(payload, "adk_agent_name") in PLANNED_AGENT_NAMES:
         return True
     prompt_name = _payload_string(payload, "prompt_name")
-    return prompt_name.startswith("kortny.adk.planned_") and event_type is TaskEventType.llm_call
+    return (
+        prompt_name.startswith("kortny.adk.planned_")
+        and event_type is TaskEventType.llm_call
+    )
 
 
 def _is_planned_llm_payload(payload: dict[str, Any]) -> bool:
@@ -5870,6 +6176,206 @@ def _task_scope_filter(
     if slack_user_id:
         filters.append(Task.slack_user_id == slack_user_id)
     return filters
+
+
+def _single_installation_id(session: Session) -> uuid.UUID | None:
+    installation_ids = tuple(
+        session.scalars(
+            select(Installation.id).order_by(Installation.created_at.asc()).limit(2)
+        )
+    )
+    if len(installation_ids) == 1:
+        return type_cast(uuid.UUID, installation_ids[0])
+    return None
+
+
+def _installation_label(session: Session, installation_id: uuid.UUID | None) -> str:
+    if installation_id is None:
+        return "All workspaces"
+    installation = session.get(Installation, installation_id)
+    if installation is None:
+        return "Unknown workspace"
+    if installation.team_name:
+        return str(installation.team_name)
+    return str(installation.slack_team_id)
+
+
+def _empty_tier_rows() -> tuple[LLMTierConfigRow, ...]:
+    return tuple(
+        LLMTierConfigRow(
+            tier=tier.value,
+            label=_tier_label(tier.value),
+            description=_tier_description(tier.value),
+            primary_assignment=None,
+            primary_model=None,
+            primary_provider=None,
+            fallback_assignments=(),
+            options=(),
+            tone="warning",
+        )
+        for tier in CONFIG_TIERS
+    )
+
+
+def _tier_config_row(
+    *,
+    tier: str,
+    assignments: Sequence[LLMTierAssignment],
+    model_by_id: Mapping[uuid.UUID, LLMModelCatalog],
+    provider_by_id: Mapping[uuid.UUID, LLMProviderAccount],
+    options: Sequence[LLMModelConfigOption],
+) -> LLMTierConfigRow:
+    active_assignments = tuple(
+        assignment
+        for assignment in sorted(assignments, key=lambda row: row.priority)
+        if assignment.is_active and assignment.model_catalog_id in model_by_id
+    )
+    joined: list[tuple[LLMTierAssignment, LLMModelCatalog, LLMProviderAccount]] = []
+    for assignment in active_assignments:
+        model = model_by_id[assignment.model_catalog_id]
+        provider = provider_by_id.get(model.provider_account_id)
+        if provider is None:
+            continue
+        joined.append((assignment, model, provider))
+    primary = joined[0] if joined else None
+    primary_assignment = primary[0] if primary else None
+    primary_model = primary[1] if primary else None
+    primary_provider = primary[2] if primary else None
+    return LLMTierConfigRow(
+        tier=tier,
+        label=_tier_label(tier),
+        description=_tier_description(tier),
+        primary_assignment=primary_assignment,
+        primary_model=primary_model,
+        primary_provider=primary_provider,
+        fallback_assignments=tuple(joined[1:]),
+        options=tuple(options),
+        tone=_tier_tone(primary_model, primary_provider),
+    )
+
+
+def _latest_llm_pricing_by_model(
+    session: Session,
+    provider_ids: Sequence[uuid.UUID],
+) -> dict[tuple[uuid.UUID, str], LLMModelPricing]:
+    if not provider_ids:
+        return {}
+    pricing_rows = tuple(
+        session.scalars(
+            select(LLMModelPricing)
+            .where(LLMModelPricing.provider_account_id.in_(provider_ids))
+            .order_by(LLMModelPricing.effective_from.desc())
+        )
+    )
+    latest: dict[tuple[uuid.UUID, str], LLMModelPricing] = {}
+    for pricing in pricing_rows:
+        key = (pricing.provider_account_id, pricing.model_identifier)
+        latest.setdefault(key, pricing)
+    return latest
+
+
+def _provider_credential_label(provider: LLMProviderAccount) -> str:
+    metadata = (
+        provider.metadata_json if isinstance(provider.metadata_json, dict) else {}
+    )
+    source = metadata.get("credential_source")
+    if source == "env":
+        return "Env managed"
+    if provider.encrypted_secret_id is not None:
+        return "Encrypted secret"
+    return "Not stored"
+
+
+def _provider_source_label(provider: LLMProviderAccount) -> str:
+    metadata = (
+        provider.metadata_json if isinstance(provider.metadata_json, dict) else {}
+    )
+    source = metadata.get("source") or metadata.get("credential_source")
+    return str(source).replace("_", " ").title() if source else "Manual"
+
+
+def _provider_status_tone(status: str) -> str:
+    if status == "active":
+        return "success"
+    if status == "testing":
+        return "warning"
+    return "danger"
+
+
+def _provider_health_tone(health_status: str) -> str:
+    if health_status == "ok":
+        return "success"
+    if health_status == "degraded":
+        return "warning"
+    if health_status == "down":
+        return "danger"
+    return "neutral"
+
+
+def _tier_label(tier: str) -> str:
+    return tier.replace("_", " ").title()
+
+
+def _tier_description(tier: str) -> str:
+    descriptions = {
+        "cheap_fast": "Fast path, acknowledgements, selection, and low-risk small tasks.",
+        "standard": "Default worker reasoning for normal Slack requests.",
+        "analysis": "Planner and deeper synthesis work where quality matters more.",
+        "document": "Long-form document and artifact generation.",
+        "high_reasoning": "Highest-effort planning, audits, and difficult reasoning.",
+    }
+    return descriptions.get(tier, "Model tier route.")
+
+
+def _tier_assignment_label(assignment: LLMTierAssignment) -> str:
+    label = f"{_tier_label(assignment.tier)} P{assignment.priority}"
+    if not assignment.is_active:
+        return f"{label} inactive"
+    return label
+
+
+def _tier_tone(
+    model: LLMModelCatalog | None,
+    provider: LLMProviderAccount | None,
+) -> str:
+    if model is None or provider is None:
+        return "warning"
+    if not model.is_enabled or provider.status != "active":
+        return "danger"
+    return "success"
+
+
+def _llm_config_source_label(
+    providers: Sequence[LLMProviderAccount],
+    runtime_settings: Settings | None,
+    runtime_error: str | None,
+) -> str:
+    if providers:
+        sources = {
+            _provider_source_label(provider)
+            for provider in providers
+            if _provider_source_label(provider)
+        }
+        if len(sources) == 1:
+            return next(iter(sources))
+        return "DB Managed"
+    if runtime_settings is not None:
+        return "Env Ready"
+    if runtime_error:
+        return "Config Error"
+    return "Unconfigured"
+
+
+def _audit_config_row(audit: LLMConfigAudit) -> LLMAuditConfigRow:
+    entity_label = audit.entity_type.replace("_", " ").title()
+    action_label = audit.action.replace("_", " ").title()
+    actor = audit.actor_slack_user_id or "dashboard"
+    return LLMAuditConfigRow(
+        audit=audit,
+        label=f"{action_label} {entity_label}",
+        detail=f"{actor} / {audit.entity_id or 'unknown'}",
+        tone="danger" if audit.action in {"disable", "delete"} else "success",
+    )
 
 
 def _workspace_state_scope_filter(

@@ -1,0 +1,280 @@
+{% extends "base.html" %}
+
+{% block title %}Models - Kortny Dashboard{% endblock %}
+
+{% block content %}
+  <section class="page-heading">
+    <div>
+      <h1>Models</h1>
+      <p>Manage provider accounts, model catalog rows, and tier routing used by Kortny at runtime.</p>
+    </div>
+    <div class="heading-actions">
+      <a class="btn-ghost" href="/tasks">View Traces</a>
+      <a class="btn-ghost" href="/system">System Config</a>
+    </div>
+  </section>
+
+  {% if notice %}
+    <div class="notice notice-{{ notice_tone }}" role="status">{{ notice }}</div>
+  {% endif %}
+
+  {% if model_config.runtime_error %}
+    <div class="notice notice-danger" role="alert">
+      Runtime settings could not be loaded. DB-managed rows are still visible, but env bootstrap is unavailable.
+    </div>
+  {% endif %}
+
+  {% if model_config.empty_message %}
+    <div class="notice notice-warning" role="status">
+      {{ model_config.empty_message }}
+    </div>
+  {% endif %}
+
+  <section class="summary-grid model-config-summary" aria-label="Model configuration overview">
+    {% for metric in model_config.metrics %}
+      <div class="card metric-card metric-{{ metric.tone }}">
+        <span>{{ metric.label }}</span>
+        <strong>{{ metric.value }}</strong>
+        {% if metric.detail %}
+          <small>{{ metric.detail }}</small>
+        {% endif %}
+      </div>
+    {% endfor %}
+  </section>
+
+  <section class="model-config-toolbar" aria-label="Model config actions">
+    <div>
+      <strong>{{ model_config.installation_label }}</strong>
+      <p>Credentials stay hidden. Env-backed rows can be bootstrapped, inspected, and reassigned here.</p>
+    </div>
+    <form method="post" action="/admin/models/bootstrap" onsubmit="return confirm('Seed provider/model/tier config from current env settings? Existing DB config will not be overwritten.');">
+      <input type="hidden" name="next" value="/admin/models">
+      <button class="btn" type="submit" {{ "disabled" if not model_config.can_bootstrap else "" }}>Bootstrap from env</button>
+    </form>
+  </section>
+
+  <section class="model-tier-grid" aria-label="Model tier assignments">
+    {% for row in model_config.tiers %}
+      <article class="card model-tier-card model-tier-{{ row.tone }}">
+        <header>
+          <div>
+            <span class="badge badge-{{ row.tone }}">{{ row.tier }}</span>
+            <h2>{{ row.label }}</h2>
+          </div>
+        </header>
+        <p>{{ row.description }}</p>
+
+        <dl class="model-tier-current">
+          <div>
+            <dt>Primary</dt>
+            <dd>
+              {% if row.primary_model and row.primary_provider %}
+                <strong>{{ row.primary_model.display_name }}</strong>
+                <span>{{ row.primary_provider.display_name }} / {{ row.primary_model.model_identifier }}</span>
+              {% else %}
+                <strong>Not assigned</strong>
+                <span>Runtime will fall back to env routing if available.</span>
+              {% endif %}
+            </dd>
+          </div>
+          <div>
+            <dt>Fallbacks</dt>
+            <dd>
+              {% if row.fallback_assignments %}
+                {% for assignment, model, provider in row.fallback_assignments %}
+                  <span>P{{ assignment.priority }} {{ provider.display_name }} / {{ model.display_name }}</span>
+                {% endfor %}
+              {% else %}
+                <span>No explicit fallback rows</span>
+              {% endif %}
+            </dd>
+          </div>
+        </dl>
+
+        {% if row.options %}
+          <form class="model-tier-form" method="post" action="/admin/models/tiers/{{ row.tier }}" onsubmit="return confirm('Update the primary model for {{ row.label }}?');">
+            <input type="hidden" name="next" value="/admin/models">
+            <label>
+              Primary model
+              <select class="input" name="model_catalog_id">
+                {% for option in row.options %}
+                  <option value="{{ option.id }}" {{ "selected" if row.primary_model and row.primary_model.id == option.id else "" }} {{ "disabled" if not option.enabled else "" }}>
+                    {{ option.label }} - {{ option.detail }}
+                  </option>
+                {% endfor %}
+              </select>
+              {% if row.primary_model and row.primary_provider %}
+                <span class="model-tier-selected-value">
+                  Current: {{ row.primary_model.display_name }} - {{ row.primary_provider.display_name }} / {{ row.primary_model.model_identifier }}
+                </span>
+              {% endif %}
+            </label>
+            <button class="btn-ghost" type="submit">Save Tier</button>
+          </form>
+        {% else %}
+          <div class="model-tier-empty-action">
+            <span>No selectable models yet</span>
+            <small>Bootstrap from env or add a provider model before assigning this tier.</small>
+          </div>
+        {% endif %}
+      </article>
+    {% endfor %}
+  </section>
+
+  <section class="model-config-grid" aria-label="Provider and model catalog">
+    <article class="card detail-section model-config-panel">
+      <header>
+        <h2>Provider Accounts</h2>
+        <p>Runtime provider identities. Credentials are redacted and managed outside this page for now.</p>
+      </header>
+      <div class="table-wrap">
+        <table class="table model-config-table">
+          <caption>Provider accounts, health, credentials, and controls.</caption>
+          <thead>
+            <tr>
+              <th>Provider</th>
+              <th>Status</th>
+              <th>Health</th>
+              <th>Models</th>
+              <th>Credential</th>
+              <th>Source</th>
+              <th>Controls</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in model_config.providers %}
+              <tr>
+                <td>
+                  <strong>{{ row.provider.display_name }}</strong>
+                  <span class="identity-id">{{ row.provider.provider_kind }}</span>
+                </td>
+                <td><span class="badge badge-{{ row.status_tone }}">{{ row.provider.status }}</span></td>
+                <td><span class="badge badge-{{ row.health_tone }}">{{ row.provider.health_status }}</span></td>
+                <td>{{ row.enabled_model_count|number }} / {{ row.model_count|number }}</td>
+                <td>{{ row.credential_label }}</td>
+                <td>{{ row.source_label }}</td>
+                <td>
+                  <form method="post" action="/admin/models/providers/{{ row.provider.id }}/status" onsubmit="return confirm('Update {{ row.provider.display_name }} provider status?');">
+                    <input type="hidden" name="next" value="/admin/models">
+                    <select class="input compact-input" name="status">
+                      <option value="active" {{ "selected" if row.provider.status == "active" else "" }}>Active</option>
+                      <option value="disabled" {{ "selected" if row.provider.status == "disabled" else "" }}>Disabled</option>
+                    </select>
+                    <button class="btn-ghost" type="submit">Save</button>
+                  </form>
+                </td>
+              </tr>
+            {% else %}
+              <tr>
+                <td colspan="7">No provider accounts have been configured yet.</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </article>
+
+    <article class="card detail-section model-config-panel">
+      <header>
+        <h2>Model Catalog</h2>
+        <p>Models available for tier assignment. Disabled models remain visible for auditability.</p>
+      </header>
+      <div class="table-wrap">
+        <table class="table model-config-table">
+          <caption>Model catalog rows, pricing state, tier use, and controls.</caption>
+          <thead>
+            <tr>
+              <th>Model</th>
+              <th>Provider</th>
+              <th>Status</th>
+              <th>Used By</th>
+              <th>Pricing</th>
+              <th>Controls</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in model_config.models %}
+              <tr>
+                <td>
+                  <strong>{{ row.model.display_name }}</strong>
+                  <code class="inline-code">{{ row.model.model_identifier }}</code>
+                </td>
+                <td>{{ row.provider.display_name }}</td>
+                <td><span class="badge badge-{{ row.tone }}">{{ "enabled" if row.model.is_enabled else "disabled" }}</span></td>
+                <td>
+                  {% if row.assignment_labels %}
+                    <div class="model-tag-list">
+                      {% for label in row.assignment_labels %}
+                        <span class="badge badge-neutral">{{ label }}</span>
+                      {% endfor %}
+                    </div>
+                  {% else %}
+                    <span class="identity-id">Unused</span>
+                  {% endif %}
+                </td>
+                <td>
+                  {% if row.latest_pricing %}
+                    <span>{{ row.latest_pricing.input_price_per_mtok or "?" }} / {{ row.latest_pricing.output_price_per_mtok or "?" }} {{ row.latest_pricing.currency }}</span>
+                  {% else %}
+                    <span class="badge badge-warning">Missing</span>
+                  {% endif %}
+                </td>
+                <td>
+                  <form method="post" action="/admin/models/catalog/{{ row.model.id }}/status" onsubmit="return confirm('Update {{ row.model.display_name }} model status?');">
+                    <input type="hidden" name="next" value="/admin/models">
+                    <select class="input compact-input" name="is_enabled">
+                      <option value="true" {{ "selected" if row.model.is_enabled else "" }}>Enabled</option>
+                      <option value="false" {{ "selected" if not row.model.is_enabled else "" }}>Disabled</option>
+                    </select>
+                    <button class="btn-ghost" type="submit">Save</button>
+                  </form>
+                </td>
+              </tr>
+            {% else %}
+              <tr>
+                <td colspan="6">No model catalog rows have been configured yet.</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </article>
+  </section>
+
+  <section class="card detail-section model-config-panel">
+    <header>
+      <h2>Audit Trail</h2>
+      <p>Recent model routing and provider configuration changes.</p>
+    </header>
+    <div class="table-wrap">
+      <table class="table model-config-table">
+        <caption>Recent LLM config audit entries.</caption>
+        <thead>
+          <tr>
+            <th>Change</th>
+            <th>Actor</th>
+            <th>Entity</th>
+            <th>When</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in model_config.audits %}
+            <tr>
+              <td>
+                <span class="badge badge-{{ row.tone }}">{{ row.audit.action }}</span>
+                <strong>{{ row.label }}</strong>
+              </td>
+              <td>{{ row.audit.actor_slack_user_id or "dashboard" }}</td>
+              <td><code class="inline-code">{{ row.audit.entity_id or row.audit.entity_type }}</code></td>
+              <td>{{ row.audit.created_at|datetime }}</td>
+            </tr>
+          {% else %}
+            <tr>
+              <td colspan="4">No model configuration changes have been recorded yet.</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+{% endblock %}

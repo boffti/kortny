@@ -41,6 +41,7 @@ from kortny.dashboard.data import (
     get_dashboard_overview,
     get_integration_dashboard,
     get_knowledge_graph_dashboard,
+    get_llm_model_config_dashboard,
     get_memory_dashboard,
     get_system_health,
     get_task_detail,
@@ -73,6 +74,10 @@ from kortny.db.models import (
     DashboardOAuthState,
     DashboardUser,
     Installation,
+    LLMConfigAudit,
+    LLMModelCatalog,
+    LLMProviderAccount,
+    LLMTierAssignment,
     SlackIdentity,
     Task,
     TaskEvent,
@@ -80,6 +85,7 @@ from kortny.db.models import (
 )
 from kortny.db.session import make_session_factory
 from kortny.knowledge_graph.refresh import KnowledgeGraphRefreshService
+from kortny.llm.provider_config import bootstrap_llm_provider_config_from_env
 
 TEMPLATE_DIR = Path(__file__).parent / "templates"
 STATIC_DIR = Path(__file__).parent / "static"
@@ -692,6 +698,274 @@ def register_routes(app: FastAPI) -> None:
                 **_dashboard_context(principal, active_page="integrations"),
                 "integrations": integration_dashboard,
             },
+        )
+
+    @app.get("/admin/models", response_class=HTMLResponse)
+    def model_config(
+        request: Request,
+        principal: Annotated[DashboardPrincipal, Depends(require_admin)],
+        session: Annotated[Session, Depends(get_session)],
+        notice: Annotated[str | None, Query()] = None,
+        notice_tone: Annotated[str, Query()] = "success",
+    ) -> Response:
+        runtime_settings, runtime_error = _load_runtime_settings()
+        model_config_dashboard = get_llm_model_config_dashboard(
+            session=session,
+            runtime_settings=runtime_settings,
+            runtime_error=runtime_error,
+            installation_id=_dashboard_installation_id(session, principal),
+        )
+        return templates.TemplateResponse(
+            request=request,
+            name="model_config.html",
+            context={
+                **_dashboard_context(principal, active_page="model_config"),
+                "model_config": model_config_dashboard,
+                "notice": notice,
+                "notice_tone": _notice_tone(notice_tone),
+            },
+        )
+
+    @app.post("/admin/models/bootstrap")
+    async def model_config_bootstrap(
+        request: Request,
+        principal: Annotated[DashboardPrincipal, Depends(require_admin)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> RedirectResponse:
+        form = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
+        next_path = _safe_next_path(_form_value(form, "next") or "/admin/models")
+        runtime_settings, runtime_error = _load_runtime_settings()
+        if runtime_settings is None:
+            return _redirect_with_notice(
+                next_path,
+                f"Runtime settings are not available: {runtime_error or 'unknown error'}",
+                tone="danger",
+            )
+        installation_id = _dashboard_installation_id(session, principal)
+        if installation_id is None:
+            return _redirect_with_notice(
+                next_path,
+                "Kortny needs a Slack installation before model config can be bootstrapped.",
+                tone="danger",
+            )
+        result = bootstrap_llm_provider_config_from_env(
+            session,
+            installation_id=installation_id,
+            settings=runtime_settings,
+        )
+        session.commit()
+        if result.created:
+            return _redirect_with_notice(
+                next_path,
+                "Seeded model provider config from env.",
+            )
+        return _redirect_with_notice(
+            next_path,
+            f"Bootstrap skipped: {result.skipped_reason or 'config already exists'}.",
+            tone="neutral",
+        )
+
+    @app.post("/admin/models/tiers/{tier}")
+    async def model_config_update_tier(
+        request: Request,
+        tier: str,
+        principal: Annotated[DashboardPrincipal, Depends(require_admin)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> RedirectResponse:
+        form = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
+        next_path = _safe_next_path(_form_value(form, "next") or "/admin/models")
+        installation_id = _dashboard_installation_id(session, principal)
+        if installation_id is None:
+            return _redirect_with_notice(
+                next_path,
+                "No installation scope is available for this model tier.",
+                tone="danger",
+            )
+        if tier not in {
+            "cheap_fast",
+            "standard",
+            "analysis",
+            "document",
+            "high_reasoning",
+        }:
+            return _redirect_with_notice(
+                next_path,
+                "Unknown model tier.",
+                tone="danger",
+            )
+        try:
+            model_catalog_id = UUID(_form_value(form, "model_catalog_id"))
+        except ValueError:
+            return _redirect_with_notice(
+                next_path,
+                "Choose a valid model for this tier.",
+                tone="danger",
+            )
+        model = _get_scoped_model_catalog(
+            session,
+            model_catalog_id=model_catalog_id,
+            installation_id=installation_id,
+        )
+        if model is None:
+            return _redirect_with_notice(
+                next_path,
+                "That model is not available for this installation.",
+                tone="danger",
+            )
+        provider = session.get(LLMProviderAccount, model.provider_account_id)
+        if provider is None or provider.status != "active" or not model.is_enabled:
+            return _redirect_with_notice(
+                next_path,
+                "Only enabled models on active providers can be assigned to a tier.",
+                tone="danger",
+            )
+        assignment = session.scalar(
+            select(LLMTierAssignment).where(
+                LLMTierAssignment.installation_id == installation_id,
+                LLMTierAssignment.tier == tier,
+                LLMTierAssignment.priority == 1,
+            )
+        )
+        previous_value = _tier_assignment_audit_payload(assignment, session)
+        if assignment is None:
+            assignment = LLMTierAssignment(
+                installation_id=installation_id,
+                tier=tier,
+                model_catalog_id=model.id,
+                priority=1,
+                is_active=True,
+            )
+            session.add(assignment)
+            action = "create"
+        else:
+            assignment.model_catalog_id = model.id
+            assignment.is_active = True
+            action = "update"
+        session.flush()
+        _append_llm_config_audit(
+            session,
+            installation_id=installation_id,
+            principal=principal,
+            action=action,
+            entity_type="llm_tier_assignment",
+            entity_id=str(assignment.id),
+            previous_value=previous_value,
+            new_value=_tier_assignment_audit_payload(assignment, session),
+        )
+        session.commit()
+        return _redirect_with_notice(
+            next_path,
+            f"{tier.replace('_', ' ').title()} now routes to {model.display_name}.",
+        )
+
+    @app.post("/admin/models/providers/{provider_account_id}/status")
+    async def model_config_update_provider_status(
+        request: Request,
+        provider_account_id: UUID,
+        principal: Annotated[DashboardPrincipal, Depends(require_admin)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> RedirectResponse:
+        form = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
+        next_path = _safe_next_path(_form_value(form, "next") or "/admin/models")
+        new_status = _form_value(form, "status")
+        if new_status not in {"active", "disabled"}:
+            return _redirect_with_notice(
+                next_path,
+                "Provider status must be active or disabled.",
+                tone="danger",
+            )
+        installation_id = _dashboard_installation_id(session, principal)
+        provider = _get_scoped_provider_account(
+            session,
+            provider_account_id=provider_account_id,
+            installation_id=installation_id,
+        )
+        if provider is None:
+            return _redirect_with_notice(
+                next_path,
+                "Provider account not found.",
+                tone="danger",
+            )
+        previous_value = {
+            "status": provider.status,
+            "provider_kind": provider.provider_kind,
+            "display_name": provider.display_name,
+        }
+        provider.status = new_status
+        _append_llm_config_audit(
+            session,
+            installation_id=provider.installation_id,
+            principal=principal,
+            action="enable" if new_status == "active" else "disable",
+            entity_type="llm_provider_account",
+            entity_id=str(provider.id),
+            previous_value=previous_value,
+            new_value={
+                "status": provider.status,
+                "provider_kind": provider.provider_kind,
+                "display_name": provider.display_name,
+            },
+        )
+        session.commit()
+        return _redirect_with_notice(
+            next_path,
+            f"{provider.display_name} marked {new_status}.",
+            tone="success" if new_status == "active" else "warning",
+        )
+
+    @app.post("/admin/models/catalog/{model_catalog_id}/status")
+    async def model_config_update_model_status(
+        request: Request,
+        model_catalog_id: UUID,
+        principal: Annotated[DashboardPrincipal, Depends(require_admin)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> RedirectResponse:
+        form = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
+        next_path = _safe_next_path(_form_value(form, "next") or "/admin/models")
+        enabled_value = _form_value(form, "is_enabled")
+        if enabled_value not in {"true", "false"}:
+            return _redirect_with_notice(
+                next_path,
+                "Model status must be enabled or disabled.",
+                tone="danger",
+            )
+        installation_id = _dashboard_installation_id(session, principal)
+        model = _get_scoped_model_catalog(
+            session,
+            model_catalog_id=model_catalog_id,
+            installation_id=installation_id,
+        )
+        if model is None:
+            return _redirect_with_notice(
+                next_path,
+                "Model not found.",
+                tone="danger",
+            )
+        previous_value = {
+            "is_enabled": model.is_enabled,
+            "model_identifier": model.model_identifier,
+            "display_name": model.display_name,
+        }
+        model.is_enabled = enabled_value == "true"
+        _append_llm_config_audit(
+            session,
+            installation_id=installation_id or _model_installation_id(session, model),
+            principal=principal,
+            action="enable" if model.is_enabled else "disable",
+            entity_type="llm_model_catalog",
+            entity_id=str(model.id),
+            previous_value=previous_value,
+            new_value={
+                "is_enabled": model.is_enabled,
+                "model_identifier": model.model_identifier,
+                "display_name": model.display_name,
+            },
+        )
+        session.commit()
+        return _redirect_with_notice(
+            next_path,
+            f"{model.display_name} {'enabled' if model.is_enabled else 'disabled'}.",
+            tone="success" if model.is_enabled else "warning",
         )
 
     @app.get("/composio", response_class=HTMLResponse)
@@ -1847,18 +2121,14 @@ def register_routes(app: FastAPI) -> None:
                 title=_form_value(form, "title"),
                 schedule_text=_form_value(form, "schedule_text"),
                 task_input=_form_value(form, "task_input"),
-                planned_cost_ceiling_usd=_form_value(
-                    form, "planned_cost_ceiling_usd"
-                ),
+                planned_cost_ceiling_usd=_form_value(form, "planned_cost_ceiling_usd"),
                 delivery_kind=_form_value(form, "delivery_kind"),
                 delivery_slack_user_id=_form_value(form, "delivery_slack_user_id"),
                 delivery_slack_channel_id=_form_value(
                     form, "delivery_slack_channel_id"
                 ),
                 delivery_slack_thread_ts=_form_value(form, "delivery_slack_thread_ts"),
-                artifact_delivery_policy=_form_value(
-                    form, "artifact_delivery_policy"
-                ),
+                artifact_delivery_policy=_form_value(form, "artifact_delivery_policy"),
             )
         except (LookupError, PermissionError) as exc:
             session.rollback()
@@ -2519,6 +2789,107 @@ def _dashboard_context(
         "dashboard_slack_user_id": principal.slack_user_id or "",
         "dashboard_user_id": principal.dashboard_user_id,
     }
+
+
+def _dashboard_installation_id(
+    session: Session,
+    principal: DashboardPrincipal,
+) -> UUID | None:
+    if principal.installation_id is not None:
+        return cast(UUID, principal.installation_id)
+    installation_ids = tuple(
+        session.scalars(
+            select(Installation.id).order_by(Installation.created_at).limit(2)
+        )
+    )
+    if len(installation_ids) == 1:
+        return cast(UUID, installation_ids[0])
+    return None
+
+
+def _get_scoped_provider_account(
+    session: Session,
+    *,
+    provider_account_id: UUID,
+    installation_id: UUID | None,
+) -> LLMProviderAccount | None:
+    provider = session.get(LLMProviderAccount, provider_account_id)
+    if provider is None:
+        return None
+    if installation_id is not None and provider.installation_id != installation_id:
+        return None
+    return provider
+
+
+def _get_scoped_model_catalog(
+    session: Session,
+    *,
+    model_catalog_id: UUID,
+    installation_id: UUID | None,
+) -> LLMModelCatalog | None:
+    model = session.get(LLMModelCatalog, model_catalog_id)
+    if model is None:
+        return None
+    provider = session.get(LLMProviderAccount, model.provider_account_id)
+    if provider is None:
+        return None
+    if installation_id is not None and provider.installation_id != installation_id:
+        return None
+    return model
+
+
+def _model_installation_id(session: Session, model: LLMModelCatalog) -> UUID:
+    provider = session.get(LLMProviderAccount, model.provider_account_id)
+    if provider is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+    return cast(UUID, provider.installation_id)
+
+
+def _tier_assignment_audit_payload(
+    assignment: LLMTierAssignment | None,
+    session: Session,
+) -> dict[str, object] | None:
+    if assignment is None:
+        return None
+    model = session.get(LLMModelCatalog, assignment.model_catalog_id)
+    provider = (
+        session.get(LLMProviderAccount, model.provider_account_id)
+        if model is not None
+        else None
+    )
+    return {
+        "tier": assignment.tier,
+        "priority": assignment.priority,
+        "is_active": assignment.is_active,
+        "model_catalog_id": str(assignment.model_catalog_id),
+        "model_identifier": model.model_identifier if model is not None else None,
+        "provider_account_id": str(provider.id) if provider is not None else None,
+        "provider_kind": provider.provider_kind if provider is not None else None,
+    }
+
+
+def _append_llm_config_audit(
+    session: Session,
+    *,
+    installation_id: UUID,
+    principal: DashboardPrincipal,
+    action: str,
+    entity_type: str,
+    entity_id: str,
+    previous_value: dict[str, object] | None,
+    new_value: dict[str, object] | None,
+) -> None:
+    session.add(
+        LLMConfigAudit(
+            installation_id=installation_id,
+            actor_slack_user_id=principal.slack_user_id or principal.display_name,
+            action=action,
+            entity_type=entity_type,
+            entity_id=entity_id,
+            previous_value=previous_value,
+            new_value=new_value,
+        )
+    )
 
 
 def _set_dashboard_session(request: Request, principal: DashboardPrincipal) -> None:

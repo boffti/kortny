@@ -35,7 +35,12 @@ from kortny.db.models import (
     KnowledgeGraphEdge,
     KnowledgeGraphEntity,
     KnowledgeGraphEvidence,
+    LLMConfigAudit,
+    LLMModelCatalog,
+    LLMModelPricing,
     LLMProvider,
+    LLMProviderAccount,
+    LLMTierAssignment,
     LLMUsage,
     ModelPricing,
     Schedule,
@@ -613,7 +618,9 @@ def test_dashboard_member_schedules_are_scoped_to_their_user(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     assert TEST_POSTGRES_URL is not None
-    installation = Installation(slack_team_id="TMemberSchedules", team_name="Member Team")
+    installation = Installation(
+        slack_team_id="TMemberSchedules", team_name="Member Team"
+    )
     db_session.add(installation)
     db_session.flush()
     own_schedule = create_dashboard_schedule(
@@ -808,6 +815,127 @@ def test_dashboard_admin_can_manage_dashboard_user_role_and_status(
     session.refresh(member)
     assert member.role == "admin"
     assert member.status == "disabled"
+
+
+def test_dashboard_admin_model_config_page_shows_provider_state(
+    client: tuple[TestClient, Session],
+) -> None:
+    test_client, session = client
+    installation = Installation(slack_team_id="TModels", team_name="Models Team")
+    session.add(installation)
+    session.flush()
+    provider = LLMProviderAccount(
+        installation_id=installation.id,
+        provider_kind="openrouter",
+        display_name="OpenRouter env provider",
+        status="active",
+        health_status="unknown",
+        metadata_json={"credential_source": "env", "source": "env_bootstrap"},
+    )
+    session.add(provider)
+    session.flush()
+    model = LLMModelCatalog(
+        provider_account_id=provider.id,
+        model_identifier="deepseek/deepseek-v4-flash",
+        display_name="DeepSeek Flash",
+        is_enabled=True,
+        source="env_bootstrap",
+    )
+    session.add(model)
+    session.flush()
+    session.add(
+        LLMTierAssignment(
+            installation_id=installation.id,
+            tier="cheap_fast",
+            model_catalog_id=model.id,
+            priority=1,
+            is_active=True,
+        )
+    )
+    session.commit()
+    login(test_client)
+
+    response = test_client.get("/admin/models")
+
+    assert response.status_code == 200
+    assert "Models" in response.text
+    assert "Models Team" in response.text
+    assert "OpenRouter env provider" in response.text
+    assert "DeepSeek Flash" in response.text
+    assert "cheap_fast" in response.text
+    assert "Env managed" in response.text
+
+
+def test_dashboard_admin_can_update_primary_model_tier_and_audit(
+    client: tuple[TestClient, Session],
+) -> None:
+    test_client, session = client
+    installation = Installation(slack_team_id="TModelEdit", team_name="Model Edit Team")
+    session.add(installation)
+    session.flush()
+    provider = LLMProviderAccount(
+        installation_id=installation.id,
+        provider_kind="openrouter",
+        display_name="OpenRouter env provider",
+        status="active",
+        health_status="ok",
+        metadata_json={"credential_source": "env", "source": "env_bootstrap"},
+    )
+    session.add(provider)
+    session.flush()
+    old_model = LLMModelCatalog(
+        provider_account_id=provider.id,
+        model_identifier="deepseek/deepseek-v4-flash",
+        display_name="DeepSeek Flash",
+        is_enabled=True,
+        source="env_bootstrap",
+    )
+    new_model = LLMModelCatalog(
+        provider_account_id=provider.id,
+        model_identifier="deepseek/deepseek-v4-pro",
+        display_name="DeepSeek Pro",
+        is_enabled=True,
+        source="manual",
+    )
+    session.add_all([old_model, new_model])
+    session.flush()
+    assignment = LLMTierAssignment(
+        installation_id=installation.id,
+        tier="cheap_fast",
+        model_catalog_id=old_model.id,
+        priority=1,
+        is_active=True,
+    )
+    session.add(assignment)
+    session.commit()
+    login(test_client)
+
+    response = test_client.post(
+        "/admin/models/tiers/cheap_fast",
+        data={"model_catalog_id": str(new_model.id), "next": "/admin/models"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert "notice=" in response.headers["location"]
+    session.expire_all()
+    updated_assignment = session.scalar(
+        select(LLMTierAssignment).where(
+            LLMTierAssignment.id == assignment.id,
+        )
+    )
+    assert updated_assignment is not None
+    assert updated_assignment.model_catalog_id == new_model.id
+    audit = session.scalar(
+        select(LLMConfigAudit).where(
+            LLMConfigAudit.installation_id == installation.id,
+            LLMConfigAudit.entity_type == "llm_tier_assignment",
+        )
+    )
+    assert audit is not None
+    assert audit.action == "update"
+    assert audit.previous_value["model_identifier"] == "deepseek/deepseek-v4-flash"
+    assert audit.new_value["model_identifier"] == "deepseek/deepseek-v4-pro"
 
 
 def test_dashboard_renders_theme_toggle(
@@ -3163,7 +3291,9 @@ def create_dashboard_schedule_run(
         if status in {TaskStatus.succeeded, TaskStatus.failed, TaskStatus.cancelled}
         else None
     )
-    user_id = schedule.delivery_slack_user_id or schedule.owner_slack_user_id or "USchedule"
+    user_id = (
+        schedule.delivery_slack_user_id or schedule.owner_slack_user_id or "USchedule"
+    )
     channel_id = schedule.delivery_slack_channel_id or "DSchedule"
     thread_ts = schedule.delivery_slack_thread_ts or channel_id
     task = Task(
@@ -3325,6 +3455,11 @@ def cleanup_database(session: Session) -> None:
         SlackIdentity,
         TaskEvent,
         Task,
+        LLMConfigAudit,
+        LLMTierAssignment,
+        LLMModelPricing,
+        LLMModelCatalog,
+        LLMProviderAccount,
         ModelPricing,
         EncryptedSecret,
         Installation,

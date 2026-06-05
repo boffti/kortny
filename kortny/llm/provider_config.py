@@ -15,12 +15,14 @@ from sqlalchemy.orm import Session
 
 from kortny.config import Settings
 from kortny.db.models import (
+    EncryptedSecret,
     LLMConfigAudit,
     LLMModelCatalog,
     LLMProviderAccount,
     LLMTierAssignment,
 )
 from kortny.llm.routing import ModelRouter, ModelRouteTier
+from kortny.secrets import decrypt_secret_value
 
 ENV_BOOTSTRAP_SOURCE = "env_bootstrap"
 ENV_CREDENTIAL_SOURCE = "env"
@@ -65,6 +67,7 @@ class ResolvedLLMModel:
     priority: int
     credential_source: str
     base_url: str | None = None
+    api_version: str | None = None
     extra_headers: Mapping[str, str] = field(
         default_factory=lambda: MappingProxyType({})
     )
@@ -89,6 +92,8 @@ class ResolvedLLMModel:
         }
         if self.base_url is not None:
             kwargs["api_base"] = self.base_url
+        if self.api_version is not None:
+            kwargs["api_version"] = self.api_version
         if self.extra_headers:
             kwargs["extra_headers"] = dict(self.extra_headers)
         return kwargs
@@ -277,7 +282,10 @@ class ModelConfigService:
                 LLMTierAssignment.priority.asc(), LLMTierAssignment.created_at.asc()
             )
         )
-        return list(self.session.execute(statement).all())
+        return [
+            (assignment, catalog, provider)
+            for assignment, catalog, provider in self.session.execute(statement).all()
+        ]
 
     def _db_chain(
         self,
@@ -290,7 +298,10 @@ class ModelConfigService:
         skipped_count = 0
         models: list[ResolvedLLMModel] = []
         for assignment, catalog, provider in rows:
-            api_key = self._resolve_api_key(provider)
+            try:
+                api_key = self._resolve_api_key(provider)
+            except Exception:
+                api_key = None
             if api_key is None:
                 skipped_count += 1
                 continue
@@ -306,6 +317,7 @@ class ModelConfigService:
                     priority=assignment.priority,
                     credential_source=self._credential_source(provider),
                     base_url=provider.base_url,
+                    api_version=_api_version_from_metadata(provider.metadata_json),
                     extra_headers=_extra_headers_from_metadata(provider.metadata_json),
                 )
             )
@@ -361,7 +373,8 @@ class ModelConfigService:
     def _resolve_api_key(self, provider: LLMProviderAccount) -> str | None:
         credential_source = self._credential_source(provider)
         if credential_source == ENV_CREDENTIAL_SOURCE:
-            return cast(str, self.settings.llm_api_key)
+            api_key: str = self.settings.llm_api_key
+            return api_key
         if credential_source == SECRET_CREDENTIAL_SOURCE:
             if provider.encrypted_secret_id is None or self.secret_resolver is None:
                 return None
@@ -501,6 +514,28 @@ def bootstrap_llm_provider_config_from_env(
     )
 
 
+def secret_resolver_from_settings(
+    session: Session,
+    *,
+    settings: Settings,
+) -> SecretResolver | None:
+    """Build a DB secret resolver when encrypted provider keys are enabled."""
+
+    if settings.encryption_key is None:
+        return None
+
+    def resolve(secret_id: uuid.UUID) -> str:
+        secret = session.get(EncryptedSecret, secret_id)
+        if secret is None:
+            raise LLMModelConfigError("Encrypted secret was not found")
+        return decrypt_secret_value(
+            bytes(secret.ciphertext),
+            encryption_key=cast(str, settings.encryption_key),
+        )
+
+    return resolve
+
+
 def _extra_headers_from_metadata(metadata: Mapping[str, object]) -> Mapping[str, str]:
     raw_headers = metadata.get("extra_headers")
     if not isinstance(raw_headers, Mapping):
@@ -511,3 +546,11 @@ def _extra_headers_from_metadata(metadata: Mapping[str, object]) -> Mapping[str,
         if isinstance(key, str) and isinstance(value, str)
     }
     return MappingProxyType(headers)
+
+
+def _api_version_from_metadata(metadata: Mapping[str, object]) -> str | None:
+    value = metadata.get("api_version")
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    return normalized or None

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import secrets
+import uuid
 from collections.abc import AsyncIterator, Iterator, Mapping
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
@@ -73,9 +74,11 @@ from kortny.db.models import (
     ComposioConnection,
     DashboardOAuthState,
     DashboardUser,
+    EncryptedSecret,
     Installation,
     LLMConfigAudit,
     LLMModelCatalog,
+    LLMModelPricing,
     LLMProviderAccount,
     LLMTierAssignment,
     SlackIdentity,
@@ -85,7 +88,21 @@ from kortny.db.models import (
 )
 from kortny.db.session import make_session_factory
 from kortny.knowledge_graph.refresh import KnowledgeGraphRefreshService
-from kortny.llm.provider_config import bootstrap_llm_provider_config_from_env
+from kortny.llm.litellm_catalog import (
+    LiteLLMModelCandidate,
+    check_litellm_provider_key,
+    default_probe_model,
+    litellm_endpoint_model_candidates,
+    litellm_model_candidates,
+    litellm_provider_option,
+)
+from kortny.llm.provider_config import (
+    ENV_CREDENTIAL_SOURCE,
+    SECRET_CREDENTIAL_SOURCE,
+    bootstrap_llm_provider_config_from_env,
+    secret_resolver_from_settings,
+)
+from kortny.secrets import SecretEncryptionError, encrypt_secret_value
 
 TEMPLATE_DIR = Path(__file__).parent / "templates"
 STATIC_DIR = Path(__file__).parent / "static"
@@ -765,6 +782,408 @@ def register_routes(app: FastAPI) -> None:
             tone="neutral",
         )
 
+    @app.post("/admin/models/providers")
+    async def model_config_create_provider(
+        request: Request,
+        principal: Annotated[DashboardPrincipal, Depends(require_admin)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> RedirectResponse:
+        form = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
+        next_path = _safe_next_path(_form_value(form, "next") or "/admin/models")
+        installation_id = _dashboard_installation_id(session, principal)
+        if installation_id is None:
+            return _redirect_with_notice(
+                next_path,
+                "No installation scope is available for this provider.",
+                tone="danger",
+            )
+        runtime_settings, runtime_error = _load_runtime_settings()
+        if runtime_settings is None:
+            return _redirect_with_notice(
+                next_path,
+                f"Runtime settings are not available: {runtime_error or 'unknown error'}",
+                tone="danger",
+            )
+        if runtime_settings.encryption_key is None:
+            return _redirect_with_notice(
+                next_path,
+                "Set ENCRYPTION_KEY before saving dashboard-managed provider keys.",
+                tone="danger",
+            )
+        selected_provider_kind = _form_value(form, "provider_kind")
+        provider_kind_source = (
+            _form_value(form, "provider_kind_custom")
+            if selected_provider_kind == "__custom__"
+            else selected_provider_kind
+        )
+        provider_kind = _normalize_provider_kind(provider_kind_source)
+        if provider_kind is None:
+            return _redirect_with_notice(
+                next_path,
+                "Choose a provider or enter a custom LiteLLM provider name.",
+                tone="danger",
+            )
+        provider_option = litellm_provider_option(provider_kind)
+        api_key = _form_value(form, "api_key")
+        if not api_key:
+            return _redirect_with_notice(
+                next_path,
+                "API key is required for dashboard-managed providers.",
+                tone="danger",
+            )
+        display_name = _form_value(form, "display_name") or (
+            f"{provider_option.label} provider"
+            if provider_option is not None
+            else f"{provider_kind.replace('_', ' ').title()} provider"
+        )
+        base_url = _optional_form_value(form, "base_url")
+        if base_url is None and provider_option is not None:
+            base_url = provider_option.default_base_url
+        if (
+            base_url is None
+            and provider_option is not None
+            and provider_option.needs_base_url
+        ):
+            return _redirect_with_notice(
+                next_path,
+                f"{provider_option.label} needs a base URL before it can be saved.",
+                tone="danger",
+            )
+        api_version = _optional_form_value(form, "api_version")
+        try:
+            secret = EncryptedSecret(
+                installation_id=installation_id,
+                secret_type=f"llm_provider:{provider_kind}:{uuid.uuid4().hex}",
+                ciphertext=encrypt_secret_value(
+                    api_key,
+                    encryption_key=runtime_settings.encryption_key,
+                ),
+            )
+        except SecretEncryptionError as exc:
+            return _redirect_with_notice(next_path, str(exc), tone="danger")
+        session.add(secret)
+        session.flush()
+        provider = LLMProviderAccount(
+            installation_id=installation_id,
+            provider_kind=provider_kind,
+            display_name=display_name,
+            status="active",
+            health_status="unknown",
+            base_url=base_url,
+            encrypted_secret_id=secret.id,
+            metadata_json={
+                "credential_source": SECRET_CREDENTIAL_SOURCE,
+                "source": "dashboard",
+                "litellm_provider": provider_kind,
+                "api_version": api_version,
+                "setup_version": "hig_186_slice_4b",
+            },
+        )
+        session.add(provider)
+        session.flush()
+        candidates = list(litellm_model_candidates(provider.provider_kind, limit=24))
+        discovery_error: str | None = None
+        try:
+            endpoint_candidates = litellm_endpoint_model_candidates(
+                provider.provider_kind,
+                api_key=api_key,
+                api_base=provider.base_url,
+                limit=24,
+            )
+            candidates = _merge_model_candidates(endpoint_candidates, candidates)
+        except Exception as exc:
+            discovery_error = type(exc).__name__
+        imported_count, pricing_count = _upsert_model_candidates(
+            session,
+            provider=provider,
+            candidates=tuple(candidates[:24]),
+        )
+        _append_llm_config_audit(
+            session,
+            installation_id=installation_id,
+            principal=principal,
+            action="create",
+            entity_type="llm_provider_account",
+            entity_id=str(provider.id),
+            previous_value=None,
+            new_value={
+                **_provider_account_audit_payload(provider),
+                "operation": "create_provider",
+                "imported_count": imported_count,
+                "pricing_count": pricing_count,
+                "discovery_error": discovery_error,
+            },
+        )
+        session.commit()
+        suffix = (
+            f" Model discovery hit {discovery_error}; saved local catalog rows only."
+            if discovery_error
+            else ""
+        )
+        return _redirect_with_notice(
+            next_path,
+            f"Added {provider.display_name} and imported {imported_count} model row{'' if imported_count == 1 else 's'}.{suffix}",
+            tone="warning" if discovery_error else "success",
+        )
+
+    @app.post("/admin/models/providers/{provider_account_id}/test")
+    async def model_config_test_provider(
+        request: Request,
+        provider_account_id: UUID,
+        principal: Annotated[DashboardPrincipal, Depends(require_admin)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> RedirectResponse:
+        form = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
+        next_path = _safe_next_path(_form_value(form, "next") or "/admin/models")
+        installation_id = _dashboard_installation_id(session, principal)
+        provider = _get_scoped_provider_account(
+            session,
+            provider_account_id=provider_account_id,
+            installation_id=installation_id,
+        )
+        if provider is None:
+            return _redirect_with_notice(
+                next_path, "Provider not found.", tone="danger"
+            )
+        runtime_settings, runtime_error = _load_runtime_settings()
+        if runtime_settings is None:
+            return _redirect_with_notice(
+                next_path,
+                f"Runtime settings are not available: {runtime_error or 'unknown error'}",
+                tone="danger",
+            )
+        api_key = _provider_api_key(session, provider, runtime_settings)
+        if api_key is None:
+            return _redirect_with_notice(
+                next_path,
+                "Provider credentials are not available for testing.",
+                tone="danger",
+            )
+        model_identifier = _optional_form_value(
+            form, "model_identifier"
+        ) or _provider_probe_model(session, provider)
+        previous_value = _provider_account_audit_payload(provider)
+        try:
+            ok = check_litellm_provider_key(
+                provider_kind=provider.provider_kind,
+                api_key=api_key,
+                model=model_identifier,
+                api_base=provider.base_url,
+            )
+        except Exception as exc:
+            provider.health_status = "down"
+            _append_llm_config_audit(
+                session,
+                installation_id=provider.installation_id,
+                principal=principal,
+                action="update",
+                entity_type="llm_provider_account",
+                entity_id=str(provider.id),
+                previous_value=previous_value,
+                new_value={
+                    **_provider_account_audit_payload(provider),
+                    "operation": "test_provider",
+                    "test_model": model_identifier,
+                    "test_result": "failed",
+                    "error_type": type(exc).__name__,
+                },
+            )
+            session.commit()
+            return _redirect_with_notice(
+                next_path,
+                f"{provider.display_name} test failed: {type(exc).__name__}.",
+                tone="danger",
+            )
+        provider.health_status = "ok" if ok else "down"
+        _append_llm_config_audit(
+            session,
+            installation_id=provider.installation_id,
+            principal=principal,
+            action="update",
+            entity_type="llm_provider_account",
+            entity_id=str(provider.id),
+            previous_value=previous_value,
+            new_value={
+                **_provider_account_audit_payload(provider),
+                "operation": "test_provider",
+                "test_model": model_identifier,
+                "test_result": "ok" if ok else "failed",
+            },
+        )
+        session.commit()
+        return _redirect_with_notice(
+            next_path,
+            f"{provider.display_name} test {'passed' if ok else 'failed'}.",
+            tone="success" if ok else "danger",
+        )
+
+    @app.post("/admin/models/providers/{provider_account_id}/import-models")
+    async def model_config_import_provider_models(
+        request: Request,
+        provider_account_id: UUID,
+        principal: Annotated[DashboardPrincipal, Depends(require_admin)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> RedirectResponse:
+        form = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
+        next_path = _safe_next_path(_form_value(form, "next") or "/admin/models")
+        limit = _positive_int(_form_value(form, "limit"), default=24, maximum=100)
+        installation_id = _dashboard_installation_id(session, principal)
+        provider = _get_scoped_provider_account(
+            session,
+            provider_account_id=provider_account_id,
+            installation_id=installation_id,
+        )
+        if provider is None:
+            return _redirect_with_notice(
+                next_path, "Provider not found.", tone="danger"
+            )
+        runtime_settings, _runtime_error = _load_runtime_settings()
+        api_key = (
+            _provider_api_key(session, provider, runtime_settings)
+            if runtime_settings is not None
+            else None
+        )
+        candidates = list(litellm_model_candidates(provider.provider_kind, limit=limit))
+        discovery_error: str | None = None
+        if api_key is not None:
+            try:
+                endpoint_candidates = litellm_endpoint_model_candidates(
+                    provider.provider_kind,
+                    api_key=api_key,
+                    api_base=provider.base_url,
+                    limit=limit,
+                )
+                candidates = _merge_model_candidates(endpoint_candidates, candidates)
+            except Exception as exc:
+                discovery_error = type(exc).__name__
+        imported_count, pricing_count = _upsert_model_candidates(
+            session,
+            provider=provider,
+            candidates=tuple(candidates[:limit]),
+        )
+        _append_llm_config_audit(
+            session,
+            installation_id=provider.installation_id,
+            principal=principal,
+            action="update",
+            entity_type="llm_provider_account",
+            entity_id=str(provider.id),
+            previous_value=None,
+            new_value={
+                "operation": "import_models",
+                "provider_account_id": str(provider.id),
+                "provider_kind": provider.provider_kind,
+                "imported_count": imported_count,
+                "pricing_count": pricing_count,
+                "candidate_count": len(candidates[:limit]),
+                "discovery_error": discovery_error,
+            },
+        )
+        session.commit()
+        tone = "warning" if discovery_error else "success"
+        suffix = (
+            f" Endpoint discovery failed with {discovery_error}."
+            if discovery_error
+            else ""
+        )
+        return _redirect_with_notice(
+            next_path,
+            f"Imported {imported_count} model row{'' if imported_count == 1 else 's'} and {pricing_count} pricing row{'' if pricing_count == 1 else 's'} for {provider.display_name}.{suffix}",
+            tone=tone,
+        )
+
+    @app.post("/admin/models/catalog")
+    async def model_config_add_model(
+        request: Request,
+        principal: Annotated[DashboardPrincipal, Depends(require_admin)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> RedirectResponse:
+        form = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
+        next_path = _safe_next_path(_form_value(form, "next") or "/admin/models")
+        installation_id = _dashboard_installation_id(session, principal)
+        try:
+            provider_account_id = UUID(_form_value(form, "provider_account_id"))
+        except ValueError:
+            return _redirect_with_notice(
+                next_path,
+                "Choose a valid provider for this model.",
+                tone="danger",
+            )
+        provider = _get_scoped_provider_account(
+            session,
+            provider_account_id=provider_account_id,
+            installation_id=installation_id,
+        )
+        if provider is None:
+            return _redirect_with_notice(
+                next_path, "Provider not found.", tone="danger"
+            )
+        model_identifier = _form_value(form, "model_identifier")
+        if not model_identifier:
+            return _redirect_with_notice(
+                next_path,
+                "Model identifier is required.",
+                tone="danger",
+            )
+        existing = session.scalar(
+            select(LLMModelCatalog).where(
+                LLMModelCatalog.provider_account_id == provider.id,
+                LLMModelCatalog.model_identifier == model_identifier,
+            )
+        )
+        if existing is not None:
+            return _redirect_with_notice(
+                next_path,
+                "That model already exists for this provider.",
+                tone="warning",
+            )
+        display_name = _form_value(form, "display_name") or model_identifier
+        model = LLMModelCatalog(
+            provider_account_id=provider.id,
+            model_identifier=model_identifier,
+            display_name=display_name,
+            is_enabled=True,
+            source="manual",
+            capabilities_json={},
+            metadata_json={"source": "dashboard_manual"},
+        )
+        session.add(model)
+        session.flush()
+        candidate = _local_litellm_candidate(provider.provider_kind, model_identifier)
+        pricing_created = 0
+        if candidate is not None:
+            model.capabilities_json = candidate.capabilities
+            model.metadata_json = {
+                **model.metadata_json,
+                "litellm_metadata": candidate.metadata,
+            }
+            pricing_created = _upsert_pricing_from_candidate(
+                session,
+                provider=provider,
+                candidate=candidate,
+            )
+        _append_llm_config_audit(
+            session,
+            installation_id=provider.installation_id,
+            principal=principal,
+            action="create",
+            entity_type="llm_model_catalog",
+            entity_id=str(model.id),
+            previous_value=None,
+            new_value={
+                "provider_account_id": str(provider.id),
+                "model_identifier": model.model_identifier,
+                "display_name": model.display_name,
+                "source": model.source,
+                "pricing_created": pricing_created,
+            },
+        )
+        session.commit()
+        return _redirect_with_notice(
+            next_path,
+            f"Added model {model.display_name}.",
+        )
+
     @app.post("/admin/models/tiers/{tier}")
     async def model_config_update_tier(
         request: Request,
@@ -819,11 +1238,12 @@ def register_routes(app: FastAPI) -> None:
                 "Only enabled models on active providers can be assigned to a tier.",
                 tone="danger",
             )
+        priority = _positive_int(_form_value(form, "priority"), default=1, maximum=5)
         assignment = session.scalar(
             select(LLMTierAssignment).where(
                 LLMTierAssignment.installation_id == installation_id,
                 LLMTierAssignment.tier == tier,
-                LLMTierAssignment.priority == 1,
+                LLMTierAssignment.priority == priority,
             )
         )
         previous_value = _tier_assignment_audit_payload(assignment, session)
@@ -832,7 +1252,7 @@ def register_routes(app: FastAPI) -> None:
                 installation_id=installation_id,
                 tier=tier,
                 model_catalog_id=model.id,
-                priority=1,
+                priority=priority,
                 is_active=True,
             )
             session.add(assignment)
@@ -853,9 +1273,10 @@ def register_routes(app: FastAPI) -> None:
             new_value=_tier_assignment_audit_payload(assignment, session),
         )
         session.commit()
+        route_label = "primary" if priority == 1 else f"fallback P{priority}"
         return _redirect_with_notice(
             next_path,
-            f"{tier.replace('_', ' ').title()} now routes to {model.display_name}.",
+            f"{tier.replace('_', ' ').title()} {route_label} now routes to {model.display_name}.",
         )
 
     @app.post("/admin/models/providers/{provider_account_id}/status")
@@ -886,7 +1307,7 @@ def register_routes(app: FastAPI) -> None:
                 "Provider account not found.",
                 tone="danger",
             )
-        previous_value = {
+        previous_value: dict[str, object] = {
             "status": provider.status,
             "provider_kind": provider.provider_kind,
             "display_name": provider.display_name,
@@ -2612,6 +3033,21 @@ def _form_value(form: dict[str, list[str]], name: str) -> str:
     return value.strip()
 
 
+def _optional_form_value(form: dict[str, list[str]], name: str) -> str | None:
+    value = _form_value(form, name)
+    return value or None
+
+
+def _positive_int(value: str, *, default: int, maximum: int) -> int:
+    try:
+        parsed = int(value)
+    except ValueError:
+        return default
+    if parsed < 1:
+        return default
+    return min(parsed, maximum)
+
+
 def _resolve_composio_auth_config_id(
     client: ComposioClient,
     *,
@@ -2796,14 +3232,14 @@ def _dashboard_installation_id(
     principal: DashboardPrincipal,
 ) -> UUID | None:
     if principal.installation_id is not None:
-        return cast(UUID, principal.installation_id)
+        return principal.installation_id
     installation_ids = tuple(
         session.scalars(
             select(Installation.id).order_by(Installation.created_at).limit(2)
         )
     )
     if len(installation_ids) == 1:
-        return cast(UUID, installation_ids[0])
+        return installation_ids[0]
     return None
 
 
@@ -2842,7 +3278,193 @@ def _model_installation_id(session: Session, model: LLMModelCatalog) -> UUID:
     provider = session.get(LLMProviderAccount, model.provider_account_id)
     if provider is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
-    return cast(UUID, provider.installation_id)
+    return provider.installation_id
+
+
+def _normalize_provider_kind(value: str) -> str | None:
+    normalized = value.strip().lower().replace("-", "_")
+    if not normalized:
+        return None
+    allowed_chars = set("abcdefghijklmnopqrstuvwxyz0123456789_")
+    if any(char not in allowed_chars for char in normalized):
+        return None
+    return normalized
+
+
+def _provider_api_key(
+    session: Session,
+    provider: LLMProviderAccount,
+    settings: Settings | None,
+) -> str | None:
+    if settings is None:
+        return None
+    metadata = (
+        provider.metadata_json if isinstance(provider.metadata_json, dict) else {}
+    )
+    credential_source = metadata.get("credential_source")
+    if credential_source == ENV_CREDENTIAL_SOURCE:
+        return settings.llm_api_key
+    if provider.encrypted_secret_id is None:
+        return None
+    resolver = secret_resolver_from_settings(session, settings=settings)
+    if resolver is None:
+        return None
+    try:
+        return resolver(provider.encrypted_secret_id)
+    except Exception:
+        return None
+
+
+def _provider_probe_model(session: Session, provider: LLMProviderAccount) -> str:
+    existing_model = session.scalar(
+        select(LLMModelCatalog.model_identifier)
+        .where(
+            LLMModelCatalog.provider_account_id == provider.id,
+            LLMModelCatalog.is_enabled.is_(True),
+        )
+        .order_by(LLMModelCatalog.created_at.asc())
+        .limit(1)
+    )
+    return default_probe_model(provider.provider_kind, fallback=existing_model)
+
+
+def _merge_model_candidates(
+    primary: tuple[LiteLLMModelCandidate, ...],
+    fallback: list[LiteLLMModelCandidate],
+) -> list[LiteLLMModelCandidate]:
+    merged: list[LiteLLMModelCandidate] = []
+    seen: set[str] = set()
+    for candidate in (*primary, *fallback):
+        if candidate.model_identifier in seen:
+            continue
+        seen.add(candidate.model_identifier)
+        merged.append(candidate)
+    return merged
+
+
+def _upsert_model_candidates(
+    session: Session,
+    *,
+    provider: LLMProviderAccount,
+    candidates: tuple[LiteLLMModelCandidate, ...],
+) -> tuple[int, int]:
+    imported_count = 0
+    pricing_count = 0
+    for candidate in candidates:
+        existing = session.scalar(
+            select(LLMModelCatalog).where(
+                LLMModelCatalog.provider_account_id == provider.id,
+                LLMModelCatalog.model_identifier == candidate.model_identifier,
+            )
+        )
+        if existing is None:
+            existing = LLMModelCatalog(
+                provider_account_id=provider.id,
+                model_identifier=candidate.model_identifier,
+                display_name=candidate.display_name,
+                is_enabled=True,
+                source=candidate.source,
+                capabilities_json=candidate.capabilities,
+                metadata_json={
+                    "source": candidate.source,
+                    "litellm_metadata": candidate.metadata,
+                },
+            )
+            session.add(existing)
+            imported_count += 1
+        else:
+            existing.capabilities_json = {
+                **(
+                    existing.capabilities_json
+                    if isinstance(existing.capabilities_json, dict)
+                    else {}
+                ),
+                **candidate.capabilities,
+            }
+            existing.metadata_json = {
+                **(
+                    existing.metadata_json
+                    if isinstance(existing.metadata_json, dict)
+                    else {}
+                ),
+                "litellm_metadata": candidate.metadata,
+            }
+        pricing_count += _upsert_pricing_from_candidate(
+            session,
+            provider=provider,
+            candidate=candidate,
+        )
+    return imported_count, pricing_count
+
+
+def _upsert_pricing_from_candidate(
+    session: Session,
+    *,
+    provider: LLMProviderAccount,
+    candidate: LiteLLMModelCandidate,
+) -> int:
+    if (
+        candidate.input_price_per_mtok is None
+        and candidate.output_price_per_mtok is None
+    ):
+        return 0
+    existing_pricing = session.scalar(
+        select(LLMModelPricing.id)
+        .where(
+            LLMModelPricing.provider_account_id == provider.id,
+            LLMModelPricing.model_identifier == candidate.model_identifier,
+            LLMModelPricing.pricing_source == "litellm_catalog",
+        )
+        .limit(1)
+    )
+    if existing_pricing is not None:
+        return 0
+    session.add(
+        LLMModelPricing(
+            provider_account_id=provider.id,
+            model_identifier=candidate.model_identifier,
+            input_price_per_mtok=candidate.input_price_per_mtok,
+            output_price_per_mtok=candidate.output_price_per_mtok,
+            currency="USD",
+            pricing_source="litellm_catalog",
+            metadata_json={
+                "source": candidate.source,
+                "litellm_metadata": candidate.metadata,
+            },
+        )
+    )
+    return 1
+
+
+def _local_litellm_candidate(
+    provider_kind: str,
+    model_identifier: str,
+) -> LiteLLMModelCandidate | None:
+    for candidate in litellm_model_candidates(provider_kind, limit=500):
+        if candidate.model_identifier == model_identifier:
+            return candidate
+    return None
+
+
+def _provider_account_audit_payload(
+    provider: LLMProviderAccount,
+) -> dict[str, object]:
+    metadata = (
+        provider.metadata_json if isinstance(provider.metadata_json, dict) else {}
+    )
+    return {
+        "provider_kind": provider.provider_kind,
+        "display_name": provider.display_name,
+        "status": provider.status,
+        "health_status": provider.health_status,
+        "base_url_configured": provider.base_url is not None,
+        "credential_source": metadata.get("credential_source"),
+        "source": metadata.get("source"),
+        "api_version_configured": bool(metadata.get("api_version")),
+        "encrypted_secret_id": str(provider.encrypted_secret_id)
+        if provider.encrypted_secret_id is not None
+        else None,
+    }
 
 
 def _tier_assignment_audit_payload(

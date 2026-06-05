@@ -25,12 +25,14 @@ from kortny.llm.openrouter import OpenRouterProvider
 from kortny.llm.provider_config import (
     ModelConfigService,
     bootstrap_llm_provider_config_from_env,
+    secret_resolver_from_settings,
 )
 from kortny.llm.routing import ModelRoute, ModelRouteTier
 from kortny.llm.runtime_config import (
     create_provider_for_selection,
     select_runtime_model,
 )
+from kortny.secrets import encrypt_secret_value
 
 TEST_POSTGRES_URL = os.environ.get("KORTNY_TEST_POSTGRES_URL")
 
@@ -357,6 +359,84 @@ def test_model_config_service_skips_secret_backed_candidate_without_resolver(
     assert chain.skipped_candidate_count == 1
     assert chain.primary.model == "env/model"
     assert chain.primary.provider_account_id is None
+
+
+def test_model_config_service_resolves_secret_backed_provider_credentials(
+    db_session: Session,
+) -> None:
+    installation = create_installation(db_session)
+    encryption_key = "test-encryption-key"
+    encrypted_secret = EncryptedSecret(
+        installation_id=installation.id,
+        secret_type="llm_provider:azure:test",
+        ciphertext=encrypt_secret_value(
+            "db-provider-key",
+            encryption_key=encryption_key,
+        ),
+    )
+    db_session.add(encrypted_secret)
+    db_session.flush()
+    provider = LLMProviderAccount(
+        installation_id=installation.id,
+        provider_kind="azure",
+        display_name="Azure dashboard provider",
+        status="active",
+        health_status="ok",
+        base_url="https://example.openai.azure.com",
+        encrypted_secret_id=encrypted_secret.id,
+        metadata_json={
+            "credential_source": "encrypted_secret",
+            "api_version": "2024-10-21",
+        },
+    )
+    db_session.add(provider)
+    db_session.flush()
+    model = LLMModelCatalog(
+        provider_account_id=provider.id,
+        model_identifier="azure/gpt-4o-mini",
+        display_name="Azure GPT-4o Mini",
+        is_enabled=True,
+        capabilities_json={},
+        source="manual",
+        metadata_json={},
+    )
+    db_session.add(model)
+    db_session.flush()
+    db_session.add(
+        LLMTierAssignment(
+            installation_id=installation.id,
+            tier=ModelRouteTier.standard.value,
+            model_catalog_id=model.id,
+            priority=1,
+            is_active=True,
+            routing_json={},
+        )
+    )
+    db_session.flush()
+    settings = build_settings(ENCRYPTION_KEY=encryption_key)
+    service = ModelConfigService(
+        db_session,
+        settings=settings,
+        secret_resolver=secret_resolver_from_settings(
+            db_session,
+            settings=settings,
+        ),
+    )
+
+    chain = service.resolve_model_chain(
+        installation_id=installation.id,
+        tier=ModelRouteTier.standard,
+    )
+
+    assert chain.source == "db"
+    assert chain.primary.provider_kind == "azure"
+    assert chain.primary.api_key == "db-provider-key"
+    assert chain.primary.adk_litellm_kwargs == {
+        "model": "azure/gpt-4o-mini",
+        "api_key": "db-provider-key",
+        "api_base": "https://example.openai.azure.com",
+        "api_version": "2024-10-21",
+    }
 
 
 def test_runtime_selection_builds_provider_from_db_model_config(

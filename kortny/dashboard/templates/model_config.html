@@ -53,6 +53,86 @@
     </form>
   </section>
 
+  {% if model_config.installation_id %}
+    <section class="model-config-actions-grid" aria-label="Provider and model setup">
+      <article class="card detail-section model-config-panel">
+        <header>
+          <h2>Connect Provider</h2>
+          <p>Choose a provider and paste its API key. Kortny syncs available models automatically.</p>
+        </header>
+        <form class="model-config-form" method="post" action="/admin/models/providers">
+          <input type="hidden" name="next" value="/admin/models">
+          <label>
+            Provider
+            <select class="input" name="provider_kind" required>
+              <option value="">Select a provider...</option>
+              {% for option in model_config.provider_options %}
+                <option value="{{ option.kind }}">{{ option.label }}</option>
+              {% endfor %}
+              <option value="__custom__">Other LiteLLM provider</option>
+            </select>
+            <small>Kortny handles the LiteLLM provider slug behind the scenes.</small>
+          </label>
+          <label>
+            API key
+            <input class="input" type="password" name="api_key" autocomplete="off" placeholder="Paste provider API key" required>
+            <small>The key is encrypted before it is stored.</small>
+          </label>
+          <label>
+            Display name
+            <input class="input" name="display_name" placeholder="Optional, e.g. OpenRouter production">
+          </label>
+          <details class="model-config-advanced">
+            <summary>Advanced connection settings</summary>
+            <div class="model-config-advanced-body">
+              <label>
+                Custom LiteLLM provider
+                <input class="input" name="provider_kind_custom" placeholder="Only when Other LiteLLM provider is selected">
+                <small>Use this only for a provider not listed above.</small>
+              </label>
+              <div class="model-config-form-grid">
+                <label>
+                  Base URL
+                  <input class="input" name="base_url" placeholder="Azure, Ollama, OpenAI-compatible, or proxy URL">
+                </label>
+                <label>
+                  API version
+                  <input class="input" name="api_version" placeholder="Azure only, if required">
+                </label>
+              </div>
+              <p>Most hosted providers only need an API key. Base URL is for Azure, Ollama, OpenAI-compatible gateways, or self-hosted endpoints.</p>
+            </div>
+          </details>
+          <button class="btn" type="submit">Connect & Sync Models</button>
+        </form>
+      </article>
+
+      <article class="card detail-section model-config-panel model-config-guidance-panel">
+        <header>
+          <h2>Routing Workflow</h2>
+          <p>Provider setup and model selection are separate so runtime routing stays auditable.</p>
+        </header>
+        <div class="model-config-guidance">
+          <div>
+            <span>1</span>
+            <strong>Connect</strong>
+            <small>Save an encrypted provider key for this workspace.</small>
+          </div>
+          <div>
+            <span>2</span>
+            <strong>Sync</strong>
+            <small>Kortny imports available models and pricing metadata.</small>
+          </div>
+          <div>
+            <span>3</span>
+            <strong>Route</strong>
+            <small>Assign primary and fallback models to each runtime tier.</small>
+          </div>
+        </div>
+      </article>
+    </section>
+  {% endif %}
+
   <section class="model-tier-grid" aria-label="Model tier assignments">
     {% for row in model_config.tiers %}
       <article class="card model-tier-card model-tier-{{ row.tone }}">
@@ -111,6 +191,27 @@
             </label>
             <button class="btn-ghost" type="submit">Save Tier</button>
           </form>
+          <form class="model-tier-form model-tier-fallback-form" method="post" action="/admin/models/tiers/{{ row.tier }}" onsubmit="return confirm('Update the fallback model for {{ row.label }}?');">
+            <input type="hidden" name="next" value="/admin/models">
+            <input type="hidden" name="priority" value="2">
+            {% set fallback = row.fallback_assignments[0] if row.fallback_assignments else none %}
+            <label>
+              Fallback model
+              <select class="input" name="model_catalog_id">
+                {% for option in row.options %}
+                  <option value="{{ option.id }}" {{ "selected" if fallback and fallback[1].id == option.id else "" }} {{ "disabled" if not option.enabled else "" }}>
+                    {{ option.label }} - {{ option.detail }}
+                  </option>
+                {% endfor %}
+              </select>
+              {% if fallback %}
+                <span class="model-tier-selected-value">
+                  Current fallback: {{ fallback[1].display_name }} - {{ fallback[2].display_name }} / {{ fallback[1].model_identifier }}
+                </span>
+              {% endif %}
+            </label>
+            <button class="btn-ghost" type="submit">Save Fallback</button>
+          </form>
         {% else %}
           <div class="model-tier-empty-action">
             <span>No selectable models yet</span>
@@ -125,7 +226,7 @@
     <article class="card detail-section model-config-panel">
       <header>
         <h2>Provider Accounts</h2>
-        <p>Runtime provider identities. Credentials are redacted and managed outside this page for now.</p>
+        <p>Connected provider identities. Credentials stay encrypted and redacted.</p>
       </header>
       <div class="table-wrap">
         <table class="table model-config-table">
@@ -153,7 +254,7 @@
                 <td>{{ row.enabled_model_count|number }} / {{ row.model_count|number }}</td>
                 <td>{{ row.credential_label }}</td>
                 <td>{{ row.source_label }}</td>
-                <td>
+                <td class="model-config-controls">
                   <form method="post" action="/admin/models/providers/{{ row.provider.id }}/status" onsubmit="return confirm('Update {{ row.provider.display_name }} provider status?');">
                     <input type="hidden" name="next" value="/admin/models">
                     <select class="input compact-input" name="status">
@@ -161,6 +262,10 @@
                       <option value="disabled" {{ "selected" if row.provider.status == "disabled" else "" }}>Disabled</option>
                     </select>
                     <button class="btn-ghost" type="submit">Save</button>
+                  </form>
+                  <form method="post" action="/admin/models/providers/{{ row.provider.id }}/test">
+                    <input type="hidden" name="next" value="/admin/models">
+                    <button class="btn-ghost" type="submit">Test</button>
                   </form>
                 </td>
               </tr>

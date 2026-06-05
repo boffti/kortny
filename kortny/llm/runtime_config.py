@@ -14,6 +14,7 @@ from kortny.llm.provider_config import (
     ModelConfigService,
     ResolvedLLMModel,
     ResolvedLLMModelChain,
+    secret_resolver_from_settings,
 )
 from kortny.llm.routing import ModelRoute
 from kortny.llm.types import LLMProvider
@@ -61,6 +62,7 @@ def select_runtime_model(
     service = model_config_service or ModelConfigService(
         session,
         settings=settings,
+        secret_resolver=secret_resolver_from_settings(session, settings=settings),
     )
     chain = service.resolve_model_chain(
         installation_id=installation_id,

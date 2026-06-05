@@ -59,6 +59,10 @@ from kortny.knowledge_graph.provenance import (
     provenance_label,
     review_status,
 )
+from kortny.llm.litellm_catalog import (
+    LiteLLMProviderOption,
+    litellm_provider_options,
+)
 from kortny.llm.provider_config import CONFIG_TIERS
 from kortny.tools.pdf_generator import PdfGeneratorTool
 from kortny.tools.slack_channel_history import SlackChannelHistoryTool
@@ -969,6 +973,7 @@ class LLMModelConfigDashboard:
     installation_id: uuid.UUID | None
     installation_label: str
     metrics: tuple[SystemMetric, ...]
+    provider_options: tuple[LiteLLMProviderOption, ...]
     providers: tuple[LLMProviderConfigRow, ...]
     tiers: tuple[LLMTierConfigRow, ...]
     models: tuple[LLMModelConfigRow, ...]
@@ -2199,6 +2204,7 @@ def get_llm_model_config_dashboard(
                     tone="warning",
                 ),
             ),
+            provider_options=litellm_provider_options(),
             providers=(),
             tiers=_empty_tier_rows(),
             models=(),
@@ -2369,6 +2375,7 @@ def get_llm_model_config_dashboard(
         installation_id=resolved_installation_id,
         installation_label=installation_label,
         metrics=metrics,
+        provider_options=litellm_provider_options(),
         providers=provider_rows,
         tiers=tier_rows,
         models=model_rows,

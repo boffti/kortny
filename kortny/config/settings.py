@@ -187,10 +187,14 @@ class Settings(BaseSettings):
     kortny_version: str | None = Field(default=None, validation_alias="KORTNY_VERSION")
 
     postgres_url: str = Field(validation_alias="POSTGRES_URL", min_length=1)
+    encryption_key: str | None = Field(
+        default=None, validation_alias="ENCRYPTION_KEY"
+    )
 
     @field_validator(
         "composio_api_key",
         "brave_search_api_key",
+        "encryption_key",
         "llm_cheap_model",
         "llm_standard_model",
         "llm_analysis_model",

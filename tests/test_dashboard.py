@@ -54,10 +54,12 @@ from kortny.db.models import (
 )
 from kortny.db.session import make_engine, make_session_factory, normalize_database_url
 from kortny.knowledge_graph.refresh import KG_CHANNEL_REFRESH_REQUESTED_MESSAGE
+from kortny.llm.litellm_catalog import LiteLLMModelCandidate
 from kortny.observe.assessment import (
     CHANNEL_ASSESSMENT_REQUESTED_MESSAGE,
     CHANNEL_ASSESSMENT_SUPPRESS_SLACK_POST_KEY,
 )
+from kortny.secrets import decrypt_secret_value, encrypt_secret_value
 from tests.db_safety import assert_safe_test_database
 
 TEST_POSTGRES_URL = os.environ.get("KORTNY_TEST_POSTGRES_URL")
@@ -864,6 +866,12 @@ def test_dashboard_admin_model_config_page_shows_provider_state(
     assert "DeepSeek Flash" in response.text
     assert "cheap_fast" in response.text
     assert "Env managed" in response.text
+    assert "Select a provider..." in response.text
+    assert "Other LiteLLM provider" in response.text
+    assert "Advanced connection settings" in response.text
+    assert "Routing Workflow" in response.text
+    assert "Connect & Sync Models" in response.text
+    assert "Import Models" not in response.text
 
 
 def test_dashboard_admin_can_update_primary_model_tier_and_audit(
@@ -936,6 +944,267 @@ def test_dashboard_admin_can_update_primary_model_tier_and_audit(
     assert audit.action == "update"
     assert audit.previous_value["model_identifier"] == "deepseek/deepseek-v4-flash"
     assert audit.new_value["model_identifier"] == "deepseek/deepseek-v4-pro"
+
+
+def test_dashboard_admin_can_create_secret_backed_model_provider(
+    client: tuple[TestClient, Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    test_client, session = client
+    set_runtime_settings_env(monkeypatch)
+    monkeypatch.setenv("ENCRYPTION_KEY", "dashboard-encryption-key")
+    installation = Installation(
+        slack_team_id="TProviderCreate", team_name="Provider Team"
+    )
+    session.add(installation)
+    session.commit()
+    candidate = LiteLLMModelCandidate(
+        model_identifier="openai/test-model",
+        display_name="OpenAI Test Model",
+        provider_kind="openai",
+        source="litellm_catalog",
+        capabilities={"max_input_tokens": 128000},
+        metadata={"litellm_provider": "openai"},
+        input_price_per_mtok=Decimal("0.150000"),
+        output_price_per_mtok=Decimal("0.600000"),
+    )
+    monkeypatch.setattr(
+        "kortny.dashboard.app.litellm_model_candidates",
+        lambda _provider_kind, *, limit=24: (candidate,),
+    )
+    monkeypatch.setattr(
+        "kortny.dashboard.app.litellm_endpoint_model_candidates",
+        lambda _provider_kind, *, api_key, api_base=None, limit=24: (),
+    )
+    login(test_client)
+
+    response = test_client.post(
+        "/admin/models/providers",
+        data={
+            "provider_kind": "openai",
+            "display_name": "OpenAI team key",
+            "api_key": "sk-dashboard-provider-secret",
+            "base_url": "https://api.openai.com/v1",
+            "api_version": "",
+            "next": "/admin/models",
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    session.expire_all()
+    provider = session.scalar(
+        select(LLMProviderAccount).where(
+            LLMProviderAccount.installation_id == installation.id,
+            LLMProviderAccount.provider_kind == "openai",
+        )
+    )
+    assert provider is not None
+    assert provider.display_name == "OpenAI team key"
+    assert provider.metadata_json["credential_source"] == "encrypted_secret"
+    assert provider.base_url == "https://api.openai.com/v1"
+    assert provider.encrypted_secret_id is not None
+    model = session.scalar(
+        select(LLMModelCatalog).where(
+            LLMModelCatalog.provider_account_id == provider.id,
+            LLMModelCatalog.model_identifier == "openai/test-model",
+        )
+    )
+    assert model is not None
+    assert model.display_name == "OpenAI Test Model"
+    secret = session.get(EncryptedSecret, provider.encrypted_secret_id)
+    assert secret is not None
+    assert b"sk-dashboard-provider-secret" not in secret.ciphertext
+    assert (
+        decrypt_secret_value(
+            bytes(secret.ciphertext),
+            encryption_key="dashboard-encryption-key",
+        )
+        == "sk-dashboard-provider-secret"
+    )
+    audit = session.scalar(
+        select(LLMConfigAudit).where(
+            LLMConfigAudit.entity_type == "llm_provider_account",
+            LLMConfigAudit.entity_id == str(provider.id),
+        )
+    )
+    assert audit is not None
+    assert audit.action == "create"
+    assert audit.new_value["operation"] == "create_provider"
+    assert audit.new_value["imported_count"] == 1
+    assert "sk-dashboard-provider-secret" not in str(audit.new_value)
+
+
+def test_dashboard_admin_can_test_provider_and_import_models(
+    client: tuple[TestClient, Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    test_client, session = client
+    set_runtime_settings_env(monkeypatch)
+    monkeypatch.setenv("ENCRYPTION_KEY", "dashboard-encryption-key")
+    installation = Installation(
+        slack_team_id="TProviderImport", team_name="Import Team"
+    )
+    session.add(installation)
+    session.flush()
+    secret = EncryptedSecret(
+        installation_id=installation.id,
+        secret_type="llm_provider:openrouter:test",
+        ciphertext=encrypt_secret_value(
+            "provider-test-key",
+            encryption_key="dashboard-encryption-key",
+        ),
+    )
+    session.add(secret)
+    session.flush()
+    provider = LLMProviderAccount(
+        installation_id=installation.id,
+        provider_kind="openrouter",
+        display_name="OpenRouter dashboard provider",
+        status="active",
+        health_status="unknown",
+        encrypted_secret_id=secret.id,
+        metadata_json={"credential_source": "encrypted_secret", "source": "dashboard"},
+    )
+    session.add(provider)
+    session.commit()
+
+    monkeypatch.setattr(
+        "kortny.dashboard.app.check_litellm_provider_key",
+        lambda **_kwargs: True,
+    )
+    candidate = LiteLLMModelCandidate(
+        model_identifier="openrouter/test-model",
+        display_name="OpenRouter Test Model",
+        provider_kind="openrouter",
+        source="litellm_catalog",
+        capabilities={"max_input_tokens": 128000},
+        metadata={"litellm_provider": "openrouter"},
+        input_price_per_mtok=Decimal("0.250000"),
+        output_price_per_mtok=Decimal("1.000000"),
+    )
+    monkeypatch.setattr(
+        "kortny.dashboard.app.litellm_model_candidates",
+        lambda _provider_kind, *, limit=24: (candidate,),
+    )
+    monkeypatch.setattr(
+        "kortny.dashboard.app.litellm_endpoint_model_candidates",
+        lambda _provider_kind, *, api_key, api_base=None, limit=24: (),
+    )
+    login(test_client)
+
+    test_response = test_client.post(
+        f"/admin/models/providers/{provider.id}/test",
+        data={"next": "/admin/models"},
+        follow_redirects=False,
+    )
+    import_response = test_client.post(
+        f"/admin/models/providers/{provider.id}/import-models",
+        data={"limit": "24", "next": "/admin/models"},
+        follow_redirects=False,
+    )
+
+    assert test_response.status_code == 303
+    assert import_response.status_code == 303
+    session.expire_all()
+    updated_provider = session.get(LLMProviderAccount, provider.id)
+    assert updated_provider is not None
+    assert updated_provider.health_status == "ok"
+    model = session.scalar(
+        select(LLMModelCatalog).where(
+            LLMModelCatalog.provider_account_id == provider.id,
+            LLMModelCatalog.model_identifier == "openrouter/test-model",
+        )
+    )
+    assert model is not None
+    assert model.display_name == "OpenRouter Test Model"
+    pricing = session.scalar(
+        select(LLMModelPricing).where(
+            LLMModelPricing.provider_account_id == provider.id,
+            LLMModelPricing.model_identifier == "openrouter/test-model",
+        )
+    )
+    assert pricing is not None
+    assert pricing.input_price_per_mtok == Decimal("0.250000")
+
+
+def test_dashboard_admin_can_assign_fallback_model_tier(
+    client: tuple[TestClient, Session],
+) -> None:
+    test_client, session = client
+    installation = Installation(
+        slack_team_id="TModelFallback", team_name="Fallback Team"
+    )
+    session.add(installation)
+    session.flush()
+    provider = LLMProviderAccount(
+        installation_id=installation.id,
+        provider_kind="openrouter",
+        display_name="OpenRouter env provider",
+        status="active",
+        health_status="ok",
+        metadata_json={"credential_source": "env", "source": "env_bootstrap"},
+    )
+    session.add(provider)
+    session.flush()
+    primary_model = LLMModelCatalog(
+        provider_account_id=provider.id,
+        model_identifier="deepseek/deepseek-v4-pro",
+        display_name="DeepSeek Pro",
+        is_enabled=True,
+        source="env_bootstrap",
+    )
+    fallback_model = LLMModelCatalog(
+        provider_account_id=provider.id,
+        model_identifier="deepseek/deepseek-v4-flash",
+        display_name="DeepSeek Flash",
+        is_enabled=True,
+        source="manual",
+    )
+    session.add_all([primary_model, fallback_model])
+    session.flush()
+    session.add(
+        LLMTierAssignment(
+            installation_id=installation.id,
+            tier="standard",
+            model_catalog_id=primary_model.id,
+            priority=1,
+            is_active=True,
+        )
+    )
+    session.commit()
+    login(test_client)
+
+    response = test_client.post(
+        "/admin/models/tiers/standard",
+        data={
+            "model_catalog_id": str(fallback_model.id),
+            "priority": "2",
+            "next": "/admin/models",
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    fallback_assignment = session.scalar(
+        select(LLMTierAssignment).where(
+            LLMTierAssignment.installation_id == installation.id,
+            LLMTierAssignment.tier == "standard",
+            LLMTierAssignment.priority == 2,
+        )
+    )
+    assert fallback_assignment is not None
+    assert fallback_assignment.model_catalog_id == fallback_model.id
+    audit = session.scalar(
+        select(LLMConfigAudit).where(
+            LLMConfigAudit.installation_id == installation.id,
+            LLMConfigAudit.entity_type == "llm_tier_assignment",
+            LLMConfigAudit.entity_id == str(fallback_assignment.id),
+        )
+    )
+    assert audit is not None
+    assert audit.action == "create"
+    assert audit.new_value["priority"] == 2
 
 
 def test_dashboard_renders_theme_toggle(

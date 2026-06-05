@@ -36,6 +36,7 @@ from kortny.llm.provider_config import (
     ModelConfigService,
     ResolvedLLMModel,
     ResolvedLLMModelChain,
+    secret_resolver_from_settings,
 )
 from kortny.llm.routing import ModelRoute, ModelRouter, ModelRouteTier
 from kortny.llm.runtime_config import db_provider_name
@@ -1034,6 +1035,10 @@ class AdkAgentRuntime:
             self._model_config_service = ModelConfigService(
                 self.session,
                 settings=self.settings,
+                secret_resolver=secret_resolver_from_settings(
+                    self.session,
+                    settings=self.settings,
+                ),
             )
         return self._model_config_service
 

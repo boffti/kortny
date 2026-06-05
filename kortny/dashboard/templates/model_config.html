@@ -51,16 +51,6 @@
       {% endfor %}
     </section>
 
-    <section class="model-config-toolbar" aria-label="Model config actions">
-      <div>
-        <strong>{{ model_config.installation_label }}</strong>
-        <p>Credentials stay hidden. Env-backed rows can be bootstrapped, inspected, and reassigned here.</p>
-      </div>
-      <form method="post" action="/admin/models/bootstrap" onsubmit="return confirm('Seed provider/model/tier config from current env settings? Existing DB config will not be overwritten.');">
-        <input type="hidden" name="next" value="/admin/models">
-        <button class="btn" type="submit" {{ "disabled" if not model_config.can_bootstrap else "" }}>Bootstrap from env</button>
-      </form>
-    </section>
 
     <section class="model-tier-grid" aria-label="Model tier assignments">
       {% for row in model_config.tiers %}
@@ -158,6 +148,16 @@
 
   <!-- Tab Panel 2: Providers -->
   <div class="tab-content" id="tab-providers" role="tabpanel" aria-labelledby="btn-tab-providers">
+    <section class="model-config-toolbar" aria-label="Model config actions" style="margin-bottom: 24px;">
+      <div>
+        <strong>{{ model_config.installation_label }}</strong>
+        <p>Credentials stay hidden. Env-backed rows can be bootstrapped, inspected, and reassigned here.</p>
+      </div>
+      <form method="post" action="/admin/models/bootstrap" onsubmit="return confirm('Seed provider/model/tier config from current env settings? Existing DB config will not be overwritten.');">
+        <input type="hidden" name="next" value="/admin/models">
+        <button class="btn" type="submit" {{ "disabled" if not model_config.can_bootstrap else "" }}>Bootstrap from env</button>
+      </form>
+    </section>
     {% if model_config.installation_id %}
       <section class="model-config-actions-grid" aria-label="Provider and model setup" style="margin-bottom: 24px;">
         <article class="card detail-section model-config-panel">
@@ -256,73 +256,74 @@
     {% endif %}
 
     <section class="model-config-grid" aria-label="Provider accounts">
-      <article class="card detail-section model-config-panel">
-        <header>
+      <div class="section-header-row" style="margin-bottom: 8px;">
+        <div>
           <h2>Provider Accounts</h2>
           <p>Connected provider identities. Credentials stay encrypted and redacted.</p>
-        </header>
-        <div class="table-wrap">
-          <table class="table model-config-table">
-            <caption>Provider accounts, health, credentials, and controls.</caption>
-            <thead>
-              <tr>
-                <th>Provider</th>
-                <th>Status</th>
-                <th>Health</th>
-                <th>Models</th>
-                <th>Credential</th>
-                <th>Source</th>
-                <th>Controls</th>
-              </tr>
-            </thead>
-            <tbody>
-              {% for row in model_config.providers %}
-                <tr>
-                  <td>
-                    <a class="model-config-provider-link" href="/admin/models/providers/{{ row.provider.id }}">
-                      {{ row.provider.display_name }}
-                    </a>
-                    <span class="identity-id">{{ row.provider.provider_kind }}</span>
-                  </td>
-                  <td>
-                    <span class="badge-live badge-live-{{ 'ok' if row.status_tone == 'success' else 'down' if row.status_tone == 'danger' else 'neutral' }}">
-                      {{ row.provider.status }}
-                    </span>
-                  </td>
-                  <td>
-                    <span class="badge-live badge-live-{{ 'ok' if row.health_tone == 'success' else 'down' if row.health_tone == 'danger' else 'neutral' }}">
-                      <span class="pulse-dot"></span>
-                      {{ row.provider.health_status|upper }}
-                    </span>
-                  </td>
-                  <td>{{ row.enabled_model_count|number }} / {{ row.model_count|number }}</td>
-                  <td>{{ row.credential_label }}</td>
-                  <td>{{ row.source_label }}</td>
-                  <td class="model-config-controls">
-                    <a class="btn-ghost" href="/admin/models/providers/{{ row.provider.id }}">Open</a>
-                    <form method="post" action="/admin/models/providers/{{ row.provider.id }}/status" onsubmit="return confirm('Update {{ row.provider.display_name }} provider status?');">
-                      <input type="hidden" name="next" value="/admin/models">
-                      <select class="input compact-input" name="status">
-                        <option value="active" {{ "selected" if row.provider.status == "active" else "" }}>Active</option>
-                        <option value="disabled" {{ "selected" if row.provider.status == "disabled" else "" }}>Disabled</option>
-                      </select>
-                      <button class="btn-ghost" type="submit">Save</button>
-                    </form>
-                    <form method="post" action="/admin/models/providers/{{ row.provider.id }}/test">
-                      <input type="hidden" name="next" value="/admin/models">
-                      <button class="btn-ghost" type="submit">Test</button>
-                    </form>
-                  </td>
-                </tr>
-              {% else %}
-                <tr>
-                  <td colspan="7">No provider accounts have been configured yet.</td>
-                </tr>
-              {% endfor %}
-            </tbody>
-          </table>
         </div>
-      </article>
+      </div>
+
+      <div class="provider-accounts-grid">
+        {% for row in model_config.providers %}
+          <article class="card provider-account-card">
+            <div class="provider-account-header">
+              <div>
+                <h3>
+                  <a class="provider-card-title-link" href="/admin/models/providers/{{ row.provider.id }}">
+                    {{ row.provider.display_name }}
+                  </a>
+                </h3>
+                <code class="provider-kind-slug">{{ row.provider.provider_kind }}</code>
+              </div>
+              <div class="provider-account-badges">
+                <span class="badge-live badge-live-{{ 'ok' if row.status_tone == 'success' else 'down' if row.status_tone == 'danger' else 'neutral' }}">
+                  {{ row.provider.status }}
+                </span>
+                <span class="badge-live badge-live-{{ 'ok' if row.health_tone == 'success' else 'down' if row.health_tone == 'danger' else 'neutral' }}">
+                  <span class="pulse-dot"></span>
+                  {{ row.provider.health_status|upper }}
+                </span>
+              </div>
+            </div>
+
+            <div class="provider-account-body">
+              <div class="provider-detail-item">
+                <span class="provider-detail-label">Enabled Models</span>
+                <strong>{{ row.enabled_model_count|number }} / {{ row.model_count|number }}</strong>
+              </div>
+              <div class="provider-detail-item">
+                <span class="provider-detail-label">Credentials</span>
+                <span>{{ row.credential_label }}</span>
+              </div>
+              <div class="provider-detail-item">
+                <span class="provider-detail-label">Source</span>
+                <span class="compact-badge">{{ row.source_label }}</span>
+              </div>
+            </div>
+
+            <div class="provider-account-actions">
+              <a class="btn-ghost compact-btn" href="/admin/models/providers/{{ row.provider.id }}">Open Catalog</a>
+              
+              <form method="post" action="/admin/models/providers/{{ row.provider.id }}/test">
+                <input type="hidden" name="next" value="/admin/models">
+                <button class="btn-ghost compact-btn" type="submit">Test Health</button>
+              </form>
+
+              <form method="post" action="/admin/models/providers/{{ row.provider.id }}/status" onsubmit="return confirm('Update {{ row.provider.display_name }} status to {{ 'disabled' if row.provider.status == 'active' else 'active' }}?');">
+                <input type="hidden" name="next" value="/admin/models">
+                <input type="hidden" name="status" value="{{ 'disabled' if row.provider.status == 'active' else 'active' }}">
+                <button class="btn-ghost compact-btn {{ 'btn-danger-hover' if row.provider.status == 'active' else 'btn-success-hover' }}" type="submit">
+                  {{ 'Disable' if row.provider.status == 'active' else 'Enable' }}
+                </button>
+              </form>
+            </div>
+          </article>
+        {% else %}
+          <div class="provider-account-empty">
+            <p>No provider accounts have been configured yet.</p>
+          </div>
+        {% endfor %}
+      </div>
     </section>
   </div>
 

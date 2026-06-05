@@ -121,6 +121,76 @@ def test_project_from_channel_profile_creates_and_dedupes_candidates(
     assert all("last_reinforced_at" in candidate.metadata_json for candidate in refreshed)
 
 
+def test_project_from_task_response_uses_watch_section(
+    db_session: Session,
+) -> None:
+    task, membership, _profile = create_profile_fixture(db_session)
+    membership.channel_name = "rag"
+    membership.channel_type = "private_channel"
+    task.input = "what do you know about how this channel is used?"
+    response_text = (
+        "What this channel is used for\n"
+        "- Kortny testing and real project execution.\n\n"
+        "What I watch for\n"
+        "\u2022 Linear summaries: surface unresolved decisions and blockers.\n"
+        "- Data quality issues: catch missing CSV files or broken integration output.\n\n"
+        "Happy to dig deeper if needed.\n"
+    )
+    service = WitnessOpportunityService(db_session)
+
+    result = service.project_from_task_response(
+        task=task,
+        response_text=response_text,
+    )
+    db_session.commit()
+
+    candidates = tuple(
+        db_session.scalars(
+            select(WitnessOpportunityCandidate).order_by(
+                WitnessOpportunityCandidate.candidate_type
+            )
+        )
+    )
+
+    assert result.created_count == 2
+    assert result.updated_count == 0
+    assert result.skipped_count == 0
+    assert {candidate.candidate_type for candidate in candidates} == {
+        "data_quality_issue",
+        "unresolved_decision",
+    }
+    assert all(
+        candidate.visibility_scope_type == "private_channel"
+        for candidate in candidates
+    )
+    assert all(candidate.visibility_scope_id == membership.channel_id for candidate in candidates)
+    assert all(candidate.source_type == "task_summary" for candidate in candidates)
+    assert all(candidate.source_task_id == task.id for candidate in candidates)
+    assert all(candidate.source_profile_id is None for candidate in candidates)
+    assert all(
+        candidate.metadata_json["source"] == "task_watch_section"
+        for candidate in candidates
+    )
+    assert any(
+        item.get("type") == "task_response"
+        for candidate in candidates
+        for item in candidate.evidence_json
+    )
+
+    second = service.project_from_task_response(
+        task=task,
+        response_text=response_text,
+    )
+    db_session.commit()
+
+    assert second.created_count == 0
+    assert second.updated_count == 2
+    assert (
+        db_session.scalar(select(func.count()).select_from(WitnessOpportunityCandidate))
+        == 2
+    )
+
+
 def test_eligible_private_suggestions_respects_status_and_cooldown(
     db_session: Session,
 ) -> None:

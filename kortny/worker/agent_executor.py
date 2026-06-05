@@ -211,12 +211,18 @@ class AgentTaskExecutor:
                         working_dir=workspace.path,
                     )
                 task_service.raise_if_cancelled(task, phase="before_post_outputs")
-                self._post_outputs(
+                posted_response_text = self._post_outputs(
                     settings=settings,
                     session=session,
                     task=task,
                     task_service=task_service,
                     result_summary=agent_result.result_summary,
+                )
+                self._project_witness_opportunities_from_result(
+                    session=session,
+                    task=task,
+                    task_service=task_service,
+                    posted_response_text=posted_response_text,
                 )
                 self._reinforce_runtime_graph_context(
                     session=session,
@@ -1149,7 +1155,7 @@ class AgentTaskExecutor:
         task: Task,
         task_service: TaskService,
         result_summary: str,
-    ) -> None:
+    ) -> str | None:
         if _should_suppress_slack_post(session, task):
             task_service.append_event(
                 task,
@@ -1235,7 +1241,7 @@ class AgentTaskExecutor:
                     task_service=task_service,
                 )
             poster.post_message(thread, response_text)
-            return
+            return response_text
 
         for index, artifact in enumerate(artifacts):
             if artifact.storage_path is None:
@@ -1262,6 +1268,7 @@ class AgentTaskExecutor:
                 initial_comment=initial_comment,
                 title=artifact.filename,
             )
+        return None
 
     def _post_approval_request(
         self,
@@ -1500,6 +1507,54 @@ class AgentTaskExecutor:
         if text is None:
             return PLANNED_WORKFLOW_PROGRESS_TEXT, "fallback"
         return text, "llm"
+
+    def _project_witness_opportunities_from_result(
+        self,
+        *,
+        session: Session,
+        task: Task,
+        task_service: TaskService,
+        posted_response_text: str | None,
+    ) -> None:
+        """Best-effort Witness candidates from delivered watch-for answers."""
+
+        if not posted_response_text or is_channel_assessment_task(session, task):
+            return
+        try:
+            result = WitnessOpportunityService(session).project_from_task_response(
+                task=task,
+                response_text=posted_response_text,
+            )
+        except Exception as exc:
+            task_service.append_event(
+                task,
+                TaskEventType.error,
+                {
+                    "message": "witness_opportunity_projection_failed",
+                    "source_type": "task_summary",
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                },
+            )
+            logger.exception(
+                "witness opportunity projection failed task_id=%s", task.id
+            )
+            return
+        if result.total_count == 0:
+            return
+        task_service.append_event(
+            task,
+            TaskEventType.log,
+            {
+                "message": WITNESS_OPPORTUNITY_CANDIDATES_PROJECTED_MESSAGE,
+                "source_type": "task_summary",
+                "channel_id": task.slack_channel_id,
+                "created_count": result.created_count,
+                "updated_count": result.updated_count,
+                "skipped_count": result.skipped_count,
+                "candidate_ids": list(result.candidate_ids),
+            },
+        )
 
     def _mark_channel_assessment_completed(
         self,

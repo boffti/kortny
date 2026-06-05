@@ -73,6 +73,7 @@ from kortny.observe.assessment import (
 from kortny.slack.comments import ARTIFACT_COMMENT_FALLBACK_TEXT
 from kortny.slack.humanizer import (
     ResponseSynthesisResult,
+    StaticResponseSynthesizer,
     build_response_record,
     build_synthesis_context,
 )
@@ -3546,6 +3547,92 @@ def test_agent_executor_records_channel_profile_when_assessment_completes(
     assert {entity.canonical_key for entity in current_context.entities} == {
         "slack_channel:CObserve",
         "channel_profile:CObserve",
+    }
+
+
+def test_agent_executor_projects_witness_candidates_from_posted_watch_answer(
+    db_session: Session,
+) -> None:
+    task = create_task(db_session, event_id="EvWitnessTaskAnswer")
+    task.slack_channel_id = "CWitness"
+    task.slack_thread_ts = "1780600000.000001"
+    task.slack_message_ts = "1780600000.000001"
+    task.input = "what do you know about how this channel is used?"
+    membership = SlackChannelMembership(
+        installation_id=task.installation_id,
+        channel_id="CWitness",
+        channel_name="rag",
+        channel_type="private_channel",
+        membership_status="active",
+        discovered_via="app_mention",
+        onboarding_status="posted",
+        metadata_json={},
+    )
+    db_session.add(membership)
+    db_session.commit()
+    task_service = TaskService(db_session)
+    settings = make_settings()
+    slack_client = FakeSlackClient()
+    response_text = (
+        "What this channel is used for\n"
+        "- Kortny testing and real project execution.\n\n"
+        "What I watch for\n"
+        "- Linear summaries: surface unresolved decisions and blockers.\n"
+        "- Integration output quality: flag missing CSV files or broken tool data.\n"
+    )
+    executor = AgentTaskExecutor(
+        settings=settings,
+        response_synthesizer=StaticResponseSynthesizer(),
+        slack_client=slack_client,
+    )
+
+    posted_text = executor._post_outputs(
+        settings=settings,
+        session=db_session,
+        task=task,
+        task_service=task_service,
+        result_summary=response_text,
+    )
+    executor._project_witness_opportunities_from_result(
+        session=db_session,
+        task=task,
+        task_service=task_service,
+        posted_response_text=posted_text,
+    )
+    db_session.commit()
+
+    candidates = tuple(
+        db_session.scalars(
+            select(WitnessOpportunityCandidate).order_by(
+                WitnessOpportunityCandidate.candidate_type
+            )
+        )
+    )
+    projection_event = next(
+        event
+        for event in task_events(db_session, task)
+        if event.payload.get("message")
+        == WITNESS_OPPORTUNITY_CANDIDATES_PROJECTED_MESSAGE
+    )
+
+    assert slack_client.messages[-1]["text"] == response_text.strip()
+    assert posted_text == response_text.strip()
+    assert len(candidates) == 2
+    assert {candidate.candidate_type for candidate in candidates} == {
+        "data_quality_issue",
+        "unresolved_decision",
+    }
+    assert all(
+        candidate.visibility_scope_type == "private_channel"
+        for candidate in candidates
+    )
+    assert all(candidate.source_type == "task_summary" for candidate in candidates)
+    assert all(candidate.source_task_id == task.id for candidate in candidates)
+    assert projection_event.payload["source_type"] == "task_summary"
+    assert projection_event.payload["created_count"] == 2
+    assert projection_event.payload["updated_count"] == 0
+    assert set(projection_event.payload["candidate_ids"]) == {
+        str(candidate.id) for candidate in candidates
     }
 
 

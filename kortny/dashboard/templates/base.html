@@ -14,55 +14,124 @@
     <div class="dashboard-layout">
       <aside class="sidebar" aria-label="Dashboard navigation">
         <div class="sidebar-header">
-          <a class="brand" href="/">Kortny</a>
+          <a class="brand" href="/">
+            <img src="{{ url_for('static', path='/assets/kortny_icon.png') }}" alt="" class="brand-logo">
+            <span>Kortny</span>
+          </a>
           <span class="subtitle">Operator Dashboard</span>
         </div>
         <nav class="sidebar-nav">
           {% if dashboard_is_admin %}
             <div class="nav-group">
               <span class="nav-group-label">Operate</span>
-              <a class="nav-item {{ 'active' if active_page == 'overview' else '' }}" href="/" {% if active_page == 'overview' %}aria-current="page"{% endif %}>Overview</a>
-              <a class="nav-item {{ 'active' if active_page == 'tasks' else '' }}" href="/tasks" {% if active_page == 'tasks' %}aria-current="page"{% endif %}>Tasks</a>
-              <a class="nav-item {{ 'active' if active_page == 'schedules' else '' }}" href="/schedules" {% if active_page == 'schedules' %}aria-current="page"{% endif %}>Schedules</a>
-              <a class="nav-item {{ 'active' if active_page == 'playground' else '' }}" href="/playground" {% if active_page == 'playground' %}aria-current="page"{% endif %}>Playground</a>
-              <a class="nav-item {{ 'active' if active_page == 'usage' else '' }}" href="/usage" {% if active_page == 'usage' %}aria-current="page"{% endif %}>Usage</a>
-              <a class="nav-item {{ 'active' if active_page == 'system' else '' }}" href="/system" {% if active_page == 'system' %}aria-current="page"{% endif %}>System</a>
+              <a class="nav-item {{ 'active' if active_page == 'overview' else '' }}" href="/" {% if active_page == 'overview' %}aria-current="page"{% endif %}>
+                <svg class="nav-icon" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+                <span>Overview</span>
+              </a>
+              <a class="nav-item {{ 'active' if active_page == 'tasks' else '' }}" href="/tasks" {% if active_page == 'tasks' %}aria-current="page"{% endif %}>
+                <svg class="nav-icon" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="16" x="2" y="4" rx="2"/><path d="m10 10-2 2 2 2"/><path d="M12 14h4"/></svg>
+                <span>Tasks</span>
+              </a>
+              <a class="nav-item {{ 'active' if active_page == 'schedules' else '' }}" href="/schedules" {% if active_page == 'schedules' %}aria-current="page"{% endif %}>
+                <svg class="nav-icon" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="4" rx="2"/><line x1="16" x2="16" y1="2" y2="6"/><line x1="8" x2="8" y1="2" y2="6"/><line x1="3" x2="21" y1="10" y2="10"/><path d="m9 16 2 2 4-4"/></svg>
+                <span>Schedules</span>
+              </a>
+              <a class="nav-item {{ 'active' if active_page == 'playground' else '' }}" href="/playground" {% if active_page == 'playground' %}aria-current="page"{% endif %}>
+                <svg class="nav-icon" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="6 3 20 12 6 21 6 3"/></svg>
+                <span>Playground</span>
+              </a>
+              <a class="nav-item {{ 'active' if active_page == 'usage' else '' }}" href="/usage" {% if active_page == 'usage' %}aria-current="page"{% endif %}>
+                <svg class="nav-icon" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" x2="18" y1="20" y2="10"/><line x1="12" x2="12" y1="20" y2="4"/><line x1="6" x2="6" y1="20" y2="14"/></svg>
+                <span>Usage</span>
+              </a>
+              <a class="nav-item {{ 'active' if active_page == 'system' else '' }}" href="/system" {% if active_page == 'system' %}aria-current="page"{% endif %}>
+                <svg class="nav-icon" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" x2="4" y1="21" y2="14"/><line x1="4" x2="4" y1="10" y2="3"/><line x1="12" x2="12" y1="21" y2="12"/><line x1="12" x2="12" y1="8" y2="3"/><line x1="20" x2="20" y1="21" y2="16"/><line x1="20" x2="20" y1="12" y2="3"/><line x1="2" x2="6" y1="14" y2="14"/><line x1="10" x2="14" y1="8" y2="8"/><line x1="18" x2="22" y1="16" y2="16"/></svg>
+                <span>System</span>
+              </a>
             </div>
             <div class="nav-group">
               <span class="nav-group-label">People</span>
-              <a class="nav-item {{ 'active' if active_page == 'users' else '' }}" href="/users" {% if active_page == 'users' %}aria-current="page"{% endif %}>Users</a>
-              <a class="nav-item {{ 'active' if active_page == 'admin_users' else '' }}" href="/admin/users" {% if active_page == 'admin_users' %}aria-current="page"{% endif %}>Access</a>
+              <a class="nav-item {{ 'active' if active_page == 'users' else '' }}" href="/users" {% if active_page == 'users' %}aria-current="page"{% endif %}>
+                <svg class="nav-icon" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+                <span>Users</span>
+              </a>
+              <a class="nav-item {{ 'active' if active_page == 'admin_users' else '' }}" href="/admin/users" {% if active_page == 'admin_users' %}aria-current="page"{% endif %}>
+                <svg class="nav-icon" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+                <span>Access</span>
+              </a>
             </div>
             <div class="nav-group">
               <span class="nav-group-label">Knowledge</span>
-              <a class="nav-item {{ 'active' if active_page == 'memory' else '' }}" href="/memory" {% if active_page == 'memory' %}aria-current="page"{% endif %}>Memory</a>
-              <a class="nav-item {{ 'active' if active_page == 'knowledge_graph' else '' }}" href="/knowledge-graph" {% if active_page == 'knowledge_graph' %}aria-current="page"{% endif %}>Graph</a>
+              <a class="nav-item {{ 'active' if active_page == 'memory' else '' }}" href="/memory" {% if active_page == 'memory' %}aria-current="page"{% endif %}>
+                <svg class="nav-icon" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22c5.523 0 10-4.477 10-10S17.523 2 12 2 2 6.477 2 12s4.477 10 10 10z"/><path d="M12 6v12"/><path d="M8 10h8"/><path d="M8 14h8"/></svg>
+                <span>Memory</span>
+              </a>
+              <a class="nav-item {{ 'active' if active_page == 'knowledge_graph' else '' }}" href="/knowledge-graph" {% if active_page == 'knowledge_graph' %}aria-current="page"{% endif %}>
+                <svg class="nav-icon" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="8" height="8" x="2" y="2" rx="2"/><rect width="8" height="8" x="14" y="14" rx="2"/><path d="M6 10v4a2 2 0 0 0 2 2h4"/><path d="M18 10V6a2 2 0 0 0-2-2h-4"/></svg>
+                <span>Graph</span>
+              </a>
             </div>
             <div class="nav-group">
               <span class="nav-group-label">Tools</span>
-              <a class="nav-item {{ 'active' if active_page == 'model_config' else '' }}" href="/admin/models" {% if active_page == 'model_config' %}aria-current="page"{% endif %}>LLM Providers</a>
-              <a class="nav-item {{ 'active' if active_page == 'integrations' else '' }}" href="/integrations" {% if active_page == 'integrations' %}aria-current="page"{% endif %}>Integrations</a>
-              <a class="nav-item {{ 'active' if active_page == 'composio' else '' }}" href="/composio" {% if active_page == 'composio' %}aria-current="page"{% endif %}>Composio</a>
+              <a class="nav-item {{ 'active' if active_page == 'model_config' else '' }}" href="/admin/models" {% if active_page == 'model_config' %}aria-current="page"{% endif %}>
+                <svg class="nav-icon" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="16" height="16" x="4" y="4" rx="2"/><rect width="6" height="6" x="9" y="9" rx="1"/><path d="M9 1v3"/><path d="M15 1v3"/><path d="M9 20v3"/><path d="M15 20v3"/><path d="M20 9h3"/><path d="M20 15h3"/><path d="M1 9h3"/><path d="M1 15h3"/></svg>
+                <span>LLM Providers</span>
+              </a>
+              <a class="nav-item {{ 'active' if active_page == 'integrations' else '' }}" href="/integrations" {% if active_page == 'integrations' %}aria-current="page"{% endif %}>
+                <svg class="nav-icon" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v4"/><path d="M12 18v4"/><path d="M4.93 4.93l2.83 2.83"/><path d="M16.24 16.24l2.83 2.83"/><path d="M2 12h4"/><path d="M18 12h4"/><path d="M4.93 19.07l2.83-2.83"/><path d="M16.24 7.76l2.83-2.83"/></svg>
+                <span>Integrations</span>
+              </a>
+              <a class="nav-item {{ 'active' if active_page == 'composio' else '' }}" href="/composio" {% if active_page == 'composio' %}aria-current="page"{% endif %}>
+                <svg class="nav-icon" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
+                <span>Composio</span>
+              </a>
             </div>
           {% else %}
             <div class="nav-group">
               <span class="nav-group-label">My workspace</span>
-              <a class="nav-item {{ 'active' if active_page == 'me' else '' }}" href="/me" {% if active_page == 'me' %}aria-current="page"{% endif %}>Dashboard</a>
-              <a class="nav-item {{ 'active' if active_page == 'me_tasks' else '' }}" href="/me/tasks" {% if active_page == 'me_tasks' %}aria-current="page"{% endif %}>Tasks</a>
-              <a class="nav-item {{ 'active' if active_page == 'me_schedules' else '' }}" href="/me/schedules" {% if active_page == 'me_schedules' %}aria-current="page"{% endif %}>Schedules</a>
-              <a class="nav-item {{ 'active' if active_page == 'me_usage' else '' }}" href="/me/usage" {% if active_page == 'me_usage' %}aria-current="page"{% endif %}>Usage</a>
-              <a class="nav-item {{ 'active' if active_page == 'me_memory' else '' }}" href="/me/memory" {% if active_page == 'me_memory' %}aria-current="page"{% endif %}>Memory</a>
-              <a class="nav-item {{ 'active' if active_page == 'me_integrations' else '' }}" href="/me/integrations" {% if active_page == 'me_integrations' %}aria-current="page"{% endif %}>Integrations</a>
-              <a class="nav-item {{ 'active' if active_page == 'me_composio' else '' }}" href="/me/composio" {% if active_page == 'me_composio' %}aria-current="page"{% endif %}>Composio</a>
+              <a class="nav-item {{ 'active' if active_page == 'me' else '' }}" href="/me" {% if active_page == 'me' %}aria-current="page"{% endif %}>
+                <svg class="nav-icon" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+                <span>Dashboard</span>
+              </a>
+              <a class="nav-item {{ 'active' if active_page == 'me_tasks' else '' }}" href="/me/tasks" {% if active_page == 'me_tasks' %}aria-current="page"{% endif %}>
+                <svg class="nav-icon" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="16" x="2" y="4" rx="2"/><path d="m10 10-2 2 2 2"/><path d="M12 14h4"/></svg>
+                <span>Tasks</span>
+              </a>
+              <a class="nav-item {{ 'active' if active_page == 'me_schedules' else '' }}" href="/me/schedules" {% if active_page == 'me_schedules' %}aria-current="page"{% endif %}>
+                <svg class="nav-icon" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="4" rx="2"/><line x1="16" x2="16" y1="2" y2="6"/><line x1="8" x2="8" y1="2" y2="6"/><line x1="3" x2="21" y1="10" y2="10"/><path d="m9 16 2 2 4-4"/></svg>
+                <span>Schedules</span>
+              </a>
+              <a class="nav-item {{ 'active' if active_page == 'me_usage' else '' }}" href="/me/usage" {% if active_page == 'me_usage' %}aria-current="page"{% endif %}>
+                <svg class="nav-icon" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" x2="18" y1="20" y2="10"/><line x1="12" x2="12" y1="20" y2="4"/><line x1="6" x2="6" y1="20" y2="14"/></svg>
+                <span>Usage</span>
+              </a>
+              <a class="nav-item {{ 'active' if active_page == 'me_memory' else '' }}" href="/me/memory" {% if active_page == 'me_memory' %}aria-current="page"{% endif %}>
+                <svg class="nav-icon" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22c5.523 0 10-4.477 10-10S17.523 2 12 2 2 6.477 2 12s4.477 10 10 10z"/><path d="M12 6v12"/><path d="M8 10h8"/><path d="M8 14h8"/></svg>
+                <span>Memory</span>
+              </a>
+              <a class="nav-item {{ 'active' if active_page == 'me_integrations' else '' }}" href="/me/integrations" {% if active_page == 'me_integrations' %}aria-current="page"{% endif %}>
+                <svg class="nav-icon" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v4"/><path d="M12 18v4"/><path d="M4.93 4.93l2.83 2.83"/><path d="M16.24 16.24l2.83 2.83"/><path d="M2 12h4"/><path d="M18 12h4"/><path d="M4.93 19.07l2.83-2.83"/><path d="M16.24 7.76l2.83-2.83"/></svg>
+                <span>Integrations</span>
+              </a>
+              <a class="nav-item {{ 'active' if active_page == 'me_composio' else '' }}" href="/me/composio" {% if active_page == 'me_composio' %}aria-current="page"{% endif %}>
+                <svg class="nav-icon" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
+                <span>Composio</span>
+              </a>
             </div>
           {% endif %}
         </nav>
         <div class="sidebar-footer">
           {% include "_theme_toggle.html" %}
           <div class="user-pill">
-            <span>Signed in as</span>
-            <strong>{{ dashboard_user }}</strong>
-            <small>{{ dashboard_role }}</small>
+            <div class="user-profile-row">
+              <div class="user-avatar-circle">
+                {{ dashboard_user[0]|upper if dashboard_user else 'U' }}
+              </div>
+              <div class="user-details-text">
+                <strong>{{ dashboard_user }}</strong>
+                <small>{{ dashboard_role }}</small>
+              </div>
+            </div>
           </div>
           <form method="post" action="/logout">
             <button class="btn-ghost sidebar-logout" type="submit">Log out</button>

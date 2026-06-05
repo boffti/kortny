@@ -7064,4 +7064,302 @@ dialog::backdrop {
   pointer-events: none;
 }
 
+/* ==========================================================================
+   LLM Providers UI/UX Redesign Styling
+   ========================================================================== */
+
+/* Live Pulsing Status Badges */
+.badge-live {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 750;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+.badge-live-ok {
+  background: color-mix(in srgb, var(--success) 12%, transparent);
+  color: var(--success);
+  border: 1px solid color-mix(in srgb, var(--success) 30%, transparent);
+}
+.badge-live-down {
+  background: color-mix(in srgb, var(--destructive) 12%, transparent);
+  color: var(--destructive);
+  border: 1px solid color-mix(in srgb, var(--destructive) 30%, transparent);
+}
+.badge-live-neutral {
+  background: color-mix(in srgb, var(--muted-foreground) 12%, transparent);
+  color: var(--muted-foreground);
+  border: 1px solid color-mix(in srgb, var(--muted-foreground) 30%, transparent);
+}
+.pulse-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background-color: currentColor;
+  position: relative;
+  display: inline-block;
+}
+.pulse-dot::after {
+  content: "";
+  position: absolute;
+  width: 100%;
+  height: 100%;
+  top: 0;
+  left: 0;
+  border-radius: 50%;
+  background-color: currentColor;
+  animation: pulse-ring 1.8s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+@keyframes pulse-ring {
+  0% { transform: scale(0.95); opacity: 0.8; }
+  50% { transform: scale(2.2); opacity: 0; }
+  100% { transform: scale(0.95); opacity: 0; }
+}
+
+/* Password Toggle Field Wrapper */
+.password-input-wrapper {
+  position: relative;
+  display: flex;
+  align-items: center;
+  width: 100%;
+}
+.password-input-wrapper .input {
+  padding-right: 44px !important;
+}
+.password-toggle-btn {
+  position: absolute;
+  right: 12px;
+  background: none;
+  border: none;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px;
+  border-radius: 4px;
+  transition: all 0.2s ease;
+}
+.password-toggle-btn:hover {
+  color: var(--foreground);
+  background-color: var(--muted);
+}
+.password-toggle-btn svg {
+  width: 16px;
+  height: 16px;
+}
+
+/* Conditional Field Group Animations */
+.conditional-fields {
+  display: none;
+}
+.conditional-fields.is-visible {
+  display: grid;
+  gap: 12px;
+  animation: field-slide-down 0.25s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+@keyframes field-slide-down {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Modern Workflow Stepper */
+.workflow-stepper {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  padding: 16px;
+  position: relative;
+}
+.workflow-stepper::before {
+  content: "";
+  position: absolute;
+  left: 30px;
+  top: 30px;
+  bottom: 30px;
+  width: 2px;
+  background: var(--border);
+  z-index: 1;
+}
+.workflow-step {
+  display: flex;
+  gap: 16px;
+  position: relative;
+  z-index: 2;
+  transition: all 0.2s ease;
+}
+.workflow-step-badge {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--card);
+  border: 2px solid var(--border);
+  color: var(--muted-foreground);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 800;
+  transition: all 0.25s ease;
+  box-shadow: 0 0 0 4px var(--card);
+}
+.workflow-step.is-active .workflow-step-badge {
+  border-color: var(--accent);
+  color: var(--accent-foreground);
+  background: var(--accent);
+}
+.workflow-step-content {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding-top: 4px;
+}
+.workflow-step-content strong {
+  font-size: 14px;
+  color: var(--foreground);
+}
+.workflow-step-content small {
+  font-size: 12px;
+  color: var(--muted-foreground);
+  line-height: 1.4;
+}
+
+/* Model Tier Routing Flow */
+.model-tier-routing-flow {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 0 16px 14px;
+  margin-top: auto;
+}
+.model-tier-routing-step {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: color-mix(in srgb, var(--muted) 30%, transparent);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 12px;
+  position: relative;
+  transition: all 0.2s ease;
+}
+.model-tier-routing-step:hover {
+  background: color-mix(in srgb, var(--muted) 50%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 30%, var(--border));
+}
+.model-tier-routing-indicator {
+  flex-shrink: 0;
+  font-size: 9px;
+  font-weight: 800;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--border);
+  color: var(--muted-foreground);
+  text-transform: uppercase;
+}
+.model-tier-routing-step.is-primary .model-tier-routing-indicator {
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+  color: var(--accent-strong);
+  border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
+}
+.model-tier-routing-step.is-fallback .model-tier-routing-indicator {
+  background: color-mix(in srgb, var(--warning) 15%, transparent);
+  color: var(--warning);
+  border: 1px solid color-mix(in srgb, var(--warning) 25%, transparent);
+}
+.model-tier-routing-select-group {
+  flex-grow: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.model-tier-routing-label {
+  font-size: 10px;
+  font-weight: 800;
+  color: var(--muted-foreground);
+  text-transform: uppercase;
+  margin-bottom: 2px;
+}
+.model-tier-routing-select-group .input {
+  border: none;
+  background: transparent;
+  padding: 0 24px 0 0 !important;
+  font-weight: 700;
+  font-size: 13px;
+  color: var(--foreground);
+  min-height: auto;
+  height: 24px;
+  cursor: pointer;
+  box-shadow: none !important;
+  text-overflow: ellipsis;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.model-tier-routing-select-group .input:focus {
+  outline: none;
+}
+.model-tier-routing-arrow {
+  position: absolute;
+  right: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 0;
+  height: 0;
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-top: 4px solid var(--muted-foreground);
+  pointer-events: none;
+}
+
+/* Save Unified Actions */
+.model-tier-save-action {
+  border-top: 1px solid var(--border);
+  background: color-mix(in srgb, var(--card) 85%, var(--muted));
+  padding: 12px 16px;
+  display: flex;
+  justify-content: flex-end;
+}
+.btn-save-unified {
+  width: 100%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 38px;
+  font-weight: 700;
+}
+
+/* Loading Spinner */
+.spinner-icon {
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(255, 255, 255, 0.3);
+  border-radius: 50%;
+  border-top-color: #fff;
+  animation: spin-loader 0.8s linear infinite;
+  display: none;
+}
+.btn-save-unified.is-loading .spinner-icon {
+  display: inline-block;
+}
+.btn-save-unified.is-loading {
+  pointer-events: none;
+  opacity: 0.8;
+}
+@keyframes spin-loader {
+  to { transform: rotate(360deg); }
+}
+
+
 

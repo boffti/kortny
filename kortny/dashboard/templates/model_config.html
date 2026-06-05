@@ -30,294 +30,495 @@
     </div>
   {% endif %}
 
-  <section class="summary-grid model-config-summary" aria-label="Model configuration overview">
-    {% for metric in model_config.metrics %}
-      <div class="card metric-card metric-{{ metric.tone }}">
-        <span>{{ metric.label }}</span>
-        <strong>{{ metric.value }}</strong>
-        {% if metric.detail %}
-          <small>{{ metric.detail }}</small>
-        {% endif %}
+  <!-- Tab Navigation -->
+  <nav class="tab-navigation" role="tablist" aria-label="LLM Configuration sections">
+    <button class="tab-btn active" role="tab" aria-selected="true" aria-controls="tab-routing" id="btn-tab-routing">🔀 Tier Routing</button>
+    <button class="tab-btn" role="tab" aria-selected="false" aria-controls="tab-providers" id="btn-tab-providers">🔌 LLM Providers</button>
+    <button class="tab-btn" role="tab" aria-selected="false" aria-controls="tab-audits" id="btn-tab-audits">📜 Audit Trail</button>
+  </nav>
+
+  <!-- Tab Panel 1: Tier Routing -->
+  <div class="tab-content active" id="tab-routing" role="tabpanel" aria-labelledby="btn-tab-routing">
+    <section class="summary-grid model-config-summary" aria-label="Model configuration overview">
+      {% for metric in model_config.metrics %}
+        <div class="card metric-card metric-{{ metric.tone }}">
+          <span>{{ metric.label }}</span>
+          <strong>{{ metric.value }}</strong>
+          {% if metric.detail %}
+            <small>{{ metric.detail }}</small>
+          {% endif %}
+        </div>
+      {% endfor %}
+    </section>
+
+    <section class="model-config-toolbar" aria-label="Model config actions">
+      <div>
+        <strong>{{ model_config.installation_label }}</strong>
+        <p>Credentials stay hidden. Env-backed rows can be bootstrapped, inspected, and reassigned here.</p>
       </div>
-    {% endfor %}
-  </section>
+      <form method="post" action="/admin/models/bootstrap" onsubmit="return confirm('Seed provider/model/tier config from current env settings? Existing DB config will not be overwritten.');">
+        <input type="hidden" name="next" value="/admin/models">
+        <button class="btn" type="submit" {{ "disabled" if not model_config.can_bootstrap else "" }}>Bootstrap from env</button>
+      </form>
+    </section>
 
-  <section class="model-config-toolbar" aria-label="Model config actions">
-    <div>
-      <strong>{{ model_config.installation_label }}</strong>
-      <p>Credentials stay hidden. Env-backed rows can be bootstrapped, inspected, and reassigned here.</p>
-    </div>
-    <form method="post" action="/admin/models/bootstrap" onsubmit="return confirm('Seed provider/model/tier config from current env settings? Existing DB config will not be overwritten.');">
-      <input type="hidden" name="next" value="/admin/models">
-      <button class="btn" type="submit" {{ "disabled" if not model_config.can_bootstrap else "" }}>Bootstrap from env</button>
-    </form>
-  </section>
+    <section class="model-tier-grid" aria-label="Model tier assignments">
+      {% for row in model_config.tiers %}
+        <article class="card model-tier-card model-tier-{{ row.tone }}">
+          <header>
+            <div>
+              <span class="badge badge-{{ row.tone }}">{{ row.tier }}</span>
+              <h2>{{ row.label }}</h2>
+            </div>
+          </header>
+          <p>{{ row.description }}</p>
 
-  {% if model_config.installation_id %}
-    <section class="model-config-actions-grid" aria-label="Provider and model setup">
+          <dl class="model-tier-current">
+            <div>
+              <dt>Primary</dt>
+              <dd>
+                {% if row.primary_model and row.primary_provider %}
+                  <strong>{{ row.primary_model.display_name }}</strong>
+                  <span>{{ row.primary_provider.display_name }} / {{ row.primary_model.model_identifier }}</span>
+                {% else %}
+                  <strong>Not assigned</strong>
+                  <span>Runtime will fall back to env routing if available.</span>
+                {% endif %}
+              </dd>
+            </div>
+            <div>
+              <dt>Fallbacks</dt>
+              <dd>
+                {% if row.fallback_assignments %}
+                  {% for assignment, model, provider in row.fallback_assignments %}
+                    <span>P{{ assignment.priority }} {{ provider.display_name }} / {{ model.display_name }}</span>
+                  {% endfor %}
+                {% else %}
+                  <span>No explicit fallback rows</span>
+                {% endif %}
+              </dd>
+            </div>
+          </dl>
+
+          {% if row.options %}
+            <form class="model-tier-unified-form" onsubmit="handleUnifiedTierSubmit(event, '{{ row.tier }}')">
+              <div class="model-tier-routing-flow">
+                <!-- Primary Selector -->
+                <div class="model-tier-routing-step is-primary">
+                  <span class="model-tier-routing-indicator">Primary</span>
+                  <div class="model-tier-routing-select-group">
+                    <label class="model-tier-routing-label" for="primary_select_{{ row.tier }}">Route To</label>
+                    <select id="primary_select_{{ row.tier }}" name="primary_catalog_id" class="input">
+                      {% for option in row.options %}
+                        <option value="{{ option.id }}" {{ "selected" if row.primary_model and row.primary_model.id == option.id else "" }} {{ "disabled" if not option.enabled else "" }}>
+                          {{ option.label }} - {{ option.detail }}
+                        </option>
+                      {% endfor %}
+                    </select>
+                    <span class="model-tier-routing-arrow"></span>
+                  </div>
+                </div>
+
+                <!-- Fallback Selector -->
+                <div class="model-tier-routing-step is-fallback">
+                  <span class="model-tier-routing-indicator">Fallback</span>
+                  <div class="model-tier-routing-select-group">
+                    <label class="model-tier-routing-label" for="fallback_select_{{ row.tier }}">Failover To</label>
+                    {% set fallback = row.fallback_assignments[0] if row.fallback_assignments else none %}
+                    <select id="fallback_select_{{ row.tier }}" name="fallback_catalog_id" class="input">
+                      <option value="">(No Fallback)</option>
+                      {% for option in row.options %}
+                        <option value="{{ option.id }}" {{ "selected" if fallback and fallback[1].id == option.id else "" }} {{ "disabled" if not option.enabled else "" }}>
+                          {{ option.label }} - {{ option.detail }}
+                        </option>
+                      {% endfor %}
+                    </select>
+                    <span class="model-tier-routing-arrow"></span>
+                  </div>
+                </div>
+              </div>
+              
+              <div class="model-tier-save-action">
+                <button class="btn btn-save-unified" type="submit">
+                  <span class="spinner-icon"></span>
+                  Save Routing Policy
+                </button>
+              </div>
+            </form>
+          {% else %}
+            <div class="model-tier-empty-action">
+              <span>No selectable models yet</span>
+              <small>Bootstrap from env or add a provider model before assigning this tier.</small>
+            </div>
+          {% endif %}
+        </article>
+      {% endfor %}
+    </section>
+  </div>
+
+  <!-- Tab Panel 2: Providers -->
+  <div class="tab-content" id="tab-providers" role="tabpanel" aria-labelledby="btn-tab-providers">
+    {% if model_config.installation_id %}
+      <section class="model-config-actions-grid" aria-label="Provider and model setup" style="margin-bottom: 24px;">
+        <article class="card detail-section model-config-panel">
+          <header>
+            <h2>Connect Provider</h2>
+            <p>Choose a provider and paste its API key. Kortny syncs available models automatically.</p>
+          </header>
+          <form class="model-config-form" method="post" action="/admin/models/providers" id="connect-provider-form">
+            <input type="hidden" name="next" value="/admin/models">
+            
+            <div class="form-group">
+              <label for="provider_kind" style="margin-bottom: 4px;">Provider</label>
+              <select class="input" id="provider_kind" name="provider_kind" required onchange="handleProviderChange(this)">
+                <option value="">Select a provider...</option>
+                {% for option in model_config.provider_options %}
+                  <option value="{{ option.kind }}">{{ option.label }}</option>
+                {% endfor %}
+                <option value="__custom__">Other LiteLLM provider</option>
+              </select>
+              <small id="provider-help" style="margin-top: 4px;">Kortny handles the LiteLLM provider slug behind the scenes.</small>
+            </div>
+
+            <div class="form-group">
+              <label for="api_key" style="margin-bottom: 4px;">API key</label>
+              <div class="password-input-wrapper">
+                <input class="input" type="password" id="api_key" name="api_key" autocomplete="off" placeholder="Paste provider API key" required aria-describedby="api-key-help">
+                <button type="button" class="password-toggle-btn" aria-label="Show API key" onclick="togglePasswordVisibility('api_key', this)">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                </button>
+              </div>
+              <small id="api-key-help" style="margin-top: 4px;">The key is encrypted before it is stored.</small>
+            </div>
+
+            <div class="form-group">
+              <label for="display_name" style="margin-bottom: 4px;">Display name</label>
+              <input class="input" id="display_name" name="display_name" placeholder="Optional, e.g. OpenRouter production">
+            </div>
+
+            <!-- Conditional Custom Provider input - shown dynamically -->
+            <div id="custom-provider-fields" class="conditional-fields form-group">
+              <label for="provider_kind_custom" style="margin-bottom: 4px;">Custom LiteLLM provider</label>
+              <input class="input" id="provider_kind_custom" name="provider_kind_custom" placeholder="Only when Other LiteLLM provider is selected">
+              <small id="custom-provider-help" style="margin-top: 4px;">Use this only for a provider not listed above.</small>
+            </div>
+
+            <details class="model-config-advanced">
+              <summary>Advanced connection settings</summary>
+              <div class="model-config-advanced-body">
+                <div class="model-config-form-grid">
+                  <div class="form-group">
+                    <label for="base_url" style="margin-bottom: 4px;">Base URL</label>
+                    <input class="input" id="base_url" name="base_url" placeholder="Azure, Ollama, OpenAI-compatible, or proxy URL">
+                  </div>
+                  <div class="form-group">
+                    <label for="api_version" style="margin-bottom: 4px;">API version</label>
+                    <input class="input" id="api_version" name="api_version" placeholder="Azure only, if required">
+                  </div>
+                </div>
+                <p>Most hosted providers only need an API key. Base URL is for Azure, Ollama, OpenAI-compatible gateways, or self-hosted endpoints.</p>
+              </div>
+            </details>
+            <button class="btn" type="submit">Connect & Sync Models</button>
+          </form>
+        </article>
+
+        <article class="card detail-section model-config-panel model-config-guidance-panel">
+          <header>
+            <h2>Routing Workflow</h2>
+            <p>Provider setup and model selection are separate so runtime routing stays auditable.</p>
+          </header>
+          <div class="workflow-stepper">
+            <div class="workflow-step is-active">
+              <div class="workflow-step-badge">1</div>
+              <div class="workflow-step-content">
+                <strong>Connect</strong>
+                <small>Save an encrypted provider key for this workspace.</small>
+              </div>
+            </div>
+            <div class="workflow-step">
+              <div class="workflow-step-badge">2</div>
+              <div class="workflow-step-content">
+                <strong>Sync</strong>
+                <small>Kortny imports available models and pricing metadata.</small>
+              </div>
+            </div>
+            <div class="workflow-step">
+              <div class="workflow-step-badge">3</div>
+              <div class="workflow-step-content">
+                <strong>Route</strong>
+                <small>Assign primary and fallback models to each runtime tier.</small>
+              </div>
+            </div>
+          </div>
+        </article>
+      </section>
+    {% endif %}
+
+    <section class="model-config-grid" aria-label="Provider accounts">
       <article class="card detail-section model-config-panel">
         <header>
-          <h2>Connect Provider</h2>
-          <p>Choose a provider and paste its API key. Kortny syncs available models automatically.</p>
+          <h2>Provider Accounts</h2>
+          <p>Connected provider identities. Credentials stay encrypted and redacted.</p>
         </header>
-        <form class="model-config-form" method="post" action="/admin/models/providers">
-          <input type="hidden" name="next" value="/admin/models">
-          <label>
-            Provider
-            <select class="input" name="provider_kind" required>
-              <option value="">Select a provider...</option>
-              {% for option in model_config.provider_options %}
-                <option value="{{ option.kind }}">{{ option.label }}</option>
+        <div class="table-wrap">
+          <table class="table model-config-table">
+            <caption>Provider accounts, health, credentials, and controls.</caption>
+            <thead>
+              <tr>
+                <th>Provider</th>
+                <th>Status</th>
+                <th>Health</th>
+                <th>Models</th>
+                <th>Credential</th>
+                <th>Source</th>
+                <th>Controls</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for row in model_config.providers %}
+                <tr>
+                  <td>
+                    <a class="model-config-provider-link" href="/admin/models/providers/{{ row.provider.id }}">
+                      {{ row.provider.display_name }}
+                    </a>
+                    <span class="identity-id">{{ row.provider.provider_kind }}</span>
+                  </td>
+                  <td>
+                    <span class="badge-live badge-live-{{ 'ok' if row.status_tone == 'success' else 'down' if row.status_tone == 'danger' else 'neutral' }}">
+                      {{ row.provider.status }}
+                    </span>
+                  </td>
+                  <td>
+                    <span class="badge-live badge-live-{{ 'ok' if row.health_tone == 'success' else 'down' if row.health_tone == 'danger' else 'neutral' }}">
+                      <span class="pulse-dot"></span>
+                      {{ row.provider.health_status|upper }}
+                    </span>
+                  </td>
+                  <td>{{ row.enabled_model_count|number }} / {{ row.model_count|number }}</td>
+                  <td>{{ row.credential_label }}</td>
+                  <td>{{ row.source_label }}</td>
+                  <td class="model-config-controls">
+                    <a class="btn-ghost" href="/admin/models/providers/{{ row.provider.id }}">Open</a>
+                    <form method="post" action="/admin/models/providers/{{ row.provider.id }}/status" onsubmit="return confirm('Update {{ row.provider.display_name }} provider status?');">
+                      <input type="hidden" name="next" value="/admin/models">
+                      <select class="input compact-input" name="status">
+                        <option value="active" {{ "selected" if row.provider.status == "active" else "" }}>Active</option>
+                        <option value="disabled" {{ "selected" if row.provider.status == "disabled" else "" }}>Disabled</option>
+                      </select>
+                      <button class="btn-ghost" type="submit">Save</button>
+                    </form>
+                    <form method="post" action="/admin/models/providers/{{ row.provider.id }}/test">
+                      <input type="hidden" name="next" value="/admin/models">
+                      <button class="btn-ghost" type="submit">Test</button>
+                    </form>
+                  </td>
+                </tr>
+              {% else %}
+                <tr>
+                  <td colspan="7">No provider accounts have been configured yet.</td>
+                </tr>
               {% endfor %}
-              <option value="__custom__">Other LiteLLM provider</option>
-            </select>
-            <small>Kortny handles the LiteLLM provider slug behind the scenes.</small>
-          </label>
-          <label>
-            API key
-            <input class="input" type="password" name="api_key" autocomplete="off" placeholder="Paste provider API key" required>
-            <small>The key is encrypted before it is stored.</small>
-          </label>
-          <label>
-            Display name
-            <input class="input" name="display_name" placeholder="Optional, e.g. OpenRouter production">
-          </label>
-          <details class="model-config-advanced">
-            <summary>Advanced connection settings</summary>
-            <div class="model-config-advanced-body">
-              <label>
-                Custom LiteLLM provider
-                <input class="input" name="provider_kind_custom" placeholder="Only when Other LiteLLM provider is selected">
-                <small>Use this only for a provider not listed above.</small>
-              </label>
-              <div class="model-config-form-grid">
-                <label>
-                  Base URL
-                  <input class="input" name="base_url" placeholder="Azure, Ollama, OpenAI-compatible, or proxy URL">
-                </label>
-                <label>
-                  API version
-                  <input class="input" name="api_version" placeholder="Azure only, if required">
-                </label>
-              </div>
-              <p>Most hosted providers only need an API key. Base URL is for Azure, Ollama, OpenAI-compatible gateways, or self-hosted endpoints.</p>
-            </div>
-          </details>
-          <button class="btn" type="submit">Connect & Sync Models</button>
-        </form>
-      </article>
-
-      <article class="card detail-section model-config-panel model-config-guidance-panel">
-        <header>
-          <h2>Routing Workflow</h2>
-          <p>Provider setup and model selection are separate so runtime routing stays auditable.</p>
-        </header>
-        <div class="model-config-guidance">
-          <div>
-            <span>1</span>
-            <strong>Connect</strong>
-            <small>Save an encrypted provider key for this workspace.</small>
-          </div>
-          <div>
-            <span>2</span>
-            <strong>Sync</strong>
-            <small>Kortny imports available models and pricing metadata.</small>
-          </div>
-          <div>
-            <span>3</span>
-            <strong>Route</strong>
-            <small>Assign primary and fallback models to each runtime tier.</small>
-          </div>
+            </tbody>
+          </table>
         </div>
       </article>
     </section>
-  {% endif %}
+  </div>
 
-  <section class="model-tier-grid" aria-label="Model tier assignments">
-    {% for row in model_config.tiers %}
-      <article class="card model-tier-card model-tier-{{ row.tone }}">
-        <header>
-          <div>
-            <span class="badge badge-{{ row.tone }}">{{ row.tier }}</span>
-            <h2>{{ row.label }}</h2>
-          </div>
-        </header>
-        <p>{{ row.description }}</p>
-
-        <dl class="model-tier-current">
-          <div>
-            <dt>Primary</dt>
-            <dd>
-              {% if row.primary_model and row.primary_provider %}
-                <strong>{{ row.primary_model.display_name }}</strong>
-                <span>{{ row.primary_provider.display_name }} / {{ row.primary_model.model_identifier }}</span>
-              {% else %}
-                <strong>Not assigned</strong>
-                <span>Runtime will fall back to env routing if available.</span>
-              {% endif %}
-            </dd>
-          </div>
-          <div>
-            <dt>Fallbacks</dt>
-            <dd>
-              {% if row.fallback_assignments %}
-                {% for assignment, model, provider in row.fallback_assignments %}
-                  <span>P{{ assignment.priority }} {{ provider.display_name }} / {{ model.display_name }}</span>
-                {% endfor %}
-              {% else %}
-                <span>No explicit fallback rows</span>
-              {% endif %}
-            </dd>
-          </div>
-        </dl>
-
-        {% if row.options %}
-          <form class="model-tier-form" method="post" action="/admin/models/tiers/{{ row.tier }}" onsubmit="return confirm('Update the primary model for {{ row.label }}?');">
-            <input type="hidden" name="next" value="/admin/models">
-            <label>
-              Primary model
-              <select class="input" name="model_catalog_id">
-                {% for option in row.options %}
-                  <option value="{{ option.id }}" {{ "selected" if row.primary_model and row.primary_model.id == option.id else "" }} {{ "disabled" if not option.enabled else "" }}>
-                    {{ option.label }} - {{ option.detail }}
-                  </option>
-                {% endfor %}
-              </select>
-              {% if row.primary_model and row.primary_provider %}
-                <span class="model-tier-selected-value">
-                  Current: {{ row.primary_model.display_name }} - {{ row.primary_provider.display_name }} / {{ row.primary_model.model_identifier }}
-                </span>
-              {% endif %}
-            </label>
-            <button class="btn-ghost" type="submit">Save Tier</button>
-          </form>
-          <form class="model-tier-form model-tier-fallback-form" method="post" action="/admin/models/tiers/{{ row.tier }}" onsubmit="return confirm('Update the fallback model for {{ row.label }}?');">
-            <input type="hidden" name="next" value="/admin/models">
-            <input type="hidden" name="priority" value="2">
-            {% set fallback = row.fallback_assignments[0] if row.fallback_assignments else none %}
-            <label>
-              Fallback model
-              <select class="input" name="model_catalog_id">
-                {% for option in row.options %}
-                  <option value="{{ option.id }}" {{ "selected" if fallback and fallback[1].id == option.id else "" }} {{ "disabled" if not option.enabled else "" }}>
-                    {{ option.label }} - {{ option.detail }}
-                  </option>
-                {% endfor %}
-              </select>
-              {% if fallback %}
-                <span class="model-tier-selected-value">
-                  Current fallback: {{ fallback[1].display_name }} - {{ fallback[2].display_name }} / {{ fallback[1].model_identifier }}
-                </span>
-              {% endif %}
-            </label>
-            <button class="btn-ghost" type="submit">Save Fallback</button>
-          </form>
-        {% else %}
-          <div class="model-tier-empty-action">
-            <span>No selectable models yet</span>
-            <small>Bootstrap from env or add a provider model before assigning this tier.</small>
-          </div>
-        {% endif %}
-      </article>
-    {% endfor %}
-  </section>
-
-  <section class="model-config-grid" aria-label="Provider accounts">
-    <article class="card detail-section model-config-panel">
+  <!-- Tab Panel 3: Audits -->
+  <div class="tab-content" id="tab-audits" role="tabpanel" aria-labelledby="btn-tab-audits">
+    <section class="card detail-section model-config-panel">
       <header>
-        <h2>Provider Accounts</h2>
-        <p>Connected provider identities. Credentials stay encrypted and redacted.</p>
+        <h2>Audit Trail</h2>
+        <p>Recent model routing and provider configuration changes.</p>
       </header>
       <div class="table-wrap">
         <table class="table model-config-table">
-          <caption>Provider accounts, health, credentials, and controls.</caption>
+          <caption>Recent LLM config audit entries.</caption>
           <thead>
             <tr>
-              <th>Provider</th>
-              <th>Status</th>
-              <th>Health</th>
-              <th>Models</th>
-              <th>Credential</th>
-              <th>Source</th>
-              <th>Controls</th>
+              <th>Change</th>
+              <th>Actor</th>
+              <th>Entity</th>
+              <th>When</th>
             </tr>
           </thead>
           <tbody>
-            {% for row in model_config.providers %}
+            {% for row in model_config.audits %}
               <tr>
                 <td>
-                  <a class="model-config-provider-link" href="/admin/models/providers/{{ row.provider.id }}">
-                    {{ row.provider.display_name }}
-                  </a>
-                  <span class="identity-id">{{ row.provider.provider_kind }}</span>
+                  <span class="badge badge-{{ row.tone }}">{{ row.audit.action }}</span>
+                  <strong>{{ row.label }}</strong>
                 </td>
-                <td><span class="badge badge-{{ row.status_tone }}">{{ row.provider.status }}</span></td>
-                <td><span class="badge badge-{{ row.health_tone }}">{{ row.provider.health_status }}</span></td>
-                <td>{{ row.enabled_model_count|number }} / {{ row.model_count|number }}</td>
-                <td>{{ row.credential_label }}</td>
-                <td>{{ row.source_label }}</td>
-                <td class="model-config-controls">
-                  <a class="btn-ghost" href="/admin/models/providers/{{ row.provider.id }}">Open</a>
-                  <form method="post" action="/admin/models/providers/{{ row.provider.id }}/status" onsubmit="return confirm('Update {{ row.provider.display_name }} provider status?');">
-                    <input type="hidden" name="next" value="/admin/models">
-                    <select class="input compact-input" name="status">
-                      <option value="active" {{ "selected" if row.provider.status == "active" else "" }}>Active</option>
-                      <option value="disabled" {{ "selected" if row.provider.status == "disabled" else "" }}>Disabled</option>
-                    </select>
-                    <button class="btn-ghost" type="submit">Save</button>
-                  </form>
-                  <form method="post" action="/admin/models/providers/{{ row.provider.id }}/test">
-                    <input type="hidden" name="next" value="/admin/models">
-                    <button class="btn-ghost" type="submit">Test</button>
-                  </form>
-                </td>
+                <td>{{ row.audit.actor_slack_user_id or "dashboard" }}</td>
+                <td><code class="inline-code">{{ row.audit.entity_id or row.audit.entity_type }}</code></td>
+                <td>{{ row.audit.created_at|datetime }}</td>
               </tr>
             {% else %}
               <tr>
-                <td colspan="7">No provider accounts have been configured yet.</td>
+                <td colspan="4">No model configuration changes have been recorded yet.</td>
               </tr>
             {% endfor %}
           </tbody>
         </table>
       </div>
-    </article>
+    </section>
+  </div>
+  <script>
+    function togglePasswordVisibility(inputId, btn) {
+      const input = document.getElementById(inputId);
+      if (!input) return;
+      if (input.type === "password") {
+        input.type = "text";
+        btn.setAttribute("aria-label", "Hide API key");
+        btn.setAttribute("aria-pressed", "true");
+        // Eye-off SVG
+        btn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>`;
+      } else {
+        input.type = "password";
+        btn.setAttribute("aria-label", "Show API key");
+        btn.setAttribute("aria-pressed", "false");
+        // Eye SVG
+        btn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>`;
+      }
+    }
 
-  </section>
+    function handleProviderChange(select) {
+      const customFields = document.getElementById("custom-provider-fields");
+      const customInput = document.getElementById("provider_kind_custom");
+      if (!customFields || !customInput) return;
+      
+      if (select.value === "__custom__") {
+        customFields.classList.add("is-visible");
+        customInput.setAttribute("required", "required");
+      } else {
+        customFields.classList.remove("is-visible");
+        customInput.removeAttribute("required");
+      }
+    }
 
-  <section class="card detail-section model-config-panel">
-    <header>
-      <h2>Audit Trail</h2>
-      <p>Recent model routing and provider configuration changes.</p>
-    </header>
-    <div class="table-wrap">
-      <table class="table model-config-table">
-        <caption>Recent LLM config audit entries.</caption>
-        <thead>
-          <tr>
-            <th>Change</th>
-            <th>Actor</th>
-            <th>Entity</th>
-            <th>When</th>
-          </tr>
-        </thead>
-        <tbody>
-          {% for row in model_config.audits %}
-            <tr>
-              <td>
-                <span class="badge badge-{{ row.tone }}">{{ row.audit.action }}</span>
-                <strong>{{ row.label }}</strong>
-              </td>
-              <td>{{ row.audit.actor_slack_user_id or "dashboard" }}</td>
-              <td><code class="inline-code">{{ row.audit.entity_id or row.audit.entity_type }}</code></td>
-              <td>{{ row.audit.created_at|datetime }}</td>
-            </tr>
-          {% else %}
-            <tr>
-              <td colspan="4">No model configuration changes have been recorded yet.</td>
-            </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-    </div>
-  </section>
+    async function handleUnifiedTierSubmit(event, tierName) {
+      event.preventDefault();
+      const form = event.target;
+      const submitBtn = form.querySelector(".btn-save-unified");
+      if (!submitBtn) return;
+
+      const primarySelect = form.querySelector('[name="primary_catalog_id"]');
+      const fallbackSelect = form.querySelector('[name="fallback_catalog_id"]');
+      if (!primarySelect || !fallbackSelect) return;
+
+      const primaryId = primarySelect.value;
+      const fallbackId = fallbackSelect.value;
+
+      // Confirm dialog similar to original page to prevent accidental overrides
+      const label = form.closest('.model-tier-card').querySelector('h2').textContent;
+      if (!confirm(`Update the routing settings for ${label}?`)) {
+        return;
+      }
+
+      // Enter loading state
+      submitBtn.classList.add("is-loading");
+
+      try {
+        // 1. Submit primary model (priority=1)
+        const primaryData = new URLSearchParams();
+        primaryData.append("model_catalog_id", primaryId);
+        primaryData.append("priority", "1");
+        primaryData.append("next", "/admin/models");
+
+        const primaryRes = await fetch(`/admin/models/tiers/${tierName}`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/x-www-form-urlencoded"
+          },
+          body: primaryData
+        });
+
+        if (!primaryRes.ok) {
+          throw new Error(`Failed to save primary model. (Status: ${primaryRes.status})`);
+        }
+
+        // 2. Submit fallback model if selected (priority=2)
+        if (fallbackId) {
+          const fallbackData = new URLSearchParams();
+          fallbackData.append("model_catalog_id", fallbackId);
+          fallbackData.append("priority", "2");
+          fallbackData.append("next", "/admin/models");
+
+          const fallbackRes = await fetch(`/admin/models/tiers/${tierName}`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/x-www-form-urlencoded"
+            },
+            body: fallbackData
+          });
+
+          if (!fallbackRes.ok) {
+            throw new Error(`Failed to save fallback model. (Status: ${fallbackRes.status})`);
+          }
+        }
+
+        // Redirect to trigger FastAPI's normal notification logic or reload
+        window.location.href = "/admin/models?notice=Successfully+updated+routing+policy+for+" + encodeURIComponent(label) + "&notice_tone=success";
+      } catch (err) {
+        alert("Error saving tier configuration: " + err.message);
+        submitBtn.classList.remove("is-loading");
+      }
+    }
+
+    document.addEventListener("DOMContentLoaded", function() {
+      const providerSelect = document.getElementById("provider_kind");
+      if (providerSelect) {
+        handleProviderChange(providerSelect);
+      }
+
+      // Tab Manager
+      const setupTabs = () => {
+        const tabButtons = document.querySelectorAll('.tab-btn');
+        const tabContents = document.querySelectorAll('.tab-content');
+        const storageKey = 'kortny.models.active-tab';
+
+        const activeTabId = localStorage.getItem(storageKey) || 'btn-tab-routing';
+
+        const activateTab = (tabBtnId) => {
+          const tabBtn = document.getElementById(tabBtnId);
+          if (!tabBtn) return;
+          
+          const targetPaneId = tabBtn.getAttribute('aria-controls');
+          const targetPane = document.getElementById(targetPaneId);
+          if (!targetPane) return;
+
+          // Deactivate all
+          tabButtons.forEach(btn => {
+            btn.classList.remove('active');
+            btn.setAttribute('aria-selected', 'false');
+          });
+          tabContents.forEach(pane => {
+            pane.classList.remove('active');
+          });
+
+          // Activate target
+          tabBtn.classList.add('active');
+          tabBtn.setAttribute('aria-selected', 'true');
+          targetPane.classList.add('active');
+
+          // Save state
+          localStorage.setItem(storageKey, tabBtnId);
+        };
+
+        // Attach listeners
+        tabButtons.forEach(btn => {
+          btn.addEventListener('click', () => {
+            activateTab(btn.id);
+          });
+        });
+
+        // Initialize active tab
+        activateTab(activeTabId);
+      };
+
+      setupTabs();
+    });
+  </script>
 {% endblock %}

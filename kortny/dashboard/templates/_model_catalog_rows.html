@@ -1,10 +1,11 @@
 {% for row in model_rows %}
   {% set route_disabled = (not row.model.is_enabled) or row.provider.status != "active" %}
   <tr data-model-catalog-row>
+    <!-- Model Column -->
     <td class="model-catalog-model-cell">
-      <div class="model-catalog-model-title">
+      <div class="model-catalog-model-title" style="display: flex; flex-direction: column; gap: 4px; align-items: flex-start;">
         <strong>{{ row.model.display_name }}</strong>
-        <code class="inline-code">{{ row.model.model_identifier }}</code>
+        <span class="model-identifier-subtle">{{ row.model.model_identifier }}</span>
       </div>
       <div class="model-catalog-meta-line">
         <span class="badge badge-neutral">{{ row.mode_label }}</span>
@@ -14,77 +15,97 @@
         {% endif %}
       </div>
     </td>
+
+    <!-- Specs Column -->
     <td class="model-catalog-spec-cell">
-      <div class="model-catalog-spec-grid">
-        <div>
-          <span>Context</span>
-          <strong>{{ row.context_label }}</strong>
+      <div class="model-specs-container">
+        <div class="spec-pill">
+          <span class="spec-label">Context</span>
+          <span class="spec-val">{{ row.context_label }}</span>
         </div>
-        <div>
-          <span>Output</span>
-          <strong>{{ row.output_label }}</strong>
+        <div class="spec-pill">
+          <span class="spec-label">Output</span>
+          <span class="spec-val">{{ row.output_label }}</span>
         </div>
       </div>
-      <div class="model-tag-list model-catalog-capabilities">
+      <div class="model-catalog-capabilities-compact">
         {% for label in row.capability_labels %}
-          <span class="badge badge-neutral">{{ label }}</span>
+          <span class="badge badge-neutral badge-capability-{{ label|lower|replace(' ', '-')|replace('_', '-') }}">{{ label }}</span>
         {% endfor %}
       </div>
     </td>
+
+    <!-- Pricing Column -->
     <td class="model-catalog-pricing-cell">
-      {% if row.latest_pricing %}
-        <strong>{{ row.pricing_label }}</strong>
-        <span>{{ row.pricing_detail }}</span>
-      {% else %}
-        <span class="badge badge-warning">{{ row.pricing_label }}</span>
-        <small>{{ row.pricing_detail }}</small>
-      {% endif %}
+      <div class="pricing-split-layout">
+        {% if "/" in row.pricing_label %}
+          {% set parts = row.pricing_label.split(' / ') %}
+          <div class="price-split-row">
+            <span class="price-type-label">Input</span>
+            <span class="price-value-highlight">{{ parts[0].replace(' in', '') }}</span>
+          </div>
+          <div class="price-split-row">
+            <span class="price-type-label">Output</span>
+            <span class="price-value-highlight">{{ parts[1].replace(' out', '') }}</span>
+          </div>
+        {% else %}
+          <span class="badge badge-warning">{{ row.pricing_label }}</span>
+        {% endif %}
+        <span class="price-detail-label">{{ row.pricing_detail }}</span>
+      </div>
     </td>
+
+    <!-- Tier Routing Column -->
     <td class="model-catalog-route-cell">
-      {% if row.assignment_labels %}
-        <div class="model-tag-list">
-          {% for label in row.assignment_labels %}
-            <span class="badge badge-success">{{ label }}</span>
-          {% endfor %}
-        </div>
-      {% else %}
-        <span class="identity-id">Unused</span>
-      {% endif %}
-      <form
-        class="model-catalog-tier-form"
-        method="post"
-        action="/admin/models/catalog/{{ row.model.id }}/assign-tier"
-        onsubmit="return confirm('Assign {{ row.model.display_name }} to the selected runtime tier?');"
-      >
-        <input type="hidden" name="next" value="{{ next_path }}">
-        <label>
-          <span class="sr-only">Runtime tier</span>
-          <select class="input compact-input" name="tier" aria-label="Runtime tier" {{ "disabled" if route_disabled else "" }}>
+      <div style="display: flex; flex-direction: column; gap: 8px; align-items: flex-start;">
+        {% if row.assignment_labels %}
+          <div class="model-tag-list" style="display: flex; flex-wrap: wrap; gap: 4px;">
+            {% for label in row.assignment_labels %}
+              <span class="badge badge-success">{{ label }}</span>
+            {% endfor %}
+          </div>
+        {% else %}
+          <span class="identity-id" style="font-style: italic; color: var(--muted-foreground);">Unused</span>
+        {% endif %}
+        
+        <div class="route-select-wrapper">
+          <select 
+            class="route-selector" 
+            name="assign_route" 
+            aria-label="Route model {{ row.model.display_name }} to tier"
+            data-model-id="{{ row.model.id }}" 
+            data-model-name="{{ row.model.display_name }}"
+            data-action-url="/admin/models/catalog/{{ row.model.id }}/assign-tier" 
+            {{ "disabled" if route_disabled else "" }}
+          >
+            <option value="" disabled selected>+ Route...</option>
             {% for option in tier_options %}
-              <option value="{{ option.tier }}">{{ option.label }}</option>
+              <option value="{{ option.tier }}-1">{{ option.label }} (Primary)</option>
+              <option value="{{ option.tier }}-2">{{ option.label }} (Fallback P2)</option>
             {% endfor %}
           </select>
-        </label>
-        <label>
-          <span class="sr-only">Tier priority</span>
-          <select class="input compact-input" name="priority" aria-label="Tier priority" {{ "disabled" if route_disabled else "" }}>
-            <option value="1">Primary</option>
-            <option value="2">Fallback P2</option>
-          </select>
-        </label>
-        <button class="btn-ghost" type="submit" {{ "disabled" if route_disabled else "" }}>Assign</button>
-      </form>
+        </div>
+      </div>
     </td>
+
+    <!-- Status Column -->
     <td class="model-catalog-status-cell">
-      <span class="badge badge-{{ row.tone }}">{{ "enabled" if row.model.is_enabled else "disabled" }}</span>
-      <form method="post" action="/admin/models/catalog/{{ row.model.id }}/status" onsubmit="return confirm('Update {{ row.model.display_name }} model status?');">
-        <input type="hidden" name="next" value="{{ next_path }}">
-        <select class="input compact-input" name="is_enabled">
-          <option value="true" {{ "selected" if row.model.is_enabled else "" }}>Enabled</option>
-          <option value="false" {{ "selected" if not row.model.is_enabled else "" }}>Disabled</option>
-        </select>
-        <button class="btn-ghost" type="submit">Save</button>
-      </form>
+      <div style="display: flex; justify-content: center; align-items: center; min-height: 32px;">
+        <div class="switch-control">
+          <label class="switch" for="status-{{ row.model.id }}">
+            <span class="sr-only">Toggle status for {{ row.model.display_name }}</span>
+            <input 
+              type="checkbox" 
+              id="status-{{ row.model.id }}" 
+              role="switch" 
+              data-model-name="{{ row.model.display_name }}"
+              data-action-url="/admin/models/catalog/{{ row.model.id }}/status"
+              {% if row.model.is_enabled %}checked{% endif %}
+            >
+            <span class="slider"></span>
+          </label>
+        </div>
+      </div>
     </td>
   </tr>
 {% else %}

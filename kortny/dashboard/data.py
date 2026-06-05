@@ -6629,16 +6629,35 @@ def _llm_model_config_row(
     )
 
 
+def _format_price_value(value: object) -> str:
+    if value is None:
+        return ""
+    try:
+        num = float(str(value))
+        if num.is_integer():
+            return f"{int(num):.2f}"
+
+        s = f"{num:.6f}"
+        s = s.rstrip("0")
+        if s.endswith("."):
+            s += "00"
+        elif len(s.split(".")[1]) == 1:
+            s += "0"
+        return s
+    except Exception:
+        return str(value)
+
+
 def _model_pricing_label(pricing: LLMModelPricing | None) -> str:
     if pricing is None:
         return "Missing pricing"
     input_price = (
-        f"${pricing.input_price_per_mtok}"
+        f"${_format_price_value(pricing.input_price_per_mtok)}"
         if pricing.input_price_per_mtok is not None
         else "? input"
     )
     output_price = (
-        f"${pricing.output_price_per_mtok}"
+        f"${_format_price_value(pricing.output_price_per_mtok)}"
         if pricing.output_price_per_mtok is not None
         else "? output"
     )

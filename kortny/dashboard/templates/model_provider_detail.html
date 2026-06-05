@@ -6,7 +6,12 @@
   <section class="page-heading">
     <div>
       <a class="eyebrow-link" href="/admin/models">LLM Providers</a>
-      <h1>{{ detail.provider.display_name }}</h1>
+      <h1 style="display: flex; align-items: center; gap: 12px;">
+        {{ detail.provider.display_name }}
+        <span class="badge badge-{{ 'success' if detail.provider.status == 'active' else 'warning' }}" id="provider-header-status-badge" style="font-size: 12px; padding: 4px 8px; border-radius: 99px;">
+          {{ detail.provider.status }}
+        </span>
+      </h1>
       <p>Inspect provider health, synced models, pricing metadata, and tier usage for this workspace.</p>
     </div>
     <div class="heading-actions">
@@ -19,7 +24,11 @@
     <div class="notice notice-{{ notice_tone }}" role="status">{{ notice }}</div>
   {% endif %}
 
-  <section class="summary-grid model-config-summary" aria-label="Provider overview">
+  <!-- Toast Notification Container -->
+  <div class="toast-container" id="toast-container" aria-live="polite"></div>
+
+  <!-- Metric Summary (Swappable) -->
+  <section class="summary-grid model-config-summary" id="metric-summary" aria-label="Provider overview">
     {% for metric in detail.metrics %}
       <div class="card metric-card metric-{{ metric.tone }}">
         <span>{{ metric.label }}</span>
@@ -31,312 +40,586 @@
     {% endfor %}
   </section>
 
-  <section class="model-provider-layout" aria-label="Provider controls">
-    <article class="card detail-section model-config-panel">
-      <header>
-        <h2>Connection</h2>
-        <p>Secrets stay encrypted and are never shown back in the dashboard.</p>
-      </header>
-      <dl class="model-provider-facts">
-        <div>
-          <dt>Provider</dt>
-          <dd>{{ detail.provider.provider_kind }}</dd>
-        </div>
-        <div>
-          <dt>Credential</dt>
-          <dd>{{ detail.provider_row.credential_label }}</dd>
-        </div>
-        <div>
-          <dt>Source</dt>
-          <dd>{{ detail.provider_row.source_label }}</dd>
-        </div>
-        <div>
-          <dt>Base URL</dt>
-          <dd>{{ detail.base_url_label }}</dd>
-        </div>
-        <div>
-          <dt>API version</dt>
-          <dd>{{ detail.api_version_label }}</dd>
-        </div>
-        <div>
-          <dt>Workspace</dt>
-          <dd>{{ detail.installation_label }}</dd>
-        </div>
-      </dl>
-    </article>
+  <!-- Tab Navigation -->
+  <nav class="tab-navigation" role="tablist" aria-label="Provider sections">
+    <button class="tab-btn active" role="tab" aria-selected="true" aria-controls="tab-catalog" id="btn-tab-catalog">Model Catalog</button>
+    <button class="tab-btn" role="tab" aria-selected="false" aria-controls="tab-routing" id="btn-tab-routing">Routed Models</button>
+    <button class="tab-btn" role="tab" aria-selected="false" aria-controls="tab-connection" id="btn-tab-connection">Connection & Settings</button>
+    <button class="tab-btn" role="tab" aria-selected="false" aria-controls="tab-audits" id="btn-tab-audits">Activity Logs</button>
+  </nav>
 
-    <article class="card detail-section model-config-panel">
-      <header>
-        <h2>Actions</h2>
-        <p>Use these when changing keys, debugging routing, or pulling fresh model metadata.</p>
-      </header>
-      <div class="model-provider-actions">
-        <form method="post" action="/admin/models/providers/{{ detail.provider.id }}/test">
-          <input type="hidden" name="next" value="/admin/models/providers/{{ detail.provider.id }}">
-          <button class="btn" type="submit">Test Connection</button>
-          <span>Runs a lightweight provider credential check.</span>
-        </form>
-        <form method="post" action="/admin/models/providers/{{ detail.provider.id }}/import-models">
-          <input type="hidden" name="next" value="/admin/models/providers/{{ detail.provider.id }}">
-          <input type="hidden" name="limit" value="100">
-          <button class="btn-ghost" type="submit">Refresh Models</button>
-          <span>Syncs LiteLLM catalog and provider endpoint models when available.</span>
-        </form>
-        <form method="post" action="/admin/models/providers/{{ detail.provider.id }}/update-pricing">
-          <input type="hidden" name="next" value="/admin/models/providers/{{ detail.provider.id }}">
-          <button class="btn-ghost" type="submit" {{ "disabled" if detail.missing_pricing_count == 0 else "" }}>Update Missing Pricing</button>
-          <span>
-            {% if detail.missing_pricing_count %}
-              Looks up pricing for {{ detail.missing_pricing_count }} model{{ "" if detail.missing_pricing_count == 1 else "s" }} missing cost metadata.
-            {% else %}
-              All synced model rows already have pricing metadata.
-            {% endif %}
-          </span>
-        </form>
-        <form method="post" action="/admin/models/providers/{{ detail.provider.id }}/status" onsubmit="return confirm('Update {{ detail.provider.display_name }} provider status?');">
-          <input type="hidden" name="next" value="/admin/models/providers/{{ detail.provider.id }}">
-          <select class="input compact-input" name="status" aria-label="Provider status">
-            <option value="active" {{ "selected" if detail.provider.status == "active" else "" }}>Active</option>
-            <option value="disabled" {{ "selected" if detail.provider.status == "disabled" else "" }}>Disabled</option>
-          </select>
-          <button class="btn-ghost" type="submit">Save Status</button>
-        </form>
+  <!-- Tab Panel 1: Model Catalog (Full Width) -->
+  <div class="tab-content active" id="tab-catalog" role="tabpanel" aria-labelledby="btn-tab-catalog">
+    <section class="model-provider-model-workspace" aria-label="Provider model management" style="grid-template-columns: minmax(0, 1fr);">
+      <div class="model-provider-main-stack">
+        
+        <!-- Collapsible Needs Attention banner (outside catalog card) -->
+        <div id="attention-notice-container" style="width: 100%;">
+          {% if detail.attention_models %}
+            <div class="notice notice-warning" id="attention-notice" style="margin-bottom: 6px; border-radius: var(--radius); position: relative; padding-right: 40px;">
+              <button 
+                type="button" 
+                onclick="document.getElementById('attention-notice').remove()" 
+                style="position: absolute; right: 14px; top: 14px; background: none; border: none; font-size: 20px; font-weight: 700; cursor: pointer; color: var(--warning); line-height: 1; padding: 0;"
+                aria-label="Dismiss warning"
+              >
+                &times;
+              </button>
+              <details>
+                <summary style="font-weight: 800; cursor: pointer; display: flex; align-items: center; gap: 8px;">
+                  <span>{{ detail.attention_models|length }} model(s) require attention</span>
+                </summary>
+                <ul style="margin: 10px 0 0; padding-left: 20px; font-size: 13px; line-height: 1.6;">
+                  {% for row in detail.attention_models %}
+                    <li>
+                      <strong>{{ row.model.display_name }}</strong> (<code>{{ row.model.model_identifier }}</code>) - 
+                      {% if row.latest_pricing is none %}<span class="badge badge-warning">Missing pricing</span>{% endif %}
+                      {% if not row.model.is_enabled %}<span class="badge badge-danger">Disabled</span>{% endif %}
+                      {% for label in row.assignment_labels %}
+                        <span class="badge badge-neutral">{{ label }}</span>
+                      {% endfor %}
+                    </li>
+                  {% endfor %}
+                </ul>
+              </details>
+            </div>
+          {% endif %}
+        </div>
+
+        <!-- Model Catalog Card (Swappable) -->
+        <section class="card detail-section model-config-panel model-provider-catalog-card" id="catalog-card" style="width: 100%; margin-top: 0;">
+          <header style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: 16px;">
+            <div>
+              <h2>Model Catalog</h2>
+              <p>Provider-specific model rows available for tier assignment and runtime routing.</p>
+            </div>
+            <button class="btn" type="button" onclick="document.getElementById('add-model-dialog').showModal()">+ Add Model</button>
+          </header>
+          
+          {% if detail.model_total_count > 0 %}
+            <div
+              class="model-provider-catalog-toolbar"
+              data-model-catalog-toolbar
+              data-model-catalog-endpoint="/admin/models/providers/{{ detail.provider.id }}/models"
+              data-model-catalog-limit="{{ detail.model_page_size }}"
+            >
+              <div style="display: flex; gap: 12px; align-items: center; width: 100%; flex-wrap: wrap;">
+                <!-- Search Box -->
+                <label class="model-provider-catalog-search-box" for="model-catalog-search" style="flex: 1; min-width: 240px; margin: 0;">
+                  <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                    <circle cx="11" cy="11" r="8"></circle>
+                    <path d="m21 21-4.35-4.35"></path>
+                  </svg>
+                  <span class="sr-only">Search models</span>
+                  <input id="model-catalog-search" class="input model-provider-catalog-search-input" type="search" placeholder="Search models by name, id, or source" autocomplete="off">
+                </label>
+                
+                <!-- Filters inline -->
+                <div class="catalog-filters-row" style="margin-top: 0; display: flex; gap: 8px; flex-wrap: wrap; align-items: center;">
+                  <select class="filter-pill-select" id="filter-capability" aria-label="Filter by capability">
+                    <option value="">All Capabilities</option>
+                    <option value="chat">Chat</option>
+                    <option value="vision">Vision</option>
+                    <option value="tools">Tool Calling</option>
+                  </select>
+                  
+                  <select class="filter-pill-select" id="filter-routing" aria-label="Filter by routing status">
+                    <option value="">All Routing</option>
+                    <option value="routed">Routed Only</option>
+                    <option value="unused">Unrouted Only</option>
+                  </select>
+                  
+                  <select class="filter-pill-select" id="filter-status" aria-label="Filter by status">
+                    <option value="">All Statuses</option>
+                    <option value="enabled">Enabled Only</option>
+                    <option value="disabled">Disabled Only</option>
+                  </select>
+                  
+                  <button class="btn-ghost" type="button" id="btn-clear-filters" style="font-size: 11px; padding: 4px 8px; min-height: 28px; border-radius: 999px;" hidden>Clear filters</button>
+                </div>
+                
+                <!-- Count text aligned on right -->
+                <span class="model-provider-catalog-count" data-model-catalog-count data-total-count="{{ detail.model_total_count }}" style="margin-left: auto; white-space: nowrap;">{{ detail.models|length }} shown of {{ detail.model_total_count }} models</span>
+              </div>
+            </div>
+          {% endif %}
+          
+          <div class="table-wrap">
+            <table class="table model-config-table model-catalog-table" style="width: 100%;">
+              <caption>Provider model rows, pricing, tier usage, and status controls.</caption>
+              <thead>
+                <tr>
+                  <th>Model</th>
+                  <th>Specs</th>
+                  <th>Pricing</th>
+                  <th>Tier Routing</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody data-model-catalog-body>
+                {% set model_rows = detail.models %}
+                {% set provider_id = detail.provider.id %}
+                {% set tier_options = detail.tier_options %}
+                {% set next_path = "/admin/models/providers/" ~ detail.provider.id %}
+                {% set empty_message = "No models have been synced for this provider yet." %}
+                {% include "_model_catalog_rows.html" %}
+              </tbody>
+            </table>
+          </div>
+          {% if detail.model_total_count > detail.model_page_size %}
+            <div class="model-provider-catalog-footer">
+              <div
+                id="catalog-load-state"
+                class="catalog-load-state"
+                data-model-catalog-load-more
+                data-next-offset="{{ detail.model_next_offset or detail.model_page_size }}"
+                {{ "hidden" if not detail.model_has_more else "" }}
+                aria-live="polite"
+                style="background: transparent; border: none; min-height: auto; padding: 0; cursor: pointer; display: flex; align-items: center; gap: 8px;"
+              >
+                <span class="catalog-load-status" style="font-weight: 500; color: var(--muted-foreground);">Loading more models</span>
+              </div>
+            </div>
+          {% endif %}
+        </section>
       </div>
-    </article>
-  </section>
+    </section>
+  </div>
 
-  <section class="model-provider-model-workspace" aria-label="Provider model management">
-    <div class="model-provider-main-stack">
-      <article class="card detail-section model-config-panel model-provider-models">
-        <header>
-          <h2>Routed Models</h2>
-          <p>Models currently used by Kortny runtime tiers.</p>
-        </header>
-        <div class="model-provider-model-list">
-          {% for row in detail.routed_models %}
-            <div class="model-provider-model-row">
-              <div class="model-provider-model-main">
-                <strong>{{ row.model.display_name }}</strong>
-                <code class="inline-code">{{ row.model.model_identifier }}</code>
-              </div>
-              <div class="model-provider-model-meta">
-                {% for label in row.assignment_labels %}
-                  <span class="badge badge-neutral">{{ label }}</span>
-                {% endfor %}
-                {% if row.latest_pricing %}
-                  <span class="badge badge-success">{{ row.latest_pricing.input_price_per_mtok or "?" }} / {{ row.latest_pricing.output_price_per_mtok or "?" }} {{ row.latest_pricing.currency }}</span>
+  <!-- Tab Panel 2: Routed Models (Full Width) -->
+  <div class="tab-content" id="tab-routing" role="tabpanel" aria-labelledby="btn-tab-routing">
+    <section class="model-provider-model-workspace" aria-label="Provider model management" style="grid-template-columns: minmax(0, 1fr);">
+      <div class="model-provider-main-stack">
+        <article class="card detail-section model-config-panel model-provider-models" id="routed-models-card" style="width: 100%;">
+          <header>
+            <h2>Routed Models</h2>
+            <p>Models currently used by Kortny runtime tiers.</p>
+          </header>
+          <div class="table-wrap">
+            <table class="table model-config-table model-catalog-table" style="width: 100%;">
+              <thead>
+                <tr>
+                  <th>Model</th>
+                  <th>Assignments</th>
+                  <th>Pricing</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for row in detail.routed_models %}
+                  <tr data-routed-model-row>
+                    <td class="model-catalog-model-cell">
+                      <div class="model-catalog-model-title">
+                        <strong>{{ row.model.display_name }}</strong>
+                        <code class="inline-code">{{ row.model.model_identifier }}</code>
+                      </div>
+                    </td>
+                    <td>
+                      <div class="model-tag-list">
+                        {% for label in row.assignment_labels %}
+                          <span class="badge badge-success">{{ label }}</span>
+                        {% endfor %}
+                      </div>
+                    </td>
+                    <td class="model-catalog-pricing-cell">
+                      <div style="display: flex; flex-direction: column; gap: 4px; align-items: flex-start;">
+                        {% if row.latest_pricing %}
+                          <strong>{{ row.pricing_label }}</strong>
+                          <span>{{ row.pricing_detail }}</span>
+                        {% else %}
+                          <span class="badge badge-warning">Missing pricing</span>
+                        {% endif %}
+                      </div>
+                    </td>
+                    <td class="model-catalog-status-cell">
+                      <div style="display: flex; flex-direction: column; gap: 6px; align-items: flex-start;">
+                        <div class="switch-control">
+                          <label class="switch" for="routed-status-{{ row.model.id }}">
+                            <span class="sr-only">Toggle status for {{ row.model.display_name }}</span>
+                            <input 
+                              type="checkbox" 
+                              id="routed-status-{{ row.model.id }}" 
+                              role="switch" 
+                              data-model-name="{{ row.model.display_name }}"
+                              data-action-url="/admin/models/catalog/{{ row.model.id }}/status"
+                              {% if row.model.is_enabled %}checked{% endif %}
+                            >
+                            <span class="slider"></span>
+                          </label>
+                        </div>
+                        <span class="badge badge-{{ row.tone }}" id="status-badge-routed-status-{{ row.model.id }}">
+                          {{ "enabled" if row.model.is_enabled else "disabled" }}
+                        </span>
+                      </div>
+                    </td>
+                  </tr>
                 {% else %}
-                  <span class="badge badge-warning">Missing pricing</span>
-                {% endif %}
-                <span class="badge badge-{{ row.tone }}">{{ "enabled" if row.model.is_enabled else "disabled" }}</span>
-              </div>
-              <form method="post" action="/admin/models/catalog/{{ row.model.id }}/status" onsubmit="return confirm('Update {{ row.model.display_name }} model status?');">
-                <input type="hidden" name="next" value="/admin/models/providers/{{ detail.provider.id }}">
-                <select class="input compact-input" name="is_enabled" aria-label="{{ row.model.display_name }} status">
-                  <option value="true" {{ "selected" if row.model.is_enabled else "" }}>Enabled</option>
-                  <option value="false" {{ "selected" if not row.model.is_enabled else "" }}>Disabled</option>
-                </select>
-                <button class="btn-ghost" type="submit">Save</button>
-              </form>
-            </div>
-          {% else %}
-            <div class="model-provider-empty">
-              <strong>No routed models use this provider yet.</strong>
-              <span>Assign a model to a tier from the Models page when this provider should serve runtime traffic.</span>
-            </div>
-          {% endfor %}
-        </div>
+                  <tr>
+                    <td colspan="4" class="model-provider-empty" style="text-align: center; padding: 40px;">
+                      <strong>No routed models use this provider yet.</strong>
+                      <span>Assign a model to a tier from the Models page when this provider should serve runtime traffic.</span>
+                    </td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </article>
+      </div>
+    </section>
+  </div>
+
+  <!-- Tab Panel 3: Connection & Settings -->
+  <div class="tab-content" id="tab-connection" role="tabpanel" aria-labelledby="btn-tab-connection">
+    <section class="model-provider-layout" aria-label="Provider controls" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 20px;">
+      <article class="card detail-section model-config-panel">
+        <header>
+          <h2>Connection</h2>
+          <p>Secrets stay encrypted and are never shown back in the dashboard.</p>
+        </header>
+        <dl class="model-provider-facts">
+          <div>
+            <dt>Provider</dt>
+            <dd>{{ detail.provider.provider_kind }}</dd>
+          </div>
+          <div>
+            <dt>Credential</dt>
+            <dd>{{ detail.provider_row.credential_label }}</dd>
+          </div>
+          <div>
+            <dt>Source</dt>
+            <dd>{{ detail.provider_row.source_label }}</dd>
+          </div>
+          <div>
+            <dt>Base URL</dt>
+            <dd>{{ detail.base_url_label }}</dd>
+          </div>
+          <div>
+            <dt>API version</dt>
+            <dd>{{ detail.api_version_label }}</dd>
+          </div>
+          <div>
+            <dt>Workspace</dt>
+            <dd>{{ detail.installation_label }}</dd>
+          </div>
+        </dl>
       </article>
 
-      <section class="card detail-section model-config-panel model-provider-catalog-card">
+      <article class="card detail-section model-config-panel">
         <header>
-          <h2>Model Catalog</h2>
-          <p>Provider-specific model rows available for tier assignment and runtime routing.</p>
+          <h2>Actions</h2>
+          <p>Use these when changing keys, debugging routing, or pulling fresh model metadata.</p>
         </header>
-        {% if detail.model_total_count > 10 %}
-          <div
-            class="model-provider-catalog-toolbar"
-            data-model-catalog-toolbar
-            data-model-catalog-endpoint="/admin/models/providers/{{ detail.provider.id }}/models"
-            data-model-catalog-limit="{{ detail.model_page_size }}"
-          >
-            <label class="model-provider-catalog-search-box" for="model-catalog-search">
-              <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-                <circle cx="11" cy="11" r="8"></circle>
-                <path d="m21 21-4.35-4.35"></path>
-              </svg>
-              <span class="sr-only">Search models</span>
-              <input id="model-catalog-search" class="input model-provider-catalog-search-input" type="search" placeholder="Search models by name, id, or source" autocomplete="off">
-            </label>
-            <span class="model-provider-catalog-count" data-model-catalog-count>{{ detail.models|length }} shown of {{ detail.model_total_count }} models</span>
-          </div>
-        {% endif %}
-        <div class="table-wrap">
-          <table class="table model-config-table model-catalog-table">
-            <caption>Provider model rows, pricing, tier usage, and status controls.</caption>
-            <thead>
+        <div class="model-provider-actions">
+          <form method="post" action="/admin/models/providers/{{ detail.provider.id }}/test">
+            <input type="hidden" name="next" value="/admin/models/providers/{{ detail.provider.id }}">
+            <button class="btn" type="submit">Test Connection</button>
+            <span>Runs a lightweight provider credential check.</span>
+          </form>
+          <form method="post" action="/admin/models/providers/{{ detail.provider.id }}/import-models">
+            <input type="hidden" name="next" value="/admin/models/providers/{{ detail.provider.id }}">
+            <input type="hidden" name="limit" value="100">
+            <button class="btn-ghost" type="submit">Refresh Models</button>
+            <span>Syncs LiteLLM catalog and provider endpoint models when available.</span>
+          </form>
+          <form method="post" action="/admin/models/providers/{{ detail.provider.id }}/update-pricing">
+            <input type="hidden" name="next" value="/admin/models/providers/{{ detail.provider.id }}">
+            <button class="btn-ghost" type="submit" {{ "disabled" if detail.missing_pricing_count == 0 else "" }}>Update Missing Pricing</button>
+            <span>
+              {% if detail.missing_pricing_count %}
+                Looks up pricing for {{ detail.missing_pricing_count }} model{{ "" if detail.missing_pricing_count == 1 else "s" }} missing cost metadata.
+              {% else %}
+                All synced model rows already have pricing metadata.
+              {% endif %}
+            </span>
+          </form>
+          <form method="post" action="/admin/models/providers/{{ detail.provider.id }}/status">
+            <input type="hidden" name="next" value="/admin/models/providers/{{ detail.provider.id }}">
+            <select class="input compact-input" name="status" aria-label="Provider status">
+              <option value="active" {{ "selected" if detail.provider.status == "active" else "" }}>Active</option>
+              <option value="disabled" {{ "selected" if detail.provider.status == "disabled" else "" }}>Disabled</option>
+            </select>
+            <button class="btn-ghost" type="submit">Save Status</button>
+          </form>
+        </div>
+      </article>
+    </section>
+  </div>
+
+  <!-- Tab Panel 4: Activity Logs -->
+  <div class="tab-content" id="tab-audits" role="tabpanel" aria-labelledby="btn-tab-audits">
+    <section class="card detail-section model-config-panel" id="audit-trail-card" style="width: 100%;">
+      <header>
+        <h2>Recent Provider Audit</h2>
+        <p>Configuration changes tied to this provider, its models, and assigned tiers.</p>
+      </header>
+      <div class="table-wrap">
+        <table class="table model-config-table">
+          <caption>Recent provider audit entries.</caption>
+          <thead>
+            <tr>
+              <th>Change</th>
+              <th>Actor</th>
+              <th>Entity</th>
+              <th>When</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in detail.audits %}
               <tr>
-                <th>Model</th>
-                <th>Specs</th>
-                <th>Pricing</th>
-                <th>Tier Routing</th>
-                <th>Status</th>
+                <td>
+                  <span class="badge badge-{{ row.tone }}">{{ row.audit.action }}</span>
+                  <strong>{{ row.label }}</strong>
+                </td>
+                <td>{{ row.audit.actor_slack_user_id or "dashboard" }}</td>
+                <td><code class="inline-code">{{ row.audit.entity_id or row.audit.entity_type }}</code></td>
+                <td>{{ row.audit.created_at|datetime }}</td>
               </tr>
-            </thead>
-            <tbody data-model-catalog-body>
-              {% set model_rows = detail.models %}
-              {% set provider_id = detail.provider.id %}
-              {% set tier_options = detail.tier_options %}
-              {% set next_path = "/admin/models/providers/" ~ detail.provider.id %}
-              {% set empty_message = "No models have been synced for this provider yet." %}
-              {% include "_model_catalog_rows.html" %}
-            </tbody>
-          </table>
-        </div>
-        {% if detail.model_total_count > detail.model_page_size %}
-          <div class="model-provider-catalog-footer">
-            <button
-              class="btn-ghost"
-              type="button"
-              data-model-catalog-load-more
-              data-next-offset="{{ detail.model_next_offset or detail.model_page_size }}"
-              {{ "hidden" if not detail.model_has_more else "" }}
-            >
-              Load more models
-            </button>
-          </div>
-        {% endif %}
-      </section>
-    </div>
+            {% else %}
+              <tr>
+                <td colspan="4">No provider-specific config changes have been recorded yet.</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </div>
 
-    <div class="model-provider-side-stack">
-      <aside class="card detail-section model-config-panel model-provider-side-panel">
-        <header>
-          <h2>Needs Attention</h2>
-          <p>Pricing or status issues most likely to affect routing.</p>
-        </header>
-        <div class="model-provider-compact-list">
-          {% for row in detail.attention_models %}
-            <div>
-              <strong>{{ row.model.display_name }}</strong>
-              <span>{{ row.model.model_identifier }}</span>
-              <div class="model-tag-list">
-                {% if row.latest_pricing is none %}
-                  <span class="badge badge-warning">Missing pricing</span>
-                {% endif %}
-                {% if not row.model.is_enabled %}
-                  <span class="badge badge-danger">Disabled</span>
-                {% endif %}
-                {% for label in row.assignment_labels %}
-                  <span class="badge badge-neutral">{{ label }}</span>
-                {% endfor %}
-              </div>
-            </div>
-          {% else %}
-            <div class="model-provider-empty compact">
-              <strong>No obvious issues</strong>
-              <span>Assigned models have enabled rows and available pricing metadata.</span>
-            </div>
-          {% endfor %}
-        </div>
-      </aside>
-
-      <aside class="card detail-section model-config-panel model-provider-side-panel">
-        <header>
-          <h2>Add Manual Model</h2>
-          <p>Use this only when the model is not returned by sync yet.</p>
-        </header>
-        <form class="model-config-form" method="post" action="/admin/models/catalog">
-          <input type="hidden" name="provider_account_id" value="{{ detail.provider.id }}">
-          <input type="hidden" name="next" value="/admin/models/providers/{{ detail.provider.id }}">
-          <label>
-            Model identifier
-            <input class="input" name="model_identifier" placeholder="provider/model-name" required>
-          </label>
-          <label>
-            Display name
-            <input class="input" name="display_name" placeholder="Optional friendly name">
-          </label>
-          <button class="btn-ghost" type="submit">Add Model</button>
-        </form>
-      </aside>
+  <!-- Add Manual Model Dialog Modal -->
+  <dialog id="add-model-dialog">
+    <div class="dialog-header">
+      <h2 style="margin: 0; font-size: 16px; font-weight: 800;">Add Manual Model</h2>
+      <button type="button" class="toast-close" onclick="document.getElementById('add-model-dialog').close()" aria-label="Close dialog">&times;</button>
     </div>
-  </section>
-
-  <section class="card detail-section model-config-panel">
-    <header>
-      <h2>Recent Provider Audit</h2>
-      <p>Configuration changes tied to this provider, its models, and assigned tiers.</p>
-    </header>
-    <div class="table-wrap">
-      <table class="table model-config-table">
-        <caption>Recent provider audit entries.</caption>
-        <thead>
-          <tr>
-            <th>Change</th>
-            <th>Actor</th>
-            <th>Entity</th>
-            <th>When</th>
-          </tr>
-        </thead>
-        <tbody>
-          {% for row in detail.audits %}
-            <tr>
-              <td>
-                <span class="badge badge-{{ row.tone }}">{{ row.audit.action }}</span>
-                <strong>{{ row.label }}</strong>
-              </td>
-              <td>{{ row.audit.actor_slack_user_id or "dashboard" }}</td>
-              <td><code class="inline-code">{{ row.audit.entity_id or row.audit.entity_type }}</code></td>
-              <td>{{ row.audit.created_at|datetime }}</td>
-            </tr>
-          {% else %}
-            <tr>
-              <td colspan="4">No provider-specific config changes have been recorded yet.</td>
-            </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-    </div>
-  </section>
+    <form class="model-config-form" method="post" action="/admin/models/catalog">
+      <div class="dialog-body">
+        <p style="color: var(--muted-foreground); font-size: 12px; margin: 0 0 4px; line-height: 1.45;">Use this only when the model is not returned by sync yet.</p>
+        <input type="hidden" name="provider_account_id" value="{{ detail.provider.id }}">
+        <input type="hidden" name="next" value="/admin/models/providers/{{ detail.provider.id }}">
+        
+        <label style="display: grid; gap: 6px; font-size: 11px; font-weight: 800; text-transform: uppercase; color: var(--muted-foreground);">
+          Model identifier
+          <input class="input" name="model_identifier" placeholder="provider/model-name" required style="font-weight: 500;">
+        </label>
+        
+        <label style="display: grid; gap: 6px; font-size: 11px; font-weight: 800; text-transform: uppercase; color: var(--muted-foreground);">
+          Display name
+          <input class="input" name="display_name" placeholder="Optional friendly name" style="font-weight: 500;">
+        </label>
+      </div>
+      <div class="dialog-footer">
+        <button class="btn-ghost" type="button" onclick="document.getElementById('add-model-dialog').close()" style="min-height: 36px; padding: 0 16px;">Cancel</button>
+        <button class="btn" type="submit" style="min-height: 36px; padding: 0 16px;">Add Model</button>
+      </div>
+    </form>
+  </dialog>
 
   <script>
     (() => {
+      // Elements & State
       const toolbar = document.querySelector('[data-model-catalog-toolbar]');
       const body = document.querySelector('[data-model-catalog-body]');
-      if (!toolbar || !body) return;
-
-      const input = toolbar.querySelector('#model-catalog-search');
-      const count = toolbar.querySelector('[data-model-catalog-count]');
-      const loadMore = document.querySelector('[data-model-catalog-load-more]');
-      const endpoint = toolbar.dataset.modelCatalogEndpoint;
-      const limit = Number.parseInt(toolbar.dataset.modelCatalogLimit || '25', 10);
+      const endpoint = toolbar ? toolbar.dataset.modelCatalogEndpoint : '';
+      const limit = toolbar ? Number.parseInt(toolbar.dataset.modelCatalogLimit || '25', 10) : 25;
+      
       let query = '';
       let loading = false;
       let debounceId = null;
+      let infiniteScrollObserver = null;
 
-      const rowCount = () => body.querySelectorAll('[data-model-catalog-row]').length;
+      // Helpers
+      const rowCount = () => body ? body.querySelectorAll('[data-model-catalog-row]').length : 0;
 
-      const updateControls = (payload) => {
-        const total = Number(payload.total_count || 0);
-        const shown = rowCount();
-        if (count) {
-          count.textContent = query
-            ? `${shown} shown of ${total} matches`
-            : `${shown} shown of ${total} models`;
-        }
-        if (loadMore) {
-          loadMore.hidden = !payload.has_more;
-          if (payload.next_offset !== null && payload.next_offset !== undefined) {
-            loadMore.dataset.nextOffset = String(payload.next_offset);
+      // Toast System
+      const showToast = (message, type = 'success') => {
+        const container = document.getElementById('toast-container');
+        if (!container) return;
+        
+        const toast = document.createElement('div');
+        toast.className = `toast toast-${type}`;
+        
+        const msgEl = document.createElement('p');
+        msgEl.className = 'toast-message';
+        msgEl.textContent = message;
+        
+        const closeBtn = document.createElement('button');
+        closeBtn.className = 'toast-close';
+        closeBtn.innerHTML = '&times;';
+        closeBtn.ariaLabel = 'Close notification';
+        closeBtn.onclick = () => {
+          toast.classList.add('fade-out');
+          toast.addEventListener('animationend', () => toast.remove());
+        };
+        
+        toast.appendChild(msgEl);
+        toast.appendChild(closeBtn);
+        container.appendChild(toast);
+        
+        setTimeout(() => {
+          if (toast.parentNode) {
+            toast.classList.add('fade-out');
+            toast.addEventListener('animationend', () => toast.remove());
+          }
+        }, 4000);
+      };
+
+      // Tab Manager
+      const setupTabs = () => {
+        const tabButtons = document.querySelectorAll('.tab-btn');
+        const tabContents = document.querySelectorAll('.tab-content');
+        
+        const activeTabId = localStorage.getItem('provider-active-tab') || 'btn-tab-catalog';
+        
+        const activateTab = (tabBtnId) => {
+          const tabBtn = document.getElementById(tabBtnId);
+          if (!tabBtn) return;
+          
+          tabButtons.forEach(btn => {
+            btn.classList.remove('active');
+            btn.setAttribute('aria-selected', 'false');
+          });
+          tabContents.forEach(content => content.classList.remove('active'));
+          
+          tabBtn.classList.add('active');
+          tabBtn.setAttribute('aria-selected', 'true');
+          const panelId = tabBtn.getAttribute('aria-controls');
+          const panel = document.getElementById(panelId);
+          if (panel) panel.classList.add('active');
+          
+          localStorage.setItem('provider-active-tab', tabBtnId);
+        };
+        
+        tabButtons.forEach(btn => {
+          btn.addEventListener('click', () => {
+            activateTab(btn.id);
+          });
+        });
+        
+        activateTab(activeTabId);
+      };
+
+      // Client-side Filter Logic
+      const applyFilters = () => {
+        const searchInput = document.getElementById('model-catalog-search');
+        const filterCapability = document.getElementById('filter-capability');
+        const filterRouting = document.getElementById('filter-routing');
+        const filterStatus = document.getElementById('filter-status');
+        const clearBtn = document.getElementById('btn-clear-filters');
+        
+        const searchVal = searchInput ? searchInput.value.toLowerCase().trim() : '';
+        const capVal = filterCapability ? filterCapability.value.toLowerCase() : '';
+        const routeVal = filterRouting ? filterRouting.value.toLowerCase() : '';
+        const statusVal = filterStatus ? filterStatus.value.toLowerCase() : '';
+        
+        const hasActiveFilters = searchVal || capVal || routeVal || statusVal;
+        const rows = document.querySelectorAll('[data-model-catalog-row]');
+        let visibleCount = 0;
+        
+        rows.forEach(row => {
+          // 1. Text Search
+          const titleEl = row.querySelector('.model-catalog-model-title');
+          const matchesSearch = !searchVal || (titleEl && titleEl.textContent.toLowerCase().includes(searchVal));
+          
+          // 2. Capabilities
+          const capabilityBadges = Array.from(row.querySelectorAll('.model-catalog-capabilities-compact .badge, .model-catalog-meta-line .badge'));
+          const badgeTexts = capabilityBadges.map(b => b.textContent.toLowerCase().trim());
+          const matchesCap = !capVal || badgeTexts.includes(capVal);
+          
+          // 3. Routing
+          const hasRouting = row.querySelector('.model-catalog-route-cell .badge-success') !== null;
+          const matchesRouting = !routeVal || (routeVal === 'routed' ? hasRouting : !hasRouting);
+          
+          // 4. Status
+          const checkbox = row.querySelector('input[role="switch"]');
+          const isEnabled = checkbox ? checkbox.checked : false;
+          const matchesStatus = !statusVal || (statusVal === 'enabled' ? isEnabled : !isEnabled);
+          
+          if (matchesSearch && matchesCap && matchesRouting && matchesStatus) {
+            row.style.display = '';
+            visibleCount++;
+          } else {
+            row.style.display = 'none';
+          }
+        });
+        
+        const countEl = document.querySelector('[data-model-catalog-count]');
+        if (countEl) {
+          const totalInDOM = rows.length;
+          const serverTotal = Number(countEl.dataset.totalCount || totalInDOM);
+          if (hasActiveFilters) {
+            countEl.textContent = `${visibleCount} shown of ${totalInDOM} matches`;
+          } else {
+            countEl.textContent = `${totalInDOM} shown of ${serverTotal} models`;
           }
         }
+        
+        if (clearBtn) {
+          clearBtn.hidden = !hasActiveFilters;
+        }
+      };
+
+      const setupFilters = () => {
+        const searchInput = document.getElementById('model-catalog-search');
+        const filterCapability = document.getElementById('filter-capability');
+        const filterRouting = document.getElementById('filter-routing');
+        const filterStatus = document.getElementById('filter-status');
+        const clearBtn = document.getElementById('btn-clear-filters');
+        
+        const controls = [filterCapability, filterRouting, filterStatus];
+        controls.forEach(ctrl => {
+          if (ctrl) {
+            ctrl.addEventListener('change', () => {
+              if (ctrl.value) {
+                ctrl.classList.add('active');
+              } else {
+                ctrl.classList.remove('active');
+              }
+              applyFilters();
+            });
+          }
+        });
+        
+        if (clearBtn) {
+          clearBtn.addEventListener('click', () => {
+            if (searchInput) searchInput.value = '';
+            controls.forEach(ctrl => {
+              if (ctrl) {
+                ctrl.value = '';
+                ctrl.classList.remove('active');
+              }
+            });
+            applyFilters();
+          });
+        }
+      };
+
+      // Server pagination updates
+      const updateControls = (payload) => {
+        const total = Number(payload.total_count || 0);
+        const count = document.querySelector('[data-model-catalog-count]');
+        if (count) {
+          count.dataset.totalCount = String(total);
+        }
+        const loadMoreEl = document.querySelector('[data-model-catalog-load-more]');
+        if (loadMoreEl) {
+          loadMoreEl.hidden = !payload.has_more;
+          if (payload.next_offset !== null && payload.next_offset !== undefined) {
+            loadMoreEl.dataset.nextOffset = String(payload.next_offset);
+          }
+        }
+        applyFilters();
       };
 
       const fetchPage = async ({ append, offset }) => {
         if (loading || !endpoint) return;
         loading = true;
-        if (loadMore) loadMore.disabled = true;
+        
+        const loadMoreEl = document.querySelector('[data-model-catalog-load-more]');
+        if (loadMoreEl) {
+          loadMoreEl.classList.add('is-loading');
+        }
+        
         const params = new URLSearchParams({
           offset: String(offset),
           limit: String(limit),
@@ -349,33 +632,283 @@
           });
           if (!response.ok) throw new Error('model catalog request failed');
           const payload = await response.json();
-          if (append) {
+          if (append && body) {
             body.insertAdjacentHTML('beforeend', payload.html);
-          } else {
+          } else if (body) {
             body.innerHTML = payload.html;
           }
           updateControls(payload);
         } catch (_error) {
+          const count = document.querySelector('[data-model-catalog-count]');
           if (count) count.textContent = 'Could not load models';
+          if (loadMoreEl) {
+            loadMoreEl.classList.add('has-error');
+            const statusEl = loadMoreEl.querySelector('.catalog-load-status');
+            if (statusEl) statusEl.textContent = 'Error loading models';
+          }
         } finally {
           loading = false;
-          if (loadMore) loadMore.disabled = false;
+          if (loadMoreEl) {
+            loadMoreEl.classList.remove('is-loading');
+          }
         }
       };
 
-      input.addEventListener('input', () => {
-        window.clearTimeout(debounceId);
-        debounceId = window.setTimeout(() => {
-          query = input.value.trim();
-          fetchPage({ append: false, offset: 0 });
-        }, 220);
-      });
-
-      if (loadMore) {
-        loadMore.addEventListener('click', () => {
-          const offset = Number.parseInt(loadMore.dataset.nextOffset || String(rowCount()), 10);
-          fetchPage({ append: true, offset });
+      // Dynamic swaps across background AJAX operations
+      const swapContent = (newDoc) => {
+        const selectors = [
+          '#metric-summary',
+          '#routed-models-card',
+          '#attention-notice-container',
+          '#catalog-card',
+          '#audit-trail-card'
+        ];
+        
+        selectors.forEach(selector => {
+          const currentEl = document.querySelector(selector);
+          const newEl = newDoc.querySelector(selector);
+          if (currentEl && newEl) {
+            currentEl.innerHTML = newEl.innerHTML;
+          }
         });
+        
+        // Sync provider header status badge
+        const headerBadge = document.getElementById('provider-header-status-badge');
+        const newHeaderBadge = newDoc.getElementById('provider-header-status-badge');
+        if (headerBadge && newHeaderBadge) {
+          headerBadge.textContent = newHeaderBadge.textContent;
+          headerBadge.className = newHeaderBadge.className;
+        }
+        
+        // Re-apply filter rules to newly loaded elements
+        applyFilters();
+        
+        // Re-setup infinite scroll observer on new elements
+        setupInfiniteScroll();
+      };
+
+      // AJAX form poster
+      const handleFormAjax = async (form) => {
+        const submitButton = form.querySelector('[type="submit"]');
+        if (submitButton) submitButton.disabled = true;
+        
+        try {
+          const formData = new FormData(form);
+          
+          const response = await fetch(form.action, {
+            method: 'POST',
+            body: new URLSearchParams(formData),
+            headers: {
+              'Content-Type': 'application/x-www-form-urlencoded'
+            }
+          });
+          
+          if (!response.ok) throw new Error('Action request failed');
+          
+          const htmlText = await response.text();
+          const parser = new DOMParser();
+          const doc = parser.parseFromString(htmlText, 'text/html');
+          
+          const noticeEl = doc.querySelector('.notice');
+          if (noticeEl) {
+            let tone = 'success';
+            if (noticeEl.classList.contains('notice-danger')) tone = 'danger';
+            else if (noticeEl.classList.contains('notice-warning')) tone = 'warning';
+            else if (noticeEl.classList.contains('notice-neutral')) tone = 'warning';
+            showToast(noticeEl.textContent.trim(), tone);
+          } else {
+            showToast('Configuration updated.', 'success');
+          }
+          
+          // Close modal if open
+          const dialog = document.getElementById('add-model-dialog');
+          if (dialog && dialog.open) {
+            dialog.close();
+          }
+          
+          swapContent(doc);
+          
+        } catch (error) {
+          showToast(error.message || 'An error occurred during submission', 'danger');
+        } finally {
+          if (submitButton) submitButton.disabled = false;
+        }
+      };
+
+      // Event Listeners
+      const setupAJAXHandlers = () => {
+        // Intercept standard forms except logout
+        document.addEventListener('submit', (event) => {
+          const form = event.target;
+          if (form.method.toLowerCase() === 'post') {
+            if (form.action.endsWith('/logout')) return;
+            event.preventDefault();
+            handleFormAjax(form);
+          }
+        });
+
+        // Intercept status switch toggles (handles both catalog and routed switches)
+        document.addEventListener('change', async (event) => {
+          const target = event.target;
+          if (target.matches('input[role="switch"][data-action-url]')) {
+            event.preventDefault();
+            const originalState = !target.checked;
+            const checked = target.checked;
+            const url = target.dataset.actionUrl;
+            const modelName = target.dataset.modelName || 'Model';
+            
+            target.disabled = true;
+            
+            try {
+              const formData = new URLSearchParams();
+              formData.append('is_enabled', checked ? 'true' : 'false');
+              formData.append('next', window.location.pathname);
+              
+              const response = await fetch(url, {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/x-www-form-urlencoded',
+                },
+                body: formData.toString()
+              });
+              
+              if (!response.ok) throw new Error('Status update failed');
+              
+              const htmlText = await response.text();
+              const parser = new DOMParser();
+              const doc = parser.parseFromString(htmlText, 'text/html');
+              
+              // Resolve badge ID for dynamic updates
+              const isRouted = target.id.startsWith('routed-status-');
+              const suffix = isRouted ? target.id.split('routed-status-')[1] : target.id.split('status-')[1];
+              
+              const badgeId = isRouted ? `status-badge-routed-status-${suffix}` : `status-badge-${suffix}`;
+              const badge = document.getElementById(badgeId);
+              if (badge) {
+                badge.textContent = checked ? 'enabled' : 'disabled';
+                badge.className = `badge badge-${checked ? 'success' : 'warning'}`;
+              }
+              
+              swapContent(doc);
+              showToast(`${modelName} status updated to ${checked ? 'enabled' : 'disabled'}.`, 'success');
+            } catch (error) {
+              target.checked = originalState;
+              showToast(error.message || 'Failed to update status', 'danger');
+            } finally {
+              target.disabled = false;
+            }
+          }
+        });
+
+        // Intercept routing selectors
+        document.addEventListener('change', async (event) => {
+          const target = event.target;
+          if (target.matches('.route-selector')) {
+            const val = target.value;
+            if (!val) return;
+            
+            const [tier, priority] = val.split('-');
+            const url = target.dataset.actionUrl;
+            const modelName = target.dataset.modelName || 'Model';
+            
+            target.value = ""; // reset visual selection
+            target.disabled = true;
+            
+            try {
+              const formData = new URLSearchParams();
+              formData.append('tier', tier);
+              formData.append('priority', priority);
+              formData.append('next', window.location.pathname);
+              
+              const response = await fetch(url, {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/x-www-form-urlencoded',
+                },
+                body: formData.toString()
+              });
+              
+              if (!response.ok) throw new Error('Routing assignment failed');
+              
+              const htmlText = await response.text();
+              const parser = new DOMParser();
+              const doc = parser.parseFromString(htmlText, 'text/html');
+              
+              swapContent(doc);
+              const priorityLabel = priority === '1' ? 'Primary' : 'Fallback P2';
+              showToast(`Routed ${modelName} as ${priorityLabel} for ${tier.replace('_', ' ').toUpperCase()}.`, 'success');
+            } catch (error) {
+              showToast(error.message || 'Failed to assign routing', 'danger');
+            } finally {
+              target.disabled = false;
+            }
+          }
+        });
+      };
+
+      const setupInfiniteScroll = () => {
+        if (infiniteScrollObserver) {
+          infiniteScrollObserver.disconnect();
+          infiniteScrollObserver = null;
+        }
+
+        const sentinel = document.querySelector('[data-model-catalog-load-more]');
+        if (!sentinel) return;
+
+        // Fallback click handler
+        sentinel.onclick = () => {
+          if (!loading) {
+            const offset = Number.parseInt(sentinel.dataset.nextOffset || String(rowCount()), 10);
+            fetchPage({ append: true, offset });
+          }
+        };
+
+        if ('IntersectionObserver' in window) {
+          infiniteScrollObserver = new IntersectionObserver((entries) => {
+            if (entries.some(entry => entry.isIntersecting)) {
+              const sentinelEl = document.querySelector('[data-model-catalog-load-more]');
+              if (sentinelEl && !sentinelEl.hidden && !loading) {
+                const offset = Number.parseInt(sentinelEl.dataset.nextOffset || String(rowCount()), 10);
+                fetchPage({ append: true, offset });
+              }
+            }
+          }, {
+            rootMargin: '200px 0px'
+          });
+          infiniteScrollObserver.observe(sentinel);
+        }
+      };
+
+      const setupSearch = () => {
+        const input = document.getElementById('model-catalog-search');
+        if (!input) return;
+        
+        input.addEventListener('input', () => {
+          window.clearTimeout(debounceId);
+          debounceId = window.setTimeout(() => {
+            query = input.value.trim();
+            fetchPage({ append: false, offset: 0 });
+          }, 220);
+        });
+      };
+
+      // Initialization
+      document.addEventListener('DOMContentLoaded', () => {
+        setupTabs();
+        setupFilters();
+        setupSearch();
+        setupAJAXHandlers();
+        applyFilters();
+        setupInfiniteScroll();
+      });
+      
+      if (document.readyState !== 'loading') {
+        setupTabs();
+        setupFilters();
+        setupSearch();
+        setupAJAXHandlers();
+        applyFilters();
+        setupInfiniteScroll();
       }
     })();
   </script>

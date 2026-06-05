@@ -4,11 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import re
 import uuid
 from collections.abc import Callable, MutableMapping
-from contextlib import contextmanager
 from datetime import UTC, datetime
 from decimal import ROUND_HALF_UP, Decimal
 from functools import lru_cache
@@ -463,21 +461,20 @@ class AdkAgentRuntime:
         final_author: str | None = None
         event_count = 0
         authors: list[str] = []
-        with _temporary_model_api_key(self.settings):
-            events = runner.run_async(
-                user_id=user_id,
-                session_id=session_id,
-                new_message=message,
-            )
-            async for event in events:
-                event_count += 1
-                author = _string_or_none(getattr(event, "author", None))
-                if author is not None and author not in authors:
-                    authors.append(author)
-                self._record_adk_event(task, event=event, event_count=event_count)
-                if event.is_final_response():
-                    final_author = author
-                    final_text = _event_text(event)
+        events = runner.run_async(
+            user_id=user_id,
+            session_id=session_id,
+            new_message=message,
+        )
+        async for event in events:
+            event_count += 1
+            author = _string_or_none(getattr(event, "author", None))
+            if author is not None and author not in authors:
+                authors.append(author)
+            self._record_adk_event(task, event=event, event_count=event_count)
+            if event.is_final_response():
+                final_author = author
+                final_text = _event_text(event)
 
         if not final_text.strip():
             raise AgentLoopError(
@@ -514,7 +511,7 @@ class AdkAgentRuntime:
         )
         return Agent(
             name="kortny_root_orchestrator",
-            model=LiteLlm(model=self._adk_model_name()),
+            model=self._adk_model(),
             instruction=self._instruction(context_package=context_package),
             description="Routes Slack requests to Kortny specialist agents.",
             tools=[AgentTool(agent=agent) for agent in specialist_agents],
@@ -769,7 +766,7 @@ class AdkAgentRuntime:
     ) -> Agent:
         return Agent(
             name=name,
-            model=LiteLlm(model=model),
+            model=self._adk_model(model=model),
             instruction=_instruction_with_optional_context(
                 _instruction_with_persona(prompt), context
             ),
@@ -781,7 +778,7 @@ class AdkAgentRuntime:
     def _worker_agent(self, *, task: Task | None, context: str | None) -> Agent:
         return Agent(
             name="tool_worker_agent",
-            model=LiteLlm(model=self._adk_model_name()),
+            model=self._adk_model(),
             instruction=_instruction_with_optional_context(
                 ADK_TOOL_WORKER_PROMPT,
                 context,
@@ -808,7 +805,7 @@ class AdkAgentRuntime:
     ) -> Agent:
         return Agent(
             name=name,
-            model=LiteLlm(model=model),
+            model=self._adk_model(model=model),
             instruction=_instruction_with_optional_context(
                 _instruction_with_persona(prompt),
                 context,
@@ -930,6 +927,9 @@ class AdkAgentRuntime:
 
     def _adk_model_name(self) -> str:
         return adk_litellm_model_name(self.settings, model=self.model)
+
+    def _adk_model(self, *, model: str | None = None) -> LiteLlm:
+        return adk_litellm_model(self.settings, model=model or self.model)
 
     def _guard_planned_model_request(
         self,
@@ -1626,28 +1626,17 @@ def adk_litellm_model_name(settings: Settings, *, model: str | None = None) -> s
     return model
 
 
-@contextmanager
-def _temporary_model_api_key(settings: Settings) -> Any:
-    env_name = _api_key_env_name(settings.llm_provider)
-    previous = os.environ.get(env_name)
-    os.environ[env_name] = settings.llm_api_key
-    try:
-        yield
-    finally:
-        if previous is None:
-            os.environ.pop(env_name, None)
-        else:
-            os.environ[env_name] = previous
+def adk_litellm_model(settings: Settings, *, model: str | None = None) -> LiteLlm:
+    """Build an ADK LiteLlm with per-instance credentials.
 
+    ADK forwards constructor kwargs to LiteLLM's completion call. Passing the
+    API key here avoids process-global environment mutation during async runs.
+    """
 
-def _api_key_env_name(provider: LLMProvider) -> str:
-    if provider is LLMProvider.openai:
-        return "OPENAI_API_KEY"
-    if provider is LLMProvider.anthropic:
-        return "ANTHROPIC_API_KEY"
-    if provider is LLMProvider.openrouter:
-        return "OPENROUTER_API_KEY"
-    raise ValueError(f"Unsupported LLM provider for ADK runtime: {provider.value}")
+    return LiteLlm(
+        model=adk_litellm_model_name(settings, model=model),
+        api_key=settings.llm_api_key,
+    )
 
 
 def _event_text(event: Any) -> str:

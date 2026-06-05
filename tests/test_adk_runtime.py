@@ -7,7 +7,11 @@ import pytest
 from google.adk.models.llm_response import LlmResponse
 from google.genai import types as genai_types
 
-from kortny.agent.adk_runtime import AdkAgentRuntime, adk_litellm_model_name
+from kortny.agent.adk_runtime import (
+    AdkAgentRuntime,
+    adk_litellm_model,
+    adk_litellm_model_name,
+)
 from kortny.config import load_settings
 from kortny.db.models import Task
 from kortny.tools import ToolRegistry
@@ -65,6 +69,23 @@ def test_adk_model_mapping_uses_routed_model_override(
         adk_litellm_model_name(settings, model="deepseek/deepseek-v4-flash")
         == "openrouter/deepseek/deepseek-v4-flash"
     )
+
+
+def test_adk_litellm_model_uses_per_instance_api_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    set_required_settings_env(monkeypatch)
+    monkeypatch.setenv("LLM_PROVIDER", "openrouter")
+    monkeypatch.setenv("LLM_MODEL", "anthropic/claude-sonnet-test")
+    monkeypatch.setenv("LLM_API_KEY", "openrouter-runtime-key")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+
+    settings = load_settings(env_file=None)
+    model = adk_litellm_model(settings)
+
+    assert model.model == "openrouter/anthropic/claude-sonnet-test"
+    assert model._additional_args["api_key"] == "openrouter-runtime-key"
+    assert "OPENROUTER_API_KEY" not in os.environ
 
 
 def test_adk_runtime_builds_root_agent_in_chat_mode(

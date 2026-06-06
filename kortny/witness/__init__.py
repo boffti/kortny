@@ -1,5 +1,19 @@
 """Witness candidate primitives for proactive Kortny behavior."""
 
+from kortny.witness.autopilot import (
+    DEFAULT_WITNESS_AUTOPILOT_LIMIT,
+    DEFAULT_WITNESS_AUTOPILOT_MIN_CONFIDENCE,
+    WITNESS_AUTOPILOT_CANDIDATE_DEFERRED_MESSAGE,
+    WITNESS_AUTOPILOT_CANDIDATE_DISMISSED_MESSAGE,
+    WITNESS_AUTOPILOT_REVIEW_PROMPT_NAME,
+    WITNESS_AUTOPILOT_REVIEW_RESPONSE_FORMAT,
+    WITNESS_AUTOPILOT_TASK_CREATED_MESSAGE,
+    WitnessAutopilot,
+    WitnessAutopilotDecision,
+    WitnessAutopilotOutcome,
+    WitnessAutopilotRunResult,
+    parse_witness_autopilot_decision,
+)
 from kortny.witness.extractor import (
     WITNESS_CHANNEL_PROFILE_EXTRACTOR_PROMPT_NAME,
     WITNESS_CHANNEL_PROFILE_EXTRACTOR_RESPONSE_FORMAT,
@@ -47,8 +61,15 @@ from kortny.witness.runner import (
 
 __all__ = [
     "ALLOWED_CANDIDATE_TYPES",
+    "DEFAULT_WITNESS_AUTOPILOT_LIMIT",
+    "DEFAULT_WITNESS_AUTOPILOT_MIN_CONFIDENCE",
     "WITNESS_CHANNEL_PROFILE_EXTRACTOR_PROMPT_NAME",
     "WITNESS_CHANNEL_PROFILE_EXTRACTOR_RESPONSE_FORMAT",
+    "WITNESS_AUTOPILOT_CANDIDATE_DEFERRED_MESSAGE",
+    "WITNESS_AUTOPILOT_CANDIDATE_DISMISSED_MESSAGE",
+    "WITNESS_AUTOPILOT_REVIEW_PROMPT_NAME",
+    "WITNESS_AUTOPILOT_REVIEW_RESPONSE_FORMAT",
+    "WITNESS_AUTOPILOT_TASK_CREATED_MESSAGE",
     "WITNESS_SUGGESTION_PURPOSE",
     "WITNESS_TASK_RESPONSE_EXTRACTOR_PROMPT_NAME",
     "WITNESS_TASK_RESPONSE_EXTRACTOR_RESPONSE_FORMAT",
@@ -64,6 +85,10 @@ __all__ = [
     "DEFAULT_WITNESS_SCAN_INTERVAL",
     "WitnessDeliveryResult",
     "WitnessDeliveryOutcome",
+    "WitnessAutopilot",
+    "WitnessAutopilotDecision",
+    "WitnessAutopilotOutcome",
+    "WitnessAutopilotRunResult",
     "WitnessOpportunityCandidateInput",
     "WitnessOpportunityCandidateResult",
     "WitnessOpportunityService",
@@ -77,6 +102,7 @@ __all__ = [
     "accept_candidate",
     "archive_candidate",
     "dismiss_candidate",
+    "parse_witness_autopilot_decision",
     "parse_witness_channel_profile_extraction",
     "parse_witness_task_response_extraction",
     "reactivate_candidate",

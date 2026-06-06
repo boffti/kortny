@@ -142,16 +142,18 @@ docker compose up -d --force-recreate
 
 This starts Postgres on `localhost:5432`, runs the Alembic migration, starts
 the Slack Socket Mode ingress service, starts the task worker, starts the
-Postgres-native schedule materializer, starts the Witness candidate runner, and
+Postgres-native schedule materializer, starts the Witness proactive runner, and
 serves the operator dashboard at `http://localhost:8080`. It also starts the
 local Temporal dev server and Temporal worker so durable-workflow wiring is
 available during normal development.
 
 This does not start optional observability services such as Phoenix.
 
-Witness is conservative by default: it can create proactive opportunity
-candidates for the dashboard, but it will not send proactive DMs unless you set
-`KORTNY_WITNESS_DELIVER_PRIVATE=true`.
+Witness is on by default: it creates proactive opportunity candidates, reviews
+due candidates, and can start low-risk read-only proactive tasks through the
+normal Kortny worker path. The default autopilot limit is one proactive task per
+tick so old candidate backlog does not flood a workspace. It still will not send
+proactive DMs unless you set `KORTNY_WITNESS_DELIVER_PRIVATE=true`.
 
 The dashboard uses Sign in with Slack for per-user identity. In the default
 `hybrid` mode, a local bootstrap login remains available for development and
@@ -190,7 +192,7 @@ To process at most one pending task from your host shell:
 uv run python -m kortny.worker --once
 ```
 
-To run one Witness candidate-generation tick from your host shell:
+To run one Witness scan/autopilot tick from your host shell:
 
 ```
 uv run python -m kortny.witness --once

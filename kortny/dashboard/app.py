@@ -111,7 +111,10 @@ from kortny.llm.provider_config import (
 )
 from kortny.secrets import SecretEncryptionError, encrypt_secret_value
 from kortny.witness import (
+    DEFAULT_WITNESS_AUTOPILOT_MIN_CONFIDENCE,
     DEFAULT_WITNESS_SNOOZE,
+    WitnessAutopilot,
+    WitnessAutopilotRunResult,
     WitnessRunner,
     WitnessRunResult,
     accept_candidate,
@@ -657,6 +660,7 @@ def register_routes(app: FastAPI) -> None:
                 profile_limit=runtime_settings.witness_profile_scan_limit,
                 delivery_limit=0,
                 deliver_private=False,
+                autopilot_enabled=False,
                 min_scan_interval=timedelta(seconds=0),
                 use_advisory_lock=False,
             )
@@ -665,6 +669,48 @@ def register_routes(app: FastAPI) -> None:
             session.rollback()
             return _redirect_with_notice(next_path, str(exc), tone="danger")
         return _redirect_with_notice(next_path, _witness_run_notice(result))
+
+    @app.post("/witness/autopilot")
+    async def witness_run_autopilot(
+        request: Request,
+        principal: Annotated[DashboardPrincipal, Depends(require_admin)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> RedirectResponse:
+        form = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
+        next_path = _safe_next_path(form.get("next", ["/witness"])[0])
+        installation_id = _dashboard_installation_id(session, principal)
+        if installation_id is None:
+            return _redirect_with_notice(
+                next_path,
+                "Witness autopilot requires a selected workspace.",
+                tone="danger",
+            )
+        try:
+            runtime_settings = load_settings()
+            if not runtime_settings.witness_enabled:
+                return _redirect_with_notice(
+                    next_path,
+                    "Witness is disabled in runtime settings.",
+                    tone="warning",
+                )
+            actor = principal.slack_user_id or dashboard_actor(principal.display_name)
+            result = WitnessAutopilot(
+                session,
+                settings=runtime_settings,
+                actor_id=f"dashboard:{actor}",
+            ).run_once(
+                installation_id=installation_id,
+                limit=runtime_settings.witness_autopilot_limit,
+                min_confidence=(
+                    runtime_settings.witness_autopilot_min_confidence
+                    or DEFAULT_WITNESS_AUTOPILOT_MIN_CONFIDENCE
+                ),
+            )
+            session.commit()
+        except (SettingsError, ValueError) as exc:
+            session.rollback()
+            return _redirect_with_notice(next_path, str(exc), tone="danger")
+        return _redirect_with_notice(next_path, _witness_autopilot_notice(result))
 
     @app.post("/witness/candidates/{candidate_id}/{action}")
     async def witness_candidate_action(
@@ -4147,6 +4193,18 @@ def _witness_run_notice(result: WitnessRunResult) -> str:
         f"created {created_count:,} candidate"
         f"{'' if created_count == 1 else 's'}, "
         f"updated {updated_count:,}, skipped {skipped_count:,}."
+    )
+
+
+def _witness_autopilot_notice(result: WitnessAutopilotRunResult) -> str:
+    if result.reviewed_count == 0:
+        return "Witness autopilot complete: no due candidates met the review threshold."
+    return (
+        "Witness autopilot complete: "
+        f"reviewed {result.reviewed_count:,}, "
+        f"started {result.executed_count:,} proactive task"
+        f"{'' if result.executed_count == 1 else 's'}, "
+        f"deferred {result.deferred_count:,}, dismissed {result.dismissed_count:,}."
     )
 
 

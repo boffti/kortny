@@ -1,0 +1,755 @@
+"""Witness autopilot for default-on proactive help."""
+
+from __future__ import annotations
+
+import json
+import logging
+import uuid
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal, InvalidOperation
+from typing import Any
+
+from sqlalchemy import or_, select
+from sqlalchemy.orm import Session
+
+from kortny.config import Settings, load_settings
+from kortny.db.models import LLMProvider as DbLLMProvider
+from kortny.db.models import (
+    SlackChannelMembership,
+    Task,
+    TaskEventType,
+    WitnessOpportunityCandidate,
+)
+from kortny.llm import (
+    ChatMessage,
+    LLMProvider,
+    LLMService,
+    ModelRoute,
+    ModelRouter,
+    ModelRouteTier,
+)
+from kortny.llm.runtime_config import (
+    create_provider_for_selection,
+    select_runtime_model,
+)
+from kortny.observability import start_span
+from kortny.tasks import TaskService
+from kortny.tasks.identity import TaskIdentity
+from kortny.tools.types import JsonObject
+
+logger = logging.getLogger(__name__)
+
+WITNESS_AUTOPILOT_REVIEW_PROMPT_NAME = "kortny.witness_autopilot_reviewer"
+WITNESS_AUTOPILOT_REVIEW_RESPONSE_FORMAT: JsonObject = {"type": "json_object"}
+WITNESS_AUTOPILOT_TASK_CREATED_MESSAGE = "witness_autopilot_task_created"
+WITNESS_AUTOPILOT_CANDIDATE_DEFERRED_MESSAGE = "witness_autopilot_candidate_deferred"
+WITNESS_AUTOPILOT_CANDIDATE_DISMISSED_MESSAGE = "witness_autopilot_candidate_dismissed"
+
+DEFAULT_WITNESS_AUTOPILOT_LIMIT = 1
+DEFAULT_WITNESS_AUTOPILOT_MIN_CONFIDENCE = Decimal("0.600")
+DEFAULT_WITNESS_AUTOPILOT_COOLDOWN = timedelta(hours=24)
+MAX_AUTOPILOT_TASK_INPUT_CHARS = 1800
+
+_VALID_DECISIONS = frozenset(
+    ("execute_task", "defer", "dismiss", "monitor_only", "ask_user")
+)
+_VALID_RISKS = frozenset(("low", "medium", "high"))
+
+
+@dataclass(frozen=True, slots=True)
+class WitnessAutopilotDecision:
+    """Structured LLM review for one Witness candidate."""
+
+    decision: str
+    risk: str
+    reason: str
+    task_input: str | None
+    confidence_score: Decimal
+
+    @property
+    def should_execute(self) -> bool:
+        return (
+            self.decision == "execute_task"
+            and self.risk == "low"
+            and bool(self.task_input)
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class WitnessAutopilotOutcome:
+    """Outcome from reviewing one candidate."""
+
+    candidate_id: uuid.UUID
+    status: str
+    decision: str | None = None
+    risk: str | None = None
+    reason: str | None = None
+    task_id: uuid.UUID | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class WitnessAutopilotRunResult:
+    """Outcome from one autopilot run."""
+
+    outcomes: tuple[WitnessAutopilotOutcome, ...]
+
+    @property
+    def reviewed_count(self) -> int:
+        return len(self.outcomes)
+
+    @property
+    def executed_count(self) -> int:
+        return sum(1 for outcome in self.outcomes if outcome.status == "executed")
+
+    @property
+    def deferred_count(self) -> int:
+        return sum(1 for outcome in self.outcomes if outcome.status == "deferred")
+
+    @property
+    def dismissed_count(self) -> int:
+        return sum(1 for outcome in self.outcomes if outcome.status == "dismissed")
+
+
+class WitnessAutopilot:
+    """Review due Witness candidates and turn useful ones into normal tasks."""
+
+    def __init__(
+        self,
+        session: Session,
+        *,
+        settings: Settings | None = None,
+        llm_provider: LLMProvider | None = None,
+        provider_name: DbLLMProvider | str | None = None,
+        actor_id: str = "witness_autopilot",
+        cooldown: timedelta = DEFAULT_WITNESS_AUTOPILOT_COOLDOWN,
+    ) -> None:
+        self.session = session
+        self.settings = settings
+        self.llm_provider = llm_provider
+        self.provider_name = provider_name
+        self.actor_id = actor_id
+        self.cooldown = cooldown
+
+    def run_once(
+        self,
+        *,
+        installation_id: uuid.UUID | None = None,
+        now: datetime | None = None,
+        limit: int = DEFAULT_WITNESS_AUTOPILOT_LIMIT,
+        min_confidence: Decimal = DEFAULT_WITNESS_AUTOPILOT_MIN_CONFIDENCE,
+    ) -> WitnessAutopilotRunResult:
+        """Review due candidates and create low-risk proactive tasks."""
+
+        if limit < 0:
+            raise ValueError("limit must be non-negative")
+        if limit == 0:
+            return WitnessAutopilotRunResult(outcomes=())
+
+        run_at = _coerce_utc(now)
+        candidates = self._eligible_candidates(
+            installation_id=installation_id,
+            now=run_at,
+            limit=limit,
+            min_confidence=min_confidence,
+        )
+        outcomes: list[WitnessAutopilotOutcome] = []
+        with start_span(
+            "witness.autopilot",
+            attributes={
+                "openinference.span.kind": "CHAIN",
+                "witness.autopilot.limit": limit,
+                "witness.autopilot.min_confidence": str(min_confidence),
+            },
+        ):
+            for candidate in candidates:
+                try:
+                    outcomes.append(self._review_candidate(candidate, now=run_at))
+                except Exception as exc:
+                    logger.exception(
+                        "witness autopilot candidate review failed candidate_id=%s",
+                        candidate.id,
+                    )
+                    _record_feedback(
+                        candidate,
+                        action="autopilot_failed",
+                        by_user_id=self.actor_id,
+                        now=run_at,
+                        details={
+                            "error_type": type(exc).__name__,
+                            "error": _bounded(str(exc), 280),
+                        },
+                    )
+                    outcomes.append(
+                        WitnessAutopilotOutcome(
+                            candidate_id=candidate.id,
+                            status="failed",
+                            reason=str(exc),
+                        )
+                    )
+            self.session.flush()
+        return WitnessAutopilotRunResult(outcomes=tuple(outcomes))
+
+    def _eligible_candidates(
+        self,
+        *,
+        installation_id: uuid.UUID | None,
+        now: datetime,
+        limit: int,
+        min_confidence: Decimal,
+    ) -> tuple[WitnessOpportunityCandidate, ...]:
+        filters = [
+            WitnessOpportunityCandidate.status == "candidate",
+            WitnessOpportunityCandidate.confidence_score >= min_confidence,
+            or_(
+                WitnessOpportunityCandidate.source_task_id.is_(None),
+                WitnessOpportunityCandidate.source_task_id.not_in(
+                    select(Task.id).where(
+                        Task.identity_key.like("synthetic:witness_autopilot:%")
+                    )
+                ),
+            ),
+            or_(
+                WitnessOpportunityCandidate.cooldown_until.is_(None),
+                WitnessOpportunityCandidate.cooldown_until <= now,
+            ),
+        ]
+        if installation_id is not None:
+            filters.append(WitnessOpportunityCandidate.installation_id == installation_id)
+        return tuple(
+            self.session.scalars(
+                select(WitnessOpportunityCandidate)
+                .where(*filters)
+                .order_by(
+                    WitnessOpportunityCandidate.confidence_score.desc(),
+                    WitnessOpportunityCandidate.updated_at.asc(),
+                    WitnessOpportunityCandidate.created_at.asc(),
+                )
+                .with_for_update(skip_locked=True)
+                .limit(limit)
+            )
+        )
+
+    def _review_candidate(
+        self,
+        candidate: WitnessOpportunityCandidate,
+        *,
+        now: datetime,
+    ) -> WitnessAutopilotOutcome:
+        source_task = _source_task(self.session, candidate)
+        if source_task is None:
+            return self._defer_without_review(
+                candidate,
+                now=now,
+                reason="Candidate has no source task for auditable LLM review.",
+            )
+
+        decision = self._review_with_llm(candidate, source_task=source_task)
+        if decision.should_execute:
+            task = self._create_proactive_task(
+                candidate,
+                decision=decision,
+                source_task=source_task,
+                now=now,
+            )
+            candidate.status = "accepted"
+            candidate.cooldown_until = None
+            candidate.last_suggested_at = now
+            candidate.updated_at = now
+            _record_feedback(
+                candidate,
+                action="autopilot_executed",
+                by_user_id=self.actor_id,
+                now=now,
+                details={
+                    "decision": decision.decision,
+                    "risk": decision.risk,
+                    "reason": decision.reason,
+                    "generated_task_id": str(task.id),
+                    "execution_policy": "default_on_low_risk_task",
+                },
+            )
+            TaskService(self.session).append_event(
+                task,
+                TaskEventType.log,
+                {
+                    "message": WITNESS_AUTOPILOT_TASK_CREATED_MESSAGE,
+                    "candidate_id": str(candidate.id),
+                    "source_task_id": str(source_task.id),
+                    "decision": decision.decision,
+                    "risk": decision.risk,
+                    "reason": decision.reason,
+                },
+            )
+            self.session.flush()
+            return WitnessAutopilotOutcome(
+                candidate_id=candidate.id,
+                status="executed",
+                decision=decision.decision,
+                risk=decision.risk,
+                reason=decision.reason,
+                task_id=task.id,
+            )
+
+        if decision.decision == "dismiss":
+            candidate.status = "dismissed"
+            candidate.cooldown_until = None
+            candidate.updated_at = now
+            _record_feedback(
+                candidate,
+                action="autopilot_dismissed",
+                by_user_id=self.actor_id,
+                now=now,
+                details={
+                    "decision": decision.decision,
+                    "risk": decision.risk,
+                    "reason": decision.reason,
+                },
+            )
+            _append_candidate_event(
+                self.session,
+                candidate,
+                message=WITNESS_AUTOPILOT_CANDIDATE_DISMISSED_MESSAGE,
+                payload={
+                    "decision": decision.decision,
+                    "risk": decision.risk,
+                    "reason": decision.reason,
+                },
+            )
+            self.session.flush()
+            return WitnessAutopilotOutcome(
+                candidate_id=candidate.id,
+                status="dismissed",
+                decision=decision.decision,
+                risk=decision.risk,
+                reason=decision.reason,
+            )
+
+        candidate.status = "cooldown"
+        candidate.cooldown_until = now + self.cooldown
+        candidate.updated_at = now
+        _record_feedback(
+            candidate,
+            action="autopilot_deferred",
+            by_user_id=self.actor_id,
+            now=now,
+            details={
+                "decision": decision.decision,
+                "risk": decision.risk,
+                "reason": decision.reason,
+                "cooldown_until": candidate.cooldown_until.isoformat(),
+            },
+        )
+        _append_candidate_event(
+            self.session,
+            candidate,
+            message=WITNESS_AUTOPILOT_CANDIDATE_DEFERRED_MESSAGE,
+            payload={
+                "decision": decision.decision,
+                "risk": decision.risk,
+                "reason": decision.reason,
+                "cooldown_until": candidate.cooldown_until.isoformat(),
+            },
+        )
+        self.session.flush()
+        return WitnessAutopilotOutcome(
+            candidate_id=candidate.id,
+            status="deferred",
+            decision=decision.decision,
+            risk=decision.risk,
+            reason=decision.reason,
+        )
+
+    def _review_with_llm(
+        self,
+        candidate: WitnessOpportunityCandidate,
+        *,
+        source_task: Task,
+    ) -> WitnessAutopilotDecision:
+        completion = self._llm(source_task=source_task).complete(
+            task_id=source_task.id,
+            messages=_review_messages(candidate=candidate, source_task=source_task),
+            response_format=WITNESS_AUTOPILOT_REVIEW_RESPONSE_FORMAT,
+            prompt_name=WITNESS_AUTOPILOT_REVIEW_PROMPT_NAME,
+        )
+        return parse_witness_autopilot_decision(completion.content)
+
+    def _llm(self, *, source_task: Task) -> LLMService:
+        task_service = TaskService(self.session)
+        if self.llm_provider is not None:
+            route = ModelRoute(
+                tier=ModelRouteTier.cheap_fast,
+                model=self.llm_provider.model,
+                reason="witness_autopilot_review",
+            )
+            return LLMService(
+                session=self.session,
+                provider=self.llm_provider,
+                provider_name=self.provider_name or DbLLMProvider.openrouter,
+                task_service=task_service,
+                model_route=route,
+            )
+
+        route = ModelRouter(self._settings).route_for_tier(
+            ModelRouteTier.cheap_fast,
+            reason="witness_autopilot_review",
+        )
+        selection = select_runtime_model(
+            session=self.session,
+            settings=self._settings,
+            installation_id=source_task.installation_id,
+            model_route=route,
+        )
+        provider = create_provider_for_selection(
+            settings=self._settings,
+            selection=selection,
+        )
+        return LLMService(
+            session=self.session,
+            provider=provider,
+            provider_name=selection.provider_name,
+            task_service=task_service,
+            model_route=selection.model_route,
+        )
+
+    def _create_proactive_task(
+        self,
+        candidate: WitnessOpportunityCandidate,
+        *,
+        decision: WitnessAutopilotDecision,
+        source_task: Task,
+        now: datetime,
+    ) -> Task:
+        channel_id = _candidate_channel_id(candidate, source_task=source_task)
+        if channel_id is None:
+            raise ValueError("Witness candidate has no channel for proactive task.")
+        task_input = _task_input(candidate, decision=decision)
+        user_id = (
+            candidate.target_slack_user_id
+            or source_task.slack_user_id
+            or _membership_added_by(self.session, candidate)
+            or self.actor_id
+        )
+        identity = TaskIdentity.synthetic(
+            source="witness_autopilot",
+            source_id=str(candidate.id),
+            input_text=task_input,
+            payload={
+                "candidate_id": str(candidate.id),
+                "candidate_type": candidate.candidate_type,
+                "visibility_scope_type": candidate.visibility_scope_type,
+                "visibility_scope_id": candidate.visibility_scope_id,
+                "source_task_id": str(source_task.id),
+                "autopilot_decision": decision.decision,
+                "autopilot_risk": decision.risk,
+                "created_at": now.isoformat(),
+            },
+        )
+        return TaskService(self.session).create_task(
+            installation_id=candidate.installation_id,
+            slack_event_id=None,
+            slack_channel_id=channel_id,
+            slack_thread_ts=None,
+            slack_message_ts=None,
+            slack_user_id=user_id,
+            input=task_input,
+            identity=identity,
+            source_surface="witness_autopilot",
+        )
+
+    def _defer_without_review(
+        self,
+        candidate: WitnessOpportunityCandidate,
+        *,
+        now: datetime,
+        reason: str,
+    ) -> WitnessAutopilotOutcome:
+        candidate.status = "cooldown"
+        candidate.cooldown_until = now + self.cooldown
+        candidate.updated_at = now
+        _record_feedback(
+            candidate,
+            action="autopilot_deferred",
+            by_user_id=self.actor_id,
+            now=now,
+            details={
+                "decision": "defer",
+                "risk": "medium",
+                "reason": reason,
+                "cooldown_until": candidate.cooldown_until.isoformat(),
+            },
+        )
+        self.session.flush()
+        return WitnessAutopilotOutcome(
+            candidate_id=candidate.id,
+            status="deferred",
+            decision="defer",
+            risk="medium",
+            reason=reason,
+        )
+
+    @property
+    def _settings(self) -> Settings:
+        if self.settings is None:
+            self.settings = load_settings()
+        return self.settings
+
+
+def parse_witness_autopilot_decision(
+    content: str | None,
+) -> WitnessAutopilotDecision:
+    """Parse and validate the autopilot review payload."""
+
+    if not content:
+        return _fallback_decision("empty_model_output")
+    try:
+        payload = json.loads(_extract_json_object(content))
+    except (json.JSONDecodeError, ValueError):
+        return _fallback_decision("invalid_json")
+    if not isinstance(payload, dict):
+        return _fallback_decision("invalid_payload")
+
+    decision = _choice(payload.get("decision"), valid=_VALID_DECISIONS, default="defer")
+    risk = _choice(payload.get("risk"), valid=_VALID_RISKS, default="medium")
+    reason = _bounded(_optional_text(payload.get("reason")) or "No reason provided.", 500)
+    task_input = _optional_text(payload.get("task_input"))
+    confidence = _decimal(payload.get("confidence_score"), default=Decimal("0.500"))
+    return WitnessAutopilotDecision(
+        decision=decision,
+        risk=risk,
+        reason=reason,
+        task_input=_bounded(task_input, MAX_AUTOPILOT_TASK_INPUT_CHARS)
+        if task_input
+        else None,
+        confidence_score=max(Decimal("0.000"), min(confidence, Decimal("1.000"))),
+    )
+
+
+def _review_messages(
+    *,
+    candidate: WitnessOpportunityCandidate,
+    source_task: Task,
+) -> tuple[ChatMessage, ...]:
+    return (
+        ChatMessage(
+            role="system",
+            content=(
+                "You are Kortny's Witness autopilot reviewer. Kortny is an AI "
+                "coworker in Slack, and proactive help is ON by default unless "
+                "users opt out. Use semantic judgment. Decide whether Kortny "
+                "should act now on this opportunity candidate. Prefer "
+                "execute_task for low-risk read-only help, summaries, analysis, "
+                "monitoring setup, and useful follow-ups with clear evidence. "
+                "Do not execute destructive or write-side external actions, "
+                "privacy-risky actions, very speculative ideas, stale ideas, or "
+                "policy-only notes. Return JSON only with schema: "
+                "{\"decision\":\"execute_task|defer|dismiss|monitor_only|ask_user\","
+                "\"risk\":\"low|medium|high\",\"reason\":\"brief reason\","
+                "\"task_input\":\"normal Slack-style task request for Kortny to run "
+                "when decision is execute_task\",\"confidence_score\":0.0}. "
+                "The task_input must be self-contained, natural, and must not "
+                "mention internal candidate IDs, autopilot, or this review."
+            ),
+        ),
+        ChatMessage(
+            role="user",
+            content=json.dumps(
+                {
+                    "candidate": {
+                        "id": str(candidate.id),
+                        "type": candidate.candidate_type,
+                        "title": candidate.title,
+                        "summary": candidate.summary,
+                        "suggested_action": candidate.suggested_action,
+                        "suggested_message": candidate.suggested_message,
+                        "confidence_score": str(candidate.confidence_score),
+                        "confidence_reason": candidate.confidence_reason,
+                        "scope_type": candidate.visibility_scope_type,
+                        "scope_id": candidate.visibility_scope_id,
+                        "channel_id": candidate.channel_id,
+                        "target_slack_user_id": candidate.target_slack_user_id,
+                        "evidence": candidate.evidence_json,
+                        "metadata": candidate.metadata_json,
+                    },
+                    "source_task": {
+                        "id": str(source_task.id),
+                        "input": source_task.input,
+                        "result_summary": source_task.result_summary,
+                        "slack_channel_id": source_task.slack_channel_id,
+                        "slack_user_id": source_task.slack_user_id,
+                    },
+                    "execution_policy": {
+                        "default_on": True,
+                        "allowed_now": (
+                            "low-risk read-only work, summaries, analysis, "
+                            "monitoring setup, and helpful follow-up tasks"
+                        ),
+                        "blocked_now": (
+                            "destructive changes, external writes, private-data "
+                            "exposure, or noisy speculative channel posts"
+                        ),
+                    },
+                },
+                default=str,
+                separators=(",", ":"),
+                sort_keys=True,
+            ),
+        ),
+    )
+
+
+def _source_task(
+    session: Session,
+    candidate: WitnessOpportunityCandidate,
+) -> Task | None:
+    if candidate.source_task_id is None:
+        return None
+    return session.get(Task, candidate.source_task_id)
+
+
+def _candidate_channel_id(
+    candidate: WitnessOpportunityCandidate,
+    *,
+    source_task: Task,
+) -> str | None:
+    if candidate.channel_id:
+        return candidate.channel_id
+    if candidate.visibility_scope_id and candidate.visibility_scope_type in {
+        "channel",
+        "private_channel",
+        "dm",
+    }:
+        return candidate.visibility_scope_id
+    return source_task.slack_channel_id
+
+
+def _membership_added_by(
+    session: Session,
+    candidate: WitnessOpportunityCandidate,
+) -> str | None:
+    if not candidate.channel_id:
+        return None
+    membership = session.scalar(
+        select(SlackChannelMembership)
+        .where(
+            SlackChannelMembership.installation_id == candidate.installation_id,
+            SlackChannelMembership.channel_id == candidate.channel_id,
+        )
+        .limit(1)
+    )
+    return membership.added_by_user_id if membership is not None else None
+
+
+def _task_input(
+    candidate: WitnessOpportunityCandidate,
+    *,
+    decision: WitnessAutopilotDecision,
+) -> str:
+    if decision.task_input:
+        return _bounded(decision.task_input, MAX_AUTOPILOT_TASK_INPUT_CHARS)
+    fallback = candidate.suggested_action or candidate.summary
+    return _bounded(
+        f"{fallback}\n\nUse this Witness context: {candidate.title} - {candidate.summary}",
+        MAX_AUTOPILOT_TASK_INPUT_CHARS,
+    )
+
+
+def _append_candidate_event(
+    session: Session,
+    candidate: WitnessOpportunityCandidate,
+    *,
+    message: str,
+    payload: dict[str, object],
+) -> None:
+    if candidate.source_task_id is None:
+        return
+    task = session.get(Task, candidate.source_task_id)
+    if task is None:
+        return
+    TaskService(session).append_event(
+        task,
+        TaskEventType.log,
+        {
+            "message": message,
+            "candidate_id": str(candidate.id),
+            **payload,
+        },
+    )
+
+
+def _record_feedback(
+    candidate: WitnessOpportunityCandidate,
+    *,
+    action: str,
+    by_user_id: str,
+    now: datetime,
+    details: dict[str, Any],
+) -> None:
+    feedback = dict(candidate.feedback_json or {})
+    history_value = feedback.get("history")
+    history = list(history_value) if isinstance(history_value, list) else []
+    entry = {
+        "action": action,
+        "by_user_id": by_user_id,
+        "at": now.isoformat(),
+        **{key: value for key, value in details.items() if value is not None},
+    }
+    history.append(entry)
+    feedback["history"] = history[-25:]
+    feedback["last_action"] = entry
+    candidate.feedback_json = feedback
+
+
+def _fallback_decision(reason: str) -> WitnessAutopilotDecision:
+    return WitnessAutopilotDecision(
+        decision="defer",
+        risk="medium",
+        reason=reason,
+        task_input=None,
+        confidence_score=Decimal("0.500"),
+    )
+
+
+def _choice(value: object, *, valid: frozenset[str], default: str) -> str:
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in valid:
+            return normalized
+    return default
+
+
+def _decimal(value: object, *, default: Decimal) -> Decimal:
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError):
+        return default
+
+
+def _optional_text(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = " ".join(value.split()).strip()
+    return normalized or None
+
+
+def _bounded(value: str, max_chars: int) -> str:
+    return " ".join(value.split()).strip()[:max_chars].strip()
+
+
+def _extract_json_object(content: str) -> str:
+    stripped = content.strip()
+    if stripped.startswith("{") and stripped.endswith("}"):
+        return stripped
+    start = stripped.find("{")
+    end = stripped.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        raise ValueError("No JSON object found.")
+    return stripped[start : end + 1]
+
+
+def _coerce_utc(value: datetime | None) -> datetime:
+    if value is None:
+        return datetime.now(UTC)
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)

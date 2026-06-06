@@ -3824,6 +3824,55 @@ def test_agent_executor_skips_witness_extractor_for_adk_quick_response(
     )
 
 
+def test_agent_executor_skips_witness_extractor_for_witness_autopilot_task(
+    db_session: Session,
+) -> None:
+    task = create_task(db_session, event_id="EvWitnessAutopilotSkip")
+    task.identity_kind = "synthetic"
+    task.identity_key = "synthetic:witness_autopilot:loop-source"
+    task.identity_payload = {"source": "witness_autopilot"}
+    task_service = TaskService(db_session)
+    db_session.commit()
+    settings = make_settings()
+    slack_client = FakeSlackClient()
+    provider = FakeAgentProvider([])
+    executor = AgentTaskExecutor(
+        settings=settings,
+        llm_provider=provider,
+        provider_name=LLMProvider.openrouter,
+        response_synthesizer=StaticResponseSynthesizer(),
+        slack_client=slack_client,
+    )
+
+    posted_text = executor._post_outputs(
+        settings=settings,
+        session=db_session,
+        task=task,
+        task_service=task_service,
+        result_summary="I found a useful follow-up.",
+    )
+    executor._project_witness_opportunities_from_result(
+        settings=settings,
+        session=db_session,
+        task=task,
+        task_service=task_service,
+        posted_response_text=posted_text,
+    )
+    db_session.commit()
+
+    assert slack_client.messages[-1]["text"] == "I found a useful follow-up."
+    assert provider.calls == []
+    assert (
+        db_session.scalar(select(func.count()).select_from(WitnessOpportunityCandidate))
+        == 0
+    )
+    assert not any(
+        event.payload.get("message")
+        == WITNESS_OPPORTUNITY_CANDIDATES_PROJECTED_MESSAGE
+        for event in task_events(db_session, task)
+    )
+
+
 def cleanup_database(session: Session) -> None:
     for model in (
         WitnessOpportunityCandidate,

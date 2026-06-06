@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal
@@ -147,6 +148,18 @@ class Settings(BaseSettings):
     witness_scan_interval_seconds: int = Field(
         default=21_600,
         validation_alias="KORTNY_WITNESS_SCAN_INTERVAL_SECONDS",
+    )
+    witness_autopilot_enabled: bool = Field(
+        default=True,
+        validation_alias="KORTNY_WITNESS_AUTOPILOT_ENABLED",
+    )
+    witness_autopilot_limit: int = Field(
+        default=1,
+        validation_alias="KORTNY_WITNESS_AUTOPILOT_LIMIT",
+    )
+    witness_autopilot_min_confidence: Decimal = Field(
+        default=Decimal("0.600"),
+        validation_alias="KORTNY_WITNESS_AUTOPILOT_MIN_CONFIDENCE",
     )
     tool_selector_max_external_candidates: int = Field(
         default=24, validation_alias="TOOL_SELECTOR_MAX_EXTERNAL_CANDIDATES"

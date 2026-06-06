@@ -13,6 +13,10 @@
         <input type="hidden" name="next" value="{{ witness_return_path }}">
         <button class="btn" type="submit">Run scan</button>
       </form>
+      <form method="post" action="/witness/autopilot">
+        <input type="hidden" name="next" value="{{ witness_return_path }}">
+        <button class="btn" type="submit">Run autopilot</button>
+      </form>
       <a class="btn-ghost" href="/knowledge-graph">View Graph</a>
       <a class="btn-ghost" href="/tasks">View Tasks</a>
     </div>
@@ -134,6 +138,19 @@
               <div class="witness-message-preview">
                 <span>Draft DM</span>
                 <p>{{ row.candidate.suggested_message }}</p>
+              </div>
+            {% endif %}
+            {% set last_action = row.candidate.feedback_json.get("last_action") if row.candidate.feedback_json else none %}
+            {% if last_action and last_action.action and last_action.action.startswith("autopilot_") %}
+              <div class="witness-message-preview">
+                <span>Autopilot</span>
+                <p>
+                  {{ last_action.action|replace("_", " ")|title }}
+                  {% if last_action.reason %}- {{ last_action.reason }}{% endif %}
+                  {% if last_action.generated_task_id %}
+                    <a href="/tasks/{{ last_action.generated_task_id }}">View task</a>
+                  {% endif %}
+                </p>
               </div>
             {% endif %}
             <div class="witness-meta">

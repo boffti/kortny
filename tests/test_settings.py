@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 import pytest
 
 from kortny.config import LLMProvider, SettingsError, load_settings
@@ -37,6 +39,9 @@ SETTINGS_ENV_VARS = {
     "KORTNY_WITNESS_PROFILE_SCAN_LIMIT",
     "KORTNY_WITNESS_DELIVERY_LIMIT",
     "KORTNY_WITNESS_SCAN_INTERVAL_SECONDS",
+    "KORTNY_WITNESS_AUTOPILOT_ENABLED",
+    "KORTNY_WITNESS_AUTOPILOT_LIMIT",
+    "KORTNY_WITNESS_AUTOPILOT_MIN_CONFIDENCE",
     "COMPOSIO_API_KEY",
     "COMPOSIO_CATALOG_ENABLED",
     "COMPOSIO_CATALOG_LIMIT",
@@ -109,6 +114,9 @@ def test_settings_loads_required_environment(monkeypatch: pytest.MonkeyPatch) ->
     assert settings.witness_profile_scan_limit == 10
     assert settings.witness_delivery_limit == 5
     assert settings.witness_scan_interval_seconds == 21600
+    assert settings.witness_autopilot_enabled is True
+    assert settings.witness_autopilot_limit == 1
+    assert settings.witness_autopilot_min_confidence == Decimal("0.600")
     assert settings.composio_api_key == "composio-key"
     assert settings.composio_catalog_enabled is True
     assert settings.composio_catalog_limit == 60
@@ -159,6 +167,9 @@ def test_settings_loads_optional_environment(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setenv("KORTNY_WITNESS_PROFILE_SCAN_LIMIT", "7")
     monkeypatch.setenv("KORTNY_WITNESS_DELIVERY_LIMIT", "2")
     monkeypatch.setenv("KORTNY_WITNESS_SCAN_INTERVAL_SECONDS", "3600")
+    monkeypatch.setenv("KORTNY_WITNESS_AUTOPILOT_ENABLED", "false")
+    monkeypatch.setenv("KORTNY_WITNESS_AUTOPILOT_LIMIT", "3")
+    monkeypatch.setenv("KORTNY_WITNESS_AUTOPILOT_MIN_CONFIDENCE", "0.725")
     monkeypatch.setenv("OBSERVABILITY_CAPTURE_CONTENT", "summaries")
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://otel:4318")
     monkeypatch.setenv(
@@ -208,6 +219,9 @@ def test_settings_loads_optional_environment(monkeypatch: pytest.MonkeyPatch) ->
     assert settings.witness_profile_scan_limit == 7
     assert settings.witness_delivery_limit == 2
     assert settings.witness_scan_interval_seconds == 3600
+    assert settings.witness_autopilot_enabled is False
+    assert settings.witness_autopilot_limit == 3
+    assert settings.witness_autopilot_min_confidence == Decimal("0.725")
     assert settings.observability_capture_content == "summaries"
     assert settings.otel_exporter_otlp_endpoint == "http://otel:4318"
     assert (

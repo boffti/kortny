@@ -2153,6 +2153,8 @@ def _response_humanizer_skip_reason(
 
 
 def _should_skip_witness_extraction(session: Session, task: Task) -> bool:
+    if _is_witness_autopilot_task(task):
+        return True
     events = _task_events(session, task)
     if _latest_payload_event(events, message="adk_quick_response_selected") is not None:
         return True
@@ -2160,6 +2162,13 @@ def _should_skip_witness_extraction(session: Session, task: Task) -> bool:
     if completed is None:
         return False
     return completed.get("final_author") in ADK_QUICK_FINAL_AUTHORS
+
+
+def _is_witness_autopilot_task(task: Task) -> bool:
+    if task.identity_kind != "synthetic":
+        return False
+    payload = task.identity_payload
+    return isinstance(payload, Mapping) and payload.get("source") == "witness_autopilot"
 
 
 def _latest_payload_event(

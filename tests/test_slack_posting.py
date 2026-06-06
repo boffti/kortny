@@ -207,6 +207,34 @@ def test_post_message_allows_scheduled_channel_root_delivery(
     ]
 
 
+def test_post_message_allows_witness_autopilot_root_delivery(
+    db_session: Session,
+) -> None:
+    task = create_task(
+        db_session,
+        channel_id="C123",
+        thread_ts=None,
+    )
+    task.identity_kind = "synthetic"
+    task.identity_payload = {"source": "witness_autopilot"}
+    db_session.flush()
+    client = FakeSlackClient()
+
+    message_ts = SlackPoster(session=db_session, client=client).post_message(
+        SlackThread.from_task(task),
+        "Proactive update.",
+    )
+
+    assert message_ts == "1716400001.000001"
+    assert client.messages == [
+        {
+            "channel": "C123",
+            "text": "Proactive update.",
+            "thread_ts": None,
+        }
+    ]
+
+
 def test_post_message_records_blocks_in_outbox_and_event(db_session: Session) -> None:
     task = create_task(db_session)
     client = FakeSlackClient()

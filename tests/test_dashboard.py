@@ -3602,6 +3602,7 @@ def test_dashboard_witness_page_shows_candidates_and_filters(
     assert f"/tasks/{task.id}" in response.text
     assert "witness-test-dedupe-key" in response.text
     assert "Run scan" in response.text
+    assert "Run autopilot" in response.text
     assert "Mark useful" in response.text
     assert "Snooze" in response.text
     assert "Dismiss" in response.text
@@ -3733,6 +3734,66 @@ def test_dashboard_witness_run_scan_uses_selected_workspace(
     notice_response = test_client.get(location)
     assert notice_response.status_code == 200
     assert "Witness scan complete" in notice_response.text
+
+
+def test_dashboard_witness_run_autopilot_uses_selected_workspace(
+    client: tuple[TestClient, Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    test_client, session = client
+    task = create_dashboard_task(session)
+    session.commit()
+    set_runtime_settings_env(monkeypatch)
+    calls: list[dict[str, object]] = []
+
+    class FakeWitnessAutopilot:
+        def __init__(
+            self,
+            autopilot_session: Session,
+            *,
+            settings: object,
+            actor_id: str,
+        ) -> None:
+            calls.append(
+                {
+                    "session": autopilot_session,
+                    "settings": settings,
+                    "actor_id": actor_id,
+                }
+            )
+
+        def run_once(self, **kwargs: object) -> object:
+            calls.append(kwargs)
+            return SimpleNamespace(
+                reviewed_count=3,
+                executed_count=2,
+                deferred_count=1,
+                dismissed_count=0,
+            )
+
+    monkeypatch.setattr("kortny.dashboard.app.WitnessAutopilot", FakeWitnessAutopilot)
+    login(test_client)
+
+    response = test_client.post(
+        "/witness/autopilot",
+        data={"next": "/witness?status=candidate"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    location = response.headers["location"]
+    assert location.startswith("/witness?status=candidate")
+    query = parse_url_qs(urlsplit(location).query)
+    assert query["notice_tone"] == ["success"]
+    assert "reviewed 3" in query["notice"][0]
+    assert "started 2 proactive tasks" in query["notice"][0]
+    assert len(calls) == 2
+    init_call, run_call = calls
+    assert isinstance(init_call["session"], Session)
+    assert str(init_call["actor_id"]).startswith("dashboard:")
+    assert run_call["installation_id"] == task.installation_id
+    assert run_call["limit"] == 1
+    assert run_call["min_confidence"] == Decimal("0.600")
 
 
 def test_dashboard_knowledge_graph_refresh_queues_channel_assessment_tasks(

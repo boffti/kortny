@@ -65,7 +65,7 @@ class SlackThread:
     @classmethod
     def from_task(cls, task: Task) -> SlackThread:
         thread_ts = task.slack_thread_ts or task.slack_message_ts
-        if not thread_ts and task.identity_kind != "scheduled":
+        if not thread_ts and not _allows_root_delivery(task):
             raise ValueError("Task has no Slack thread timestamp")
         return cls(
             channel_id=task.slack_channel_id,
@@ -434,6 +434,13 @@ def _post_thread_ts(thread: SlackThread) -> str | None:
     if thread.channel_id.startswith("D"):
         return None
     return thread.thread_ts
+
+
+def _allows_root_delivery(task: Task) -> bool:
+    if task.identity_kind == "scheduled":
+        return True
+    payload = task.identity_payload if isinstance(task.identity_payload, dict) else {}
+    return payload.get("source") == "witness_autopilot"
 
 
 def _response_mapping(response: Any) -> Mapping[str, Any]:

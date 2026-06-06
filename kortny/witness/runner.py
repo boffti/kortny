@@ -18,6 +18,7 @@ import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 
 from slack_sdk import WebClient
 from sqlalchemy import and_, desc, func, select
@@ -44,6 +45,12 @@ from kortny.llm.runtime_config import (
 from kortny.logging_config import configure_logging
 from kortny.observability import configure_tracing, start_span
 from kortny.tasks import TaskService
+from kortny.witness.autopilot import (
+    DEFAULT_WITNESS_AUTOPILOT_LIMIT,
+    DEFAULT_WITNESS_AUTOPILOT_MIN_CONFIDENCE,
+    WitnessAutopilot,
+    WitnessAutopilotOutcome,
+)
 from kortny.witness.extractor import WitnessChannelProfileExtractor
 from kortny.witness.lifecycle import WitnessSlackClient, send_private_suggestion
 from kortny.witness.opportunities import (
@@ -104,6 +111,7 @@ class WitnessRunResult:
     status: str
     projections: tuple[WitnessProjectionOutcome, ...] = ()
     deliveries: tuple[WitnessDeliveryOutcome, ...] = ()
+    autopilot_outcomes: tuple[WitnessAutopilotOutcome, ...] = ()
     leader_acquired: bool = True
 
     @property
@@ -113,6 +121,16 @@ class WitnessRunResult:
     @property
     def delivered_count(self) -> int:
         return sum(1 for outcome in self.deliveries if outcome.status == "sent")
+
+    @property
+    def autopilot_reviewed_count(self) -> int:
+        return len(self.autopilot_outcomes)
+
+    @property
+    def autopilot_executed_count(self) -> int:
+        return sum(
+            1 for outcome in self.autopilot_outcomes if outcome.status == "executed"
+        )
 
 
 class WitnessRunner:
@@ -145,6 +163,9 @@ class WitnessRunner:
         profile_limit: int = DEFAULT_WITNESS_PROFILE_SCAN_LIMIT,
         delivery_limit: int = DEFAULT_WITNESS_DELIVERY_LIMIT,
         deliver_private: bool = False,
+        autopilot_enabled: bool | None = None,
+        autopilot_limit: int = DEFAULT_WITNESS_AUTOPILOT_LIMIT,
+        autopilot_min_confidence: Decimal = DEFAULT_WITNESS_AUTOPILOT_MIN_CONFIDENCE,
         min_scan_interval: timedelta = DEFAULT_WITNESS_SCAN_INTERVAL,
         use_advisory_lock: bool = False,
     ) -> WitnessRunResult:
@@ -194,12 +215,39 @@ class WitnessRunner:
                     if deliver_private
                     else ()
                 )
-            status = "processed" if projections or deliveries else "idle"
+                should_run_autopilot = (
+                    autopilot_enabled
+                    if autopilot_enabled is not None
+                    else bool(
+                        self.settings is not None
+                        and self.settings.witness_autopilot_enabled
+                    )
+                )
+                autopilot_outcomes = (
+                    WitnessAutopilot(
+                        self.session,
+                        settings=self.settings,
+                        llm_provider=self.llm_provider,
+                        provider_name=self.provider_name,
+                        actor_id=f"witness_runner:{self.runner_id}",
+                    ).run_once(
+                        installation_id=installation_id,
+                        now=run_at,
+                        limit=autopilot_limit,
+                        min_confidence=autopilot_min_confidence,
+                    ).outcomes
+                    if should_run_autopilot
+                    else ()
+                )
+            status = (
+                "processed" if projections or deliveries or autopilot_outcomes else "idle"
+            )
             return WitnessRunResult(
                 runner_id=self.runner_id,
                 status=status,
                 projections=projections,
                 deliveries=deliveries,
+                autopilot_outcomes=autopilot_outcomes,
             )
         finally:
             if use_advisory_lock:
@@ -635,15 +683,22 @@ class WitnessWorker:
                 profile_limit=self.profile_limit,
                 delivery_limit=self.delivery_limit,
                 deliver_private=self.deliver_private,
+                autopilot_enabled=self._settings.witness_autopilot_enabled,
+                autopilot_limit=self._settings.witness_autopilot_limit,
+                autopilot_min_confidence=(
+                    self._settings.witness_autopilot_min_confidence
+                ),
                 min_scan_interval=self.scan_interval,
                 use_advisory_lock=self.use_advisory_lock,
             )
             logger.info(
-                "witness runner tick runner_id=%s status=%s projected=%s delivered=%s",
+                "witness runner tick runner_id=%s status=%s projected=%s delivered=%s autopilot_reviewed=%s autopilot_executed=%s",
                 result.runner_id,
                 result.status,
                 result.projected_count,
                 result.delivered_count,
+                result.autopilot_reviewed_count,
+                result.autopilot_executed_count,
             )
             return result
 
@@ -823,7 +878,9 @@ def main(argv: Sequence[str] | None = None) -> None:
         print(
             f"runner_id={result.runner_id} status={result.status} "
             f"projected_count={result.projected_count} "
-            f"delivered_count={result.delivered_count}"
+            f"delivered_count={result.delivered_count} "
+            f"autopilot_reviewed_count={result.autopilot_reviewed_count} "
+            f"autopilot_executed_count={result.autopilot_executed_count}"
         )
         return
 

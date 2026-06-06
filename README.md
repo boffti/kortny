@@ -151,9 +151,13 @@ This does not start optional observability services such as Phoenix.
 
 Witness is on by default: it creates proactive opportunity candidates, reviews
 due candidates, and can start low-risk read-only proactive tasks through the
-normal Kortny worker path. The default autopilot limit is one proactive task per
-tick so old candidate backlog does not flood a workspace. It still will not send
-proactive DMs unless you set `KORTNY_WITNESS_DELIVER_PRIVATE=true`.
+normal Kortny worker path. Autopilot is intentionally bounded: it only executes
+non-interruptive read-only analysis/status checks, skips schedule-management or
+confirmation-seeking follow-ups, ignores candidates produced by scheduled task
+runs, and requires active channel membership before posting. The default
+autopilot limit is one proactive task per tick so old candidate backlog does not
+flood a workspace. It still will not send proactive DMs unless you set
+`KORTNY_WITNESS_DELIVER_PRIVATE=true`.
 
 The dashboard uses Sign in with Slack for per-user identity. In the default
 `hybrid` mode, a local bootstrap login remains available for development and

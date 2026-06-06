@@ -440,6 +440,224 @@ def test_witness_autopilot_defers_non_execution_decision(
     )
 
 
+def test_witness_autopilot_defers_confirmation_or_schedule_actions(
+    db_session: Session,
+) -> None:
+    task, membership, profile = create_profile_fixture(db_session)
+    result = WitnessOpportunityService(db_session).project_from_channel_profile(
+        task=task,
+        membership=membership,
+        profile=profile,
+        candidates=channel_profile_candidate_inputs(),
+        extraction_metadata={"raw_candidate_count": 2},
+    )
+    db_session.commit()
+    assert result.candidate_ids
+    provider = FakeWitnessLLMProvider(
+        [
+            witness_autopilot_completion(
+                decision="execute_task",
+                risk="low",
+                action_kind="schedule_management",
+                delivery_target="dm",
+                requires_user_reply=True,
+                allowed_without_confirmation=False,
+                reason="The user should confirm this schedule change.",
+                task_input="Ask the user to confirm the 8 AM market schedule.",
+            )
+        ]
+    )
+
+    run_result = WitnessAutopilot(
+        db_session,
+        llm_provider=provider,
+        provider_name=DbLLMProvider.openrouter,
+    ).run_once(
+        installation_id=task.installation_id,
+        limit=1,
+        min_confidence=Decimal("0.600"),
+    )
+    db_session.commit()
+
+    assert run_result.reviewed_count == 1
+    assert run_result.executed_count == 0
+    assert run_result.deferred_count == 1
+    outcome = run_result.outcomes[0]
+    refreshed = db_session.get(WitnessOpportunityCandidate, outcome.candidate_id)
+    assert refreshed is not None
+    assert refreshed.status == "cooldown"
+    assert (
+        refreshed.feedback_json["last_action"]["action_kind"]
+        == "schedule_management"
+    )
+    assert refreshed.feedback_json["last_action"]["requires_user_reply"] is True
+    assert "read-only analysis" in refreshed.feedback_json["last_action"]["reason"]
+    assert (
+        db_session.scalar(
+            select(func.count())
+            .select_from(Task)
+            .where(Task.identity_key.like("synthetic:witness_autopilot:%"))
+        )
+        == 0
+    )
+
+
+def test_witness_autopilot_respects_private_delivery_setting(
+    db_session: Session,
+) -> None:
+    task, _membership, _profile = create_profile_fixture(db_session)
+    dm_task = TaskService(db_session).create_task(
+        installation_id=task.installation_id,
+        slack_event_id=f"Ev{uuid.uuid4().hex}",
+        slack_channel_id="DUser123",
+        slack_thread_ts="DUser123",
+        slack_message_ts="1780200000.000001",
+        slack_user_id="UUser123",
+        input="Watch my recurring market update request.",
+    )
+    WitnessOpportunityService(db_session).project_from_task_candidates(
+        task=dm_task,
+        candidates=(
+            WitnessOpportunityCandidateInput(
+                candidate_type="recurring_check",
+                title="Daily market update follow-up",
+                summary="Offer to check the daily market update status.",
+                suggested_action="Check the daily market update status.",
+                suggested_message="I can keep an eye on the market update.",
+                evidence=("The user asked for a recurring market update.",),
+                confidence_score=Decimal("0.820"),
+                confidence_reason="The task was explicitly recurring.",
+                metadata_json={"extractor": "test"},
+            ),
+        ),
+        response_text="I can watch this.",
+        extraction_metadata={"raw_candidate_count": 1},
+    )
+    db_session.commit()
+    provider = FakeWitnessLLMProvider(
+        [
+            witness_autopilot_completion(
+                decision="execute_task",
+                risk="low",
+                delivery_target="dm",
+                task_input="Check whether the market update is configured.",
+            )
+        ]
+    )
+
+    run_result = WitnessAutopilot(
+        db_session,
+        llm_provider=provider,
+        provider_name=DbLLMProvider.openrouter,
+    ).run_once(
+        installation_id=task.installation_id,
+        limit=1,
+        min_confidence=Decimal("0.600"),
+    )
+    db_session.commit()
+
+    assert run_result.reviewed_count == 1
+    assert run_result.executed_count == 0
+    assert run_result.deferred_count == 1
+    assert provider.calls == []
+    outcome = run_result.outcomes[0]
+    refreshed = db_session.get(WitnessOpportunityCandidate, outcome.candidate_id)
+    assert refreshed is not None
+    assert "private Witness delivery is disabled" in (
+        refreshed.feedback_json["last_action"]["reason"]
+    )
+
+
+def test_witness_autopilot_defers_scheduled_source_candidates(
+    db_session: Session,
+) -> None:
+    task, membership, profile = create_profile_fixture(db_session)
+    task.identity_kind = "scheduled"
+    task.identity_key = "schedule:market-update"
+    task.identity_payload = {"schedule_id": str(uuid.uuid4())}
+    WitnessOpportunityService(db_session).project_from_channel_profile(
+        task=task,
+        membership=membership,
+        profile=profile,
+        candidates=channel_profile_candidate_inputs(),
+        extraction_metadata={"raw_candidate_count": 2},
+    )
+    db_session.commit()
+    provider = FakeWitnessLLMProvider(
+        [
+            witness_autopilot_completion(
+                decision="execute_task",
+                risk="low",
+                task_input="Follow up on the scheduled market update.",
+            )
+        ]
+    )
+
+    run_result = WitnessAutopilot(
+        db_session,
+        llm_provider=provider,
+        provider_name=DbLLMProvider.openrouter,
+    ).run_once(
+        installation_id=task.installation_id,
+        limit=1,
+        min_confidence=Decimal("0.600"),
+    )
+    db_session.commit()
+
+    assert run_result.reviewed_count == 1
+    assert run_result.executed_count == 0
+    assert run_result.deferred_count == 1
+    assert provider.calls == []
+    outcome = run_result.outcomes[0]
+    refreshed = db_session.get(WitnessOpportunityCandidate, outcome.candidate_id)
+    assert refreshed is not None
+    assert "scheduled task output" in refreshed.feedback_json["last_action"]["reason"]
+
+
+def test_witness_autopilot_defers_inactive_channel_membership(
+    db_session: Session,
+) -> None:
+    task, membership, profile = create_profile_fixture(db_session)
+    membership.membership_status = "left"
+    WitnessOpportunityService(db_session).project_from_channel_profile(
+        task=task,
+        membership=membership,
+        profile=profile,
+        candidates=channel_profile_candidate_inputs(),
+        extraction_metadata={"raw_candidate_count": 2},
+    )
+    db_session.commit()
+    provider = FakeWitnessLLMProvider(
+        [
+            witness_autopilot_completion(
+                decision="execute_task",
+                risk="low",
+                task_input="Summarize this channel's latest report anomalies.",
+            )
+        ]
+    )
+
+    run_result = WitnessAutopilot(
+        db_session,
+        llm_provider=provider,
+        provider_name=DbLLMProvider.openrouter,
+    ).run_once(
+        installation_id=task.installation_id,
+        limit=1,
+        min_confidence=Decimal("0.600"),
+    )
+    db_session.commit()
+
+    assert run_result.reviewed_count == 1
+    assert run_result.executed_count == 0
+    assert run_result.deferred_count == 1
+    assert provider.calls == []
+    outcome = run_result.outcomes[0]
+    refreshed = db_session.get(WitnessOpportunityCandidate, outcome.candidate_id)
+    assert refreshed is not None
+    assert "active Kortny membership" in refreshed.feedback_json["last_action"]["reason"]
+
+
 def test_witness_autopilot_ignores_candidates_from_autopilot_tasks(
     db_session: Session,
 ) -> None:
@@ -1062,12 +1280,20 @@ def witness_autopilot_completion(
     *,
     decision: str,
     risk: str,
+    action_kind: str = "read_only_analysis",
+    delivery_target: str = "channel",
+    requires_user_reply: bool = False,
+    allowed_without_confirmation: bool = True,
     reason: str = "The candidate has clear evidence and low-risk value.",
     task_input: str | None = "Summarize the latest relevant channel activity.",
 ) -> Completion:
     payload = {
         "decision": decision,
         "risk": risk,
+        "action_kind": action_kind,
+        "delivery_target": delivery_target,
+        "requires_user_reply": requires_user_reply,
+        "allowed_without_confirmation": allowed_without_confirmation,
         "reason": reason,
         "task_input": task_input,
         "confidence_score": 0.84,

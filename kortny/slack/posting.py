@@ -183,19 +183,21 @@ class SlackPoster:
             task_id=thread.task_id,
             side_effect_id=side_effect_id,
         ):
+            event_payload: dict[str, Any] = {
+                "channel": thread.channel_id,
+                "thread_ts": post_thread_ts,
+                "message_ts": message_ts,
+                "text": slack_text,
+                "purpose": purpose,
+                "slack_side_effect_id": side_effect_id,
+                "idempotency_key": idempotency_key,
+            }
+            if blocks is not None:
+                event_payload["blocks"] = blocks
             self.task_service.append_event(
                 thread.task_id,
                 TaskEventType.message_posted,
-                {
-                    "channel": thread.channel_id,
-                    "thread_ts": post_thread_ts,
-                    "message_ts": message_ts,
-                    "text": slack_text,
-                    "purpose": purpose,
-                    "slack_side_effect_id": side_effect_id,
-                    "idempotency_key": idempotency_key,
-                    "blocks": blocks,
-                },
+                event_payload,
             )
         return message_ts
 

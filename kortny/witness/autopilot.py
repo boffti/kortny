@@ -55,6 +55,22 @@ _VALID_DECISIONS = frozenset(
     ("execute_task", "defer", "dismiss", "monitor_only", "ask_user")
 )
 _VALID_RISKS = frozenset(("low", "medium", "high"))
+_VALID_ACTION_KINDS = frozenset(
+    (
+        "read_only_analysis",
+        "status_check",
+        "schedule_management",
+        "memory_write",
+        "external_write",
+        "approval_request",
+        "reminder",
+        "monitoring_setup",
+        "other",
+    )
+)
+_VALID_DELIVERY_TARGETS = frozenset(("channel", "dm", "none", "unknown"))
+_AUTOPILOT_EXECUTABLE_ACTION_KINDS = frozenset(("read_only_analysis", "status_check"))
+_AUTOPILOT_EXECUTABLE_DELIVERY_TARGETS = frozenset(("channel", "dm"))
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,6 +79,10 @@ class WitnessAutopilotDecision:
 
     decision: str
     risk: str
+    action_kind: str
+    delivery_target: str
+    requires_user_reply: bool
+    allowed_without_confirmation: bool
     reason: str
     task_input: str | None
     confidence_score: Decimal
@@ -72,6 +92,11 @@ class WitnessAutopilotDecision:
         return (
             self.decision == "execute_task"
             and self.risk == "low"
+            and self.action_kind in _AUTOPILOT_EXECUTABLE_ACTION_KINDS
+            and self.delivery_target in _AUTOPILOT_EXECUTABLE_DELIVERY_TARGETS
+            and not self.requires_user_reply
+            and self.allowed_without_confirmation
+            and self.confidence_score >= DEFAULT_WITNESS_AUTOPILOT_MIN_CONFIDENCE
             and bool(self.task_input)
         )
 
@@ -244,7 +269,33 @@ class WitnessAutopilot:
                 reason="Candidate has no source task for auditable LLM review.",
             )
 
+        preflight_reason = _autopilot_preflight_defer_reason(
+            self.session,
+            candidate,
+            source_task=source_task,
+            witness_deliver_private=(
+                self.settings.witness_deliver_private
+                if self.settings is not None
+                else False
+            ),
+        )
+        if preflight_reason is not None:
+            return self._defer_without_review(
+                candidate,
+                now=now,
+                reason=preflight_reason,
+            )
+
         decision = self._review_with_llm(candidate, source_task=source_task)
+        decision_safety_reason = _decision_safety_defer_reason(decision)
+        if decision_safety_reason is not None:
+            return self._defer_reviewed_decision(
+                candidate,
+                decision=decision,
+                now=now,
+                reason=decision_safety_reason,
+            )
+
         if decision.should_execute:
             task = self._create_proactive_task(
                 candidate,
@@ -264,6 +315,12 @@ class WitnessAutopilot:
                 details={
                     "decision": decision.decision,
                     "risk": decision.risk,
+                    "action_kind": decision.action_kind,
+                    "delivery_target": decision.delivery_target,
+                    "requires_user_reply": decision.requires_user_reply,
+                    "allowed_without_confirmation": (
+                        decision.allowed_without_confirmation
+                    ),
                     "reason": decision.reason,
                     "generated_task_id": str(task.id),
                     "execution_policy": "default_on_low_risk_task",
@@ -278,6 +335,8 @@ class WitnessAutopilot:
                     "source_task_id": str(source_task.id),
                     "decision": decision.decision,
                     "risk": decision.risk,
+                    "action_kind": decision.action_kind,
+                    "delivery_target": decision.delivery_target,
                     "reason": decision.reason,
                 },
             )
@@ -303,6 +362,8 @@ class WitnessAutopilot:
                 details={
                     "decision": decision.decision,
                     "risk": decision.risk,
+                    "action_kind": decision.action_kind,
+                    "delivery_target": decision.delivery_target,
                     "reason": decision.reason,
                 },
             )
@@ -336,6 +397,8 @@ class WitnessAutopilot:
             details={
                 "decision": decision.decision,
                 "risk": decision.risk,
+                "action_kind": decision.action_kind,
+                "delivery_target": decision.delivery_target,
                 "reason": decision.reason,
                 "cooldown_until": candidate.cooldown_until.isoformat(),
             },
@@ -347,6 +410,8 @@ class WitnessAutopilot:
             payload={
                 "decision": decision.decision,
                 "risk": decision.risk,
+                "action_kind": decision.action_kind,
+                "delivery_target": decision.delivery_target,
                 "reason": decision.reason,
                 "cooldown_until": candidate.cooldown_until.isoformat(),
             },
@@ -358,6 +423,57 @@ class WitnessAutopilot:
             decision=decision.decision,
             risk=decision.risk,
             reason=decision.reason,
+        )
+
+    def _defer_reviewed_decision(
+        self,
+        candidate: WitnessOpportunityCandidate,
+        *,
+        decision: WitnessAutopilotDecision,
+        now: datetime,
+        reason: str,
+    ) -> WitnessAutopilotOutcome:
+        candidate.status = "cooldown"
+        candidate.cooldown_until = now + self.cooldown
+        candidate.updated_at = now
+        _record_feedback(
+            candidate,
+            action="autopilot_deferred",
+            by_user_id=self.actor_id,
+            now=now,
+            details={
+                "decision": decision.decision,
+                "risk": decision.risk,
+                "action_kind": decision.action_kind,
+                "delivery_target": decision.delivery_target,
+                "requires_user_reply": decision.requires_user_reply,
+                "allowed_without_confirmation": decision.allowed_without_confirmation,
+                "reason": reason,
+                "review_reason": decision.reason,
+                "cooldown_until": candidate.cooldown_until.isoformat(),
+            },
+        )
+        _append_candidate_event(
+            self.session,
+            candidate,
+            message=WITNESS_AUTOPILOT_CANDIDATE_DEFERRED_MESSAGE,
+            payload={
+                "decision": decision.decision,
+                "risk": decision.risk,
+                "action_kind": decision.action_kind,
+                "delivery_target": decision.delivery_target,
+                "reason": reason,
+                "review_reason": decision.reason,
+                "cooldown_until": candidate.cooldown_until.isoformat(),
+            },
+        )
+        self.session.flush()
+        return WitnessAutopilotOutcome(
+            candidate_id=candidate.id,
+            status="deferred",
+            decision=decision.decision,
+            risk=decision.risk,
+            reason=reason,
         )
 
     def _review_with_llm(
@@ -442,6 +558,14 @@ class WitnessAutopilot:
                 "source_task_id": str(source_task.id),
                 "autopilot_decision": decision.decision,
                 "autopilot_risk": decision.risk,
+                "autopilot_action_kind": decision.action_kind,
+                "autopilot_delivery_target": decision.delivery_target,
+                "response_contract": (
+                    "Act as Kortny noticing a useful gap and delivering the "
+                    "finished output. Do not expose internal planning, ask for "
+                    "review, or say you are drafting/checking unless the check "
+                    "result itself is the answer."
+                ),
                 "created_at": now.isoformat(),
             },
         )
@@ -511,12 +635,28 @@ def parse_witness_autopilot_decision(
 
     decision = _choice(payload.get("decision"), valid=_VALID_DECISIONS, default="defer")
     risk = _choice(payload.get("risk"), valid=_VALID_RISKS, default="medium")
+    action_kind = _choice(
+        payload.get("action_kind"), valid=_VALID_ACTION_KINDS, default="other"
+    )
+    delivery_target = _choice(
+        payload.get("delivery_target"),
+        valid=_VALID_DELIVERY_TARGETS,
+        default="unknown",
+    )
+    requires_user_reply = _bool(payload.get("requires_user_reply"), default=True)
+    allowed_without_confirmation = _bool(
+        payload.get("allowed_without_confirmation"), default=False
+    )
     reason = _bounded(_optional_text(payload.get("reason")) or "No reason provided.", 500)
     task_input = _optional_text(payload.get("task_input"))
     confidence = _decimal(payload.get("confidence_score"), default=Decimal("0.500"))
     return WitnessAutopilotDecision(
         decision=decision,
         risk=risk,
+        action_kind=action_kind,
+        delivery_target=delivery_target,
+        requires_user_reply=requires_user_reply,
+        allowed_without_confirmation=allowed_without_confirmation,
         reason=reason,
         task_input=_bounded(task_input, MAX_AUTOPILOT_TASK_INPUT_CHARS)
         if task_input
@@ -538,17 +678,33 @@ def _review_messages(
                 "coworker in Slack, and proactive help is ON by default unless "
                 "users opt out. Use semantic judgment. Decide whether Kortny "
                 "should act now on this opportunity candidate. Prefer "
-                "execute_task for low-risk read-only help, summaries, analysis, "
-                "monitoring setup, and useful follow-ups with clear evidence. "
-                "Do not execute destructive or write-side external actions, "
-                "privacy-risky actions, very speculative ideas, stale ideas, or "
-                "policy-only notes. Return JSON only with schema: "
+                "execute_task only for low-risk, non-interruptive read-only "
+                "analysis or status checks with clear evidence. Do not execute "
+                "anything that asks the user to confirm, approve, review, or "
+                "reply; creates, edits, cancels, or audits a schedule; writes "
+                "memory or policy; posts a reminder; retries an external tool "
+                "that needs approval; performs external writes; exposes private "
+                "data; or is stale/speculative. For those, return defer, "
+                "monitor_only, ask_user, or dismiss. Return JSON only with schema: "
                 "{\"decision\":\"execute_task|defer|dismiss|monitor_only|ask_user\","
-                "\"risk\":\"low|medium|high\",\"reason\":\"brief reason\","
+                "\"risk\":\"low|medium|high\","
+                "\"action_kind\":\"read_only_analysis|status_check|"
+                "schedule_management|memory_write|external_write|approval_request|"
+                "reminder|monitoring_setup|other\","
+                "\"delivery_target\":\"channel|dm|none|unknown\","
+                "\"requires_user_reply\":false,"
+                "\"allowed_without_confirmation\":true,"
+                "\"reason\":\"brief reason\","
                 "\"task_input\":\"normal Slack-style task request for Kortny to run "
                 "when decision is execute_task\",\"confidence_score\":0.0}. "
-                "The task_input must be self-contained, natural, and must not "
-                "mention internal candidate IDs, autopilot, or this review."
+                "The task_input must be self-contained and humanlike. It should "
+                "make Kortny act like a smart coworker who noticed a concrete "
+                "gap and is delivering the finished useful output, not drafting "
+                "for review or exposing internal planning. A good shape is: "
+                "\"I noticed [specific gap], so check/prepare [useful output] "
+                "and respond with what you found.\" The task_input must not "
+                "mention internal candidate IDs, autopilot, this review, chain "
+                "of thought, or backend infrastructure."
             ),
         ),
         ChatMessage(
@@ -573,6 +729,8 @@ def _review_messages(
                     },
                     "source_task": {
                         "id": str(source_task.id),
+                        "identity_kind": source_task.identity_kind,
+                        "identity_payload": source_task.identity_payload,
                         "input": source_task.input,
                         "result_summary": source_task.result_summary,
                         "slack_channel_id": source_task.slack_channel_id,
@@ -581,12 +739,14 @@ def _review_messages(
                     "execution_policy": {
                         "default_on": True,
                         "allowed_now": (
-                            "low-risk read-only work, summaries, analysis, "
-                            "monitoring setup, and helpful follow-up tasks"
+                            "low-risk, non-interruptive read-only analysis or "
+                            "status checks that can be completed without asking "
+                            "the user for anything"
                         ),
                         "blocked_now": (
-                            "destructive changes, external writes, private-data "
-                            "exposure, or noisy speculative channel posts"
+                            "schedule management, memory writes, approval prompts, "
+                            "confirmation requests, reminders, external writes, "
+                            "private-data exposure, or noisy speculative posts"
                         ),
                     },
                 },
@@ -623,6 +783,87 @@ def _candidate_channel_id(
     return source_task.slack_channel_id
 
 
+def _autopilot_preflight_defer_reason(
+    session: Session,
+    candidate: WitnessOpportunityCandidate,
+    *,
+    source_task: Task,
+    witness_deliver_private: bool,
+) -> str | None:
+    channel_id = _candidate_channel_id(candidate, source_task=source_task)
+    if channel_id is None:
+        return "Candidate has no Slack delivery target."
+    if _source_task_is_scheduled(source_task):
+        return (
+            "Candidate came from a scheduled task output; keep scheduled-task "
+            "follow-ups monitor-only until the scheduler inspection tool is "
+            "available."
+        )
+    if channel_id.startswith("D") and not witness_deliver_private:
+        return (
+            "Candidate would deliver a proactive DM, but private Witness delivery "
+            "is disabled."
+        )
+    if not channel_id.startswith("D") and not _channel_membership_is_active(
+        session,
+        installation_id=candidate.installation_id,
+        channel_id=channel_id,
+    ):
+        return "Candidate channel is not recorded as an active Kortny membership."
+    return None
+
+
+def _decision_safety_defer_reason(
+    decision: WitnessAutopilotDecision,
+) -> str | None:
+    if decision.decision != "execute_task":
+        return None
+    if decision.risk != "low":
+        return "Autopilot only executes low-risk candidates."
+    if decision.action_kind not in _AUTOPILOT_EXECUTABLE_ACTION_KINDS:
+        return (
+            "Autopilot only executes read-only analysis or status-check actions; "
+            f"review classified this as {decision.action_kind}."
+        )
+    if decision.delivery_target not in _AUTOPILOT_EXECUTABLE_DELIVERY_TARGETS:
+        return "Autopilot needs a concrete Slack channel or DM delivery target."
+    if decision.requires_user_reply:
+        return "Autopilot will not execute actions that require a user reply."
+    if not decision.allowed_without_confirmation:
+        return "Autopilot reviewer did not mark this safe without confirmation."
+    if decision.confidence_score < DEFAULT_WITNESS_AUTOPILOT_MIN_CONFIDENCE:
+        return "Autopilot reviewer confidence was below the execution threshold."
+    if not decision.task_input:
+        return "Autopilot reviewer did not provide a task to execute."
+    return None
+
+
+def _source_task_is_scheduled(task: Task) -> bool:
+    if task.identity_kind == "scheduled":
+        return True
+    payload = task.identity_payload
+    if isinstance(payload, dict):
+        return payload.get("source") == "scheduler" or bool(payload.get("schedule_id"))
+    return False
+
+
+def _channel_membership_is_active(
+    session: Session,
+    *,
+    installation_id: uuid.UUID,
+    channel_id: str,
+) -> bool:
+    membership = session.scalar(
+        select(SlackChannelMembership)
+        .where(
+            SlackChannelMembership.installation_id == installation_id,
+            SlackChannelMembership.channel_id == channel_id,
+        )
+        .limit(1)
+    )
+    return membership is not None and membership.membership_status == "active"
+
+
 def _membership_added_by(
     session: Session,
     candidate: WitnessOpportunityCandidate,
@@ -646,7 +887,16 @@ def _task_input(
     decision: WitnessAutopilotDecision,
 ) -> str:
     if decision.task_input:
-        return _bounded(decision.task_input, MAX_AUTOPILOT_TASK_INPUT_CHARS)
+        return _bounded(
+            (
+                f"{decision.task_input}\n\n"
+                "Respond as Kortny in a finished, human Slack note. Start from "
+                "what you noticed and what you checked or handled. Do not expose "
+                "internal planning, do not ask for review, and do not say this is "
+                "a draft."
+            ),
+            MAX_AUTOPILOT_TASK_INPUT_CHARS,
+        )
     fallback = candidate.suggested_action or candidate.summary
     return _bounded(
         f"{fallback}\n\nUse this Witness context: {candidate.title} - {candidate.summary}",
@@ -704,6 +954,10 @@ def _fallback_decision(reason: str) -> WitnessAutopilotDecision:
     return WitnessAutopilotDecision(
         decision="defer",
         risk="medium",
+        action_kind="other",
+        delivery_target="unknown",
+        requires_user_reply=True,
+        allowed_without_confirmation=False,
         reason=reason,
         task_input=None,
         confidence_score=Decimal("0.500"),
@@ -723,6 +977,18 @@ def _decimal(value: object, *, default: Decimal) -> Decimal:
         return Decimal(str(value))
     except (InvalidOperation, ValueError, TypeError):
         return default
+
+
+def _bool(value: object, *, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes"}:
+            return True
+        if normalized in {"false", "0", "no"}:
+            return False
+    return default
 
 
 def _optional_text(value: object) -> str | None:

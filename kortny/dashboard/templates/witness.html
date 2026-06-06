@@ -6,7 +6,7 @@
   <section class="page-heading">
     <div>
       <h1>Witness</h1>
-      <p>Review, pause, dismiss, and send tightly scoped proactive suggestions.</p>
+      <p>Review, pause, dismiss, and audit tightly scoped proactive suggestions.</p>
     </div>
     <div class="heading-actions">
       <form method="post" action="/witness/run">
@@ -15,7 +15,7 @@
       </form>
       <form method="post" action="/witness/autopilot">
         <input type="hidden" name="next" value="{{ witness_return_path }}">
-        <button class="btn" type="submit">Run autopilot</button>
+        <button class="btn" type="submit">Review safe actions</button>
       </form>
       <a class="btn-ghost" href="/knowledge-graph">View Graph</a>
       <a class="btn-ghost" href="/tasks">View Tasks</a>

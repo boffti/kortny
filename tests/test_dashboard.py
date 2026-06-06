@@ -3602,7 +3602,7 @@ def test_dashboard_witness_page_shows_candidates_and_filters(
     assert f"/tasks/{task.id}" in response.text
     assert "witness-test-dedupe-key" in response.text
     assert "Run scan" in response.text
-    assert "Run autopilot" in response.text
+    assert "Review safe actions" in response.text
     assert "Mark useful" in response.text
     assert "Snooze" in response.text
     assert "Dismiss" in response.text

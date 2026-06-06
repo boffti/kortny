@@ -915,7 +915,16 @@ def test_worker_registry_skips_composio_catalog_for_simple_no_tool_intent(
 
     assert composio_client.list_tool_calls == []
     assert "web_search" in registry.names()
+    assert "list_schedules" in registry.names()
+    assert "get_schedule" in registry.names()
+    assert "create_schedule" not in registry.names()
+    assert "cancel_schedule" not in registry.names()
     assert all(not name.startswith("composio_") for name in registry.names())
+    assert any(
+        event.payload.get("message") == "native_tool_scope_applied"
+        and "create_schedule" in event.payload.get("suppressed_tool_names", [])
+        for event in task_events(db_session, task)
+    )
     assert any(
         event.payload.get("message") == "external_tool_selection_skipped"
         and event.payload.get("reason") == "intent_no_external_tools"

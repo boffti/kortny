@@ -102,6 +102,21 @@ def classify_planned_workflow(
             needs_context=needs_context,
         )
 
+    if _is_capability_lookup(normalized_input, likely_tools):
+        return PlannedWorkflowDecision(
+            route=PlannedWorkflowRoute.inline,
+            confidence=0.94,
+            estimated_subtask_count=1,
+            reason_codes=("capability_lookup",),
+            reason=(
+                "User is asking what Kortny can do; answer with the bounded "
+                "capability inventory path instead of planned workflow."
+            ),
+            detected_integrations=integrations,
+            likely_tools=likely_tools,
+            needs_context=needs_context,
+        )
+
     if _is_quick_conversation(normalized_input, reason_codes):
         return PlannedWorkflowDecision(
             route=PlannedWorkflowRoute.inline,
@@ -331,6 +346,17 @@ def _is_quick_conversation(
     return bool(_QUICK_CONVERSATION_RE.fullmatch(normalized_input))
 
 
+def _is_capability_lookup(
+    normalized_input: str,
+    likely_tools: tuple[str, ...],
+) -> bool:
+    if not _CAPABILITY_LOOKUP_RE.fullmatch(normalized_input):
+        return False
+    if not likely_tools:
+        return True
+    return set(likely_tools) <= CAPABILITY_LOOKUP_TOOL_HINTS
+
+
 def _normalize(value: str) -> str:
     return re.sub(r"\s+", " ", value.casefold()).strip()
 
@@ -349,6 +375,23 @@ _QUICK_CONVERSATION_RE = re.compile(
     r"(?:yo\s+)?(?:hey\s+)?(?:kortny\s+)?(?:are you up|you up|ping|"
     r"what'?s up|what can you do|what tools do you have(?: access to)?|"
     r"what integrations do you have)\??"
+)
+_CAPABILITY_LOOKUP_RE = re.compile(
+    r"(?:yo\s+)?(?:hey\s+)?(?:kortny\s+)?(?:what can you do|"
+    r"what tools do you have(?: access to)?|what integrations do you have|"
+    r"what capabilities do you have)\??"
+)
+CAPABILITY_LOOKUP_TOOL_HINTS = frozenset(
+    {
+        "capability_lookup",
+        "get_capabilities",
+        "list_capabilities",
+        "list_integrations",
+        "list_tools",
+        "native_tool_registry",
+        "tool_metadata_lookup",
+        "tool_registry",
+    }
 )
 _SCHEDULE_RE = re.compile(
     r"\b(every|daily|weekly|monthly|schedule|scheduled|recurring|cron|"

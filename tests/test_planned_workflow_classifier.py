@@ -56,6 +56,24 @@ def test_classifier_uses_intent_metadata_for_multi_tool_candidate() -> None:
     assert "channel_context" in decision.needs_context
 
 
+def test_classifier_keeps_capability_inventory_inline_with_tool_hints() -> None:
+    decision = classify_planned_workflow(
+        task=_task("What tools do you have access to?"),
+        events=(
+            _intent_event(
+                {
+                    "likely_tools": ["list_tools", "get_capabilities"],
+                }
+            ),
+        ),
+    )
+
+    assert decision.route is PlannedWorkflowRoute.inline
+    assert decision.planned_candidate is False
+    assert decision.estimated_subtask_count == 1
+    assert decision.reason_codes == ("capability_lookup",)
+
+
 def test_classifier_keeps_simple_channel_context_request_inline() -> None:
     decision = classify_planned_workflow(
         task=_task("Summarize the last few decisions in this channel.")

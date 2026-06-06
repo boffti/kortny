@@ -64,6 +64,18 @@ Rules:
   imply completed work that the context does not support.
 - Do not add new facts, numbers, source claims, tools, or conclusions.
 - Lead with the answer, not with boilerplate.
+- Write as Kortny, one Slack-native coworker. Internalize schedules, Witness,
+  memory, knowledge graph, Slack context, and integrations as Kortny's own
+  abilities. Do not make the response sound like a wrapper around subsystems.
+- Prefer natural coworker language over tool/report language. For example,
+  say "Yep, I have..." instead of "I found records in the scheduler database";
+  say "I can..." instead of "native tools are available".
+- Do not expose implementation labels like "native tools", "always on",
+  "scheduler DB", "workspace graph", "planned workflow", "runtime", "agent",
+  "branch", or "source of truth" unless the user explicitly asks about
+  internals.
+- For schedules and recurring work, speak in user-facing terms: what Kortny
+  will do, when it runs, where it will be delivered, and the next useful time.
 - Follow the selected response_shape. Include required elements when the
   ResponseRecord contains enough evidence; when it does not, state the limit
   instead of inventing support.
@@ -860,9 +872,11 @@ def build_synthesis_context(
 
 def _should_skip(response_record: ResponseRecord, *, min_chars: int) -> bool:
     raw_text = response_record.raw_answer
-    if len(raw_text) < min_chars:
+    if response_record.response_mode is ResponseMode.artifact_delivery:
         return True
-    return response_record.response_mode is ResponseMode.artifact_delivery
+    if response_record.actions_taken or response_record.evidence or response_record.failures:
+        return False
+    return len(raw_text) < min_chars
 
 
 def _response_skills_from_activations(
@@ -1012,7 +1026,11 @@ def _synthesis_tool_content(tool: str, output: object) -> str | None:
     if tool == "query_workspace_graph":
         return _workspace_graph_summary(output)
 
-    summary = _string(output.get("summary")) or _string(output.get("message"))
+    summary = (
+        _string(output.get("assistant_summary"))
+        or _string(output.get("summary"))
+        or _string(output.get("message"))
+    )
     if summary:
         return summary
     titles = _result_titles(output)

@@ -11,6 +11,7 @@ from kortny.routing.semantic import (
     SemanticExecutionPath,
     SemanticRouteRequest,
     SemanticRouterParseError,
+    SemanticRouterPromotionGate,
     parse_semantic_route_decision,
 )
 from kortny.tools.types import JsonObject, JsonSchema
@@ -115,6 +116,82 @@ def test_semantic_router_comparison_payload_flags_disagreement() -> None:
     assert payload["runtime_disagreement"] is True
     assert payload["execution_path_disagreement"] is True
     assert payload["selected_backend_disagreement"] is True
+
+
+def test_semantic_router_promotion_gate_marks_high_confidence_shadow_eligible() -> None:
+    decision = parse_semantic_route_decision(
+        """
+        {
+          "runtime_class": "inline_tool_task",
+          "intent": "integration.linear_project_summary",
+          "execution_path": "inline",
+          "confidence": 0.91,
+          "margin": 0.28,
+          "candidate_capabilities": ["linear.read"],
+          "needs_clarification": false,
+          "reason": "Single scoped Linear read."
+        }
+        """
+    )
+
+    promotion = SemanticRouterPromotionGate().evaluate(decision)
+
+    assert promotion.threshold_eligible is True
+    assert promotion.control_allowed is False
+    assert promotion.reason_codes == (
+        "thresholds_met",
+        "control_disabled_shadow_mode",
+    )
+    assert promotion.to_payload()["mode"] == "shadow_only"
+
+
+def test_semantic_router_promotion_gate_blocks_low_margin_decision() -> None:
+    decision = parse_semantic_route_decision(
+        """
+        {
+          "runtime_class": "durable_workflow_task",
+          "intent": "research.synthesis",
+          "execution_path": "durable_workflow",
+          "confidence": 0.93,
+          "margin": 0.05,
+          "candidate_capabilities": ["web.search"],
+          "needs_clarification": false,
+          "reason": "Looks like research, but the margin is weak."
+        }
+        """
+    )
+
+    promotion = SemanticRouterPromotionGate().evaluate(decision)
+
+    assert promotion.threshold_eligible is False
+    assert promotion.control_allowed is False
+    assert promotion.reason_codes == (
+        "below_min_margin",
+        "control_disabled_shadow_mode",
+    )
+
+
+def test_semantic_router_promotion_gate_blocks_clarification_need() -> None:
+    decision = parse_semantic_route_decision(
+        """
+        {
+          "runtime_class": "inline_tool_task",
+          "intent": "scheduler.edit",
+          "execution_path": "inline",
+          "confidence": 0.89,
+          "margin": 0.22,
+          "candidate_capabilities": ["schedules.update"],
+          "needs_clarification": true,
+          "reason": "The target schedule is unclear."
+        }
+        """
+    )
+
+    promotion = SemanticRouterPromotionGate(control_enabled=True).evaluate(decision)
+
+    assert promotion.threshold_eligible is False
+    assert promotion.control_allowed is False
+    assert promotion.reason_codes == ("needs_clarification",)
 
 
 def test_semantic_router_rejects_invalid_runtime_class() -> None:

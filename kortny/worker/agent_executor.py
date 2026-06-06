@@ -59,13 +59,13 @@ from kortny.routing import (
     ROUTING_DECISION_RECORDED_MESSAGE,
     SEMANTIC_ROUTER_PROMPT_VERSION,
     LLMSemanticRouter,
+    NativeToolScopePolicy,
     RoutingDecisionTrace,
     SemanticRouteRequest,
-)
-from kortny.schedule_intent import (
-    is_schedule_state_question,
-    schedule_state_query_text,
-    schedule_state_status_filter,
+    SemanticRouterPromotionGate,
+    Tier0RouteDecision,
+    Tier0RouteKind,
+    Tier0Router,
 )
 from kortny.slack import SlackPoster, SlackThread
 from kortny.slack.comments import (
@@ -142,9 +142,7 @@ GENERIC_FAILURE_TEXT = (
 )
 MEMORY_CONFIRMATION_PURPOSE = "memory_confirmation"
 PLANNED_WORKFLOW_PROGRESS_PURPOSE = "planned_progress_start"
-PLANNED_WORKFLOW_PROGRESS_TEXT = (
-    "I'll check the relevant context and tools, then send a concise answer here."
-)
+PLANNED_WORKFLOW_PROGRESS_TEXT = "Hang on, I'll check."
 PLANNED_WORKFLOW_PROGRESS_PROMPT_NAME = "kortny.planned_progress_status"
 ADK_QUICK_FINAL_AUTHORS = frozenset(
     {
@@ -220,11 +218,13 @@ class AgentTaskExecutor:
         try:
             logger.info("agent executor started task_id=%s", task.id)
             with task_workspace(task.id, base_dir=self.workspace_base_dir) as workspace:
-                if is_schedule_state_question(task.input) and task.identity_kind != "scheduled":
-                    agent_result = self._run_schedule_state_fast_path(
+                tier0_decision = Tier0Router().route(task)
+                if tier0_decision is not None:
+                    agent_result = self._run_tier0_route(
                         session=session,
                         task=task,
                         task_service=task_service,
+                        decision=tier0_decision,
                     )
                 elif is_dashboard_graph_refresh_task(session, task):
                     agent_result = self._run_channel_graph_refresh_pipeline(
@@ -433,46 +433,49 @@ class AgentTaskExecutor:
             artifact_count=result.artifact_count,
         )
 
+    def _run_tier0_route(
+        self,
+        *,
+        session: Session,
+        task: Task,
+        task_service: TaskService,
+        decision: Tier0RouteDecision,
+    ) -> AgentRunResult:
+        """Execute a direct Tier 0 system-of-record route."""
+
+        if decision.kind is Tier0RouteKind.schedule_state_query:
+            return self._run_schedule_state_fast_path(
+                session=session,
+                task=task,
+                task_service=task_service,
+                decision=decision,
+            )
+        raise RuntimeError(f"Unsupported Tier 0 route: {decision.kind}")
+
     def _run_schedule_state_fast_path(
         self,
         *,
         session: Session,
         task: Task,
         task_service: TaskService,
+        decision: Tier0RouteDecision,
     ) -> AgentRunResult:
         """Answer scheduler state questions from the scheduler DB directly."""
 
-        query = schedule_state_query_text(task.input)
-        status = schedule_state_status_filter(task.input)
+        query = _payload_optional_str(decision.metadata.get("query"))
+        status = _payload_optional_str(decision.metadata.get("status")) or "open"
         task_service.append_event(
             task,
             TaskEventType.log,
-            RoutingDecisionTrace(
-                stage="tier0_system_of_record",
-                route_tier="tier0",
-                source="schedule_state_fast_path",
-                runtime_class="inline_tool_task",
-                intent="scheduler.query",
-                confidence=1.0,
-                escalated=False,
-                selected_runtime="schedule_state_fast_path",
-                selected_backend="inline",
-                actual_path="schedule_state_fast_path",
-                reason="schedule_truth_lookup",
-                reason_codes=("schedule_state_query",),
-                metadata={
-                    "query": query,
-                    "status": status,
-                },
-            ).to_payload(),
+            decision.to_trace().to_payload(),
         )
         task_service.append_event(
             task,
             TaskEventType.log,
             {
                 "message": "agent_runtime_selected",
-                "runtime": "schedule_state_fast_path",
-                "reason": "schedule_truth_lookup",
+                "runtime": decision.selected_runtime,
+                "reason": decision.reason,
                 "query": query,
                 "status": status,
             },
@@ -481,8 +484,8 @@ class AgentTaskExecutor:
             logger,
             "agent_runtime_selected",
             task=task,
-            runtime="schedule_state_fast_path",
-            reason="schedule_truth_lookup",
+            runtime=decision.selected_runtime,
+            reason=decision.reason,
             query=query,
             status=status,
         )
@@ -1021,6 +1024,8 @@ class AgentTaskExecutor:
             ),
             planned_candidate=planned_candidate,
         )
+        promotion = SemanticRouterPromotionGate().evaluate(decision)
+        metadata["promotion_gate"] = promotion.to_payload()
         task_service.append_event(
             task,
             TaskEventType.log,
@@ -1051,6 +1056,9 @@ class AgentTaskExecutor:
             margin=decision.margin,
             runtime_disagreement=metadata["runtime_disagreement"],
             execution_path_disagreement=metadata["execution_path_disagreement"],
+            threshold_eligible=promotion.threshold_eligible,
+            control_allowed=promotion.control_allowed,
+            promotion_reason_codes=list(promotion.reason_codes),
         )
 
     def _shadow_start_temporal_workflow(
@@ -1223,14 +1231,64 @@ class AgentTaskExecutor:
         ]
         if web_search is not None:
             native_tools.insert(0, web_search)
+        raw_intent_decision = _latest_intent_decision(session, task)
+        effective_decision = effective_intent_decision(raw_intent_decision)
+        native_scope = NativeToolScopePolicy().apply(
+            tools=native_tools,
+            task_input=task.input,
+            intent_decision=effective_decision,
+        )
+        task_service.append_event(task, TaskEventType.log, native_scope.to_payload())
+        task_service.append_event(
+            task,
+            TaskEventType.log,
+            RoutingDecisionTrace(
+                stage="native_tool_scope",
+                route_tier="tool_scope",
+                source="native_tool_scope_policy",
+                intent=(
+                    _payload_str(effective_decision, "classification")
+                    if effective_decision is not None
+                    else None
+                )
+                or "unknown",
+                confidence=None,
+                escalated=False,
+                selected_runtime=settings.agent_runtime,
+                selected_backend="inline",
+                actual_path="native_tool_scope",
+                reason="Native tool exposure policy applied before runtime registry selection.",
+                reason_codes=native_scope.reason_codes,
+                candidate_tool_count=len(native_scope.original_tool_names),
+                selected_tool_names=native_scope.selected_tool_names,
+                suppressed_tool_names=native_scope.suppressed_tool_names,
+                metadata=native_scope.to_payload(),
+            ).to_payload(),
+        )
+        log_observation(
+            logger,
+            "native_tool_scope_applied",
+            task=task,
+            original_tool_count=len(native_scope.original_tool_names),
+            selected_tool_count=len(native_scope.selected_tool_names),
+            suppressed_tool_count=len(native_scope.suppressed_tool_names),
+            suppressed_tool_names=list(native_scope.suppressed_tool_names),
+            reason_codes=list(native_scope.reason_codes),
+            schedule_mutation_allowed=native_scope.schedule_mutation_allowed,
+            intent_classification=native_scope.intent_classification,
+            likely_tools=list(native_scope.likely_tools),
+        )
+        native_inventory_tools = tuple(native_tools)
+        native_tools = [
+            cast(Tool, scoped_tool) for scoped_tool in native_scope.selected_tools
+        ]
         native_tools.append(
             ListIntegrationsTool(
                 session=session,
                 task=task,
-                native_tools=tuple(native_tools),
+                native_tools=native_inventory_tools,
             )
         )
-        raw_intent_decision = _latest_intent_decision(session, task)
         _record_deferred_secondary_intents(
             session=session,
             task=task,
@@ -1965,9 +2023,10 @@ class AgentTaskExecutor:
                 content=(
                     "You write Kortny's first Slack progress update for a task that "
                     "will take more than a quick answer. Return JSON only with a "
-                    "`message` string. Constraints: one sentence, 70-180 characters, "
-                    "first person as Kortny, warm but not chatty, specific to the "
-                    "user request, no user mentions, no emoji, no markdown headings, "
+                    "`message` string. Constraints: one sentence, 25-100 characters, "
+                    "first person as Kortny, natural and coworker-like, specific "
+                    "when it helps but never stiff, no user mentions, no emoji, "
+                    "no markdown headings, "
                     "no backend/agent/model/runtime/tool language, no explanation of "
                     "what the user is asking, no phrase `split this into workstreams`."
                 ),
@@ -2710,9 +2769,6 @@ def _response_humanizer_skip_reason(
 
     events = _task_events(session, task)
 
-    if _latest_payload_event(events, message="schedule_state_fast_path_completed") is not None:
-        return "schedule_state_fast_path"
-
     if len(raw_text.strip()) >= settings.response_humanizer_min_chars:
         return None
 
@@ -2814,6 +2870,10 @@ def _routing_payload_str(
     if payload is None:
         return None
     value = payload.get(key)
+    return value if isinstance(value, str) and value else None
+
+
+def _payload_optional_str(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
 
 

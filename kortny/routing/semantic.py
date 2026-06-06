@@ -16,6 +16,7 @@ from kortny.workflow.handoff import TaskRuntimeClass
 SEMANTIC_ROUTER_PROMPT_NAME = "kortny.semantic_router.shadow"
 SEMANTIC_ROUTER_PROMPT_VERSION = "hig_187_slice_2"
 SEMANTIC_ROUTER_RESPONSE_FORMAT: JsonObject = {"type": "json_object"}
+SEMANTIC_ROUTER_PROMOTION_MODE = "shadow_only"
 
 
 class SemanticRouterParseError(ValueError):
@@ -91,6 +92,69 @@ class SemanticRouteDecision:
                 and self.execution_path is not SemanticExecutionPath.inline
             ),
         }
+
+
+@dataclass(frozen=True, slots=True)
+class SemanticRouterPromotionDecision:
+    """Whether a shadow route is eligible to control execution later."""
+
+    threshold_eligible: bool
+    control_allowed: bool
+    mode: str
+    min_confidence: float
+    min_margin: float
+    reason_codes: tuple[str, ...]
+
+    def to_payload(self) -> JsonObject:
+        """Return compact promotion-gate metadata for task traces."""
+
+        return {
+            "mode": self.mode,
+            "threshold_eligible": self.threshold_eligible,
+            "control_allowed": self.control_allowed,
+            "min_confidence": self.min_confidence,
+            "min_margin": self.min_margin,
+            "reason_codes": list(self.reason_codes),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class SemanticRouterPromotionGate:
+    """Evaluate whether shadow semantic routing is mature enough to control."""
+
+    min_confidence: float = 0.85
+    min_margin: float = 0.20
+    control_enabled: bool = False
+    mode: str = SEMANTIC_ROUTER_PROMOTION_MODE
+
+    def evaluate(
+        self,
+        decision: SemanticRouteDecision,
+    ) -> SemanticRouterPromotionDecision:
+        """Return promotion eligibility without changing runtime behavior."""
+
+        reason_codes: list[str] = []
+        if decision.confidence < self.min_confidence:
+            reason_codes.append("below_min_confidence")
+        if decision.margin < self.min_margin:
+            reason_codes.append("below_min_margin")
+        if decision.needs_clarification:
+            reason_codes.append("needs_clarification")
+
+        threshold_eligible = not reason_codes
+        if threshold_eligible:
+            reason_codes.append("thresholds_met")
+        if not self.control_enabled:
+            reason_codes.append("control_disabled_shadow_mode")
+
+        return SemanticRouterPromotionDecision(
+            threshold_eligible=threshold_eligible,
+            control_allowed=threshold_eligible and self.control_enabled,
+            mode=self.mode,
+            min_confidence=self.min_confidence,
+            min_margin=self.min_margin,
+            reason_codes=tuple(reason_codes),
+        )
 
 
 class SemanticRouterLLM(Protocol):

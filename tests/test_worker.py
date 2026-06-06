@@ -956,11 +956,41 @@ def test_agent_executor_answers_schedule_state_question_with_fast_path(
         }
     )
     slack_client = FakeSlackClient()
+    humanized_answer = (
+        "Yup! I have a stock market update set for you every morning at "
+        "8 AM Central. The next one comes your way tomorrow."
+    )
+
+    class RecordingSynthesizer:
+        uses_procedural_skills = False
+
+        def __init__(self) -> None:
+            self.raw_answers: list[str] = []
+
+        def synthesize(
+            self,
+            *,
+            session: Session,
+            task: Task,
+            response_record: Any,
+            synthesis_context: Any,
+            task_service: TaskService,
+        ) -> ResponseSynthesisResult:
+            del session, task, synthesis_context, task_service
+            self.raw_answers.append(response_record.raw_answer)
+            return ResponseSynthesisResult(
+                text=humanized_answer,
+                changed=True,
+                reason="recording_humanizer",
+            )
+
+    synthesizer = RecordingSynthesizer()
 
     result = AgentTaskExecutor(
         settings=settings,
         llm_provider=FakeAgentProvider([]),
         slack_client=slack_client,
+        response_synthesizer=synthesizer,
     ).execute(
         session=db_session,
         task=task,
@@ -971,16 +1001,18 @@ def test_agent_executor_answers_schedule_state_question_with_fast_path(
     event_messages = [event.payload.get("message") for event in events]
 
     assert result.result_summary.startswith("Yes")
-    assert "Daily stock market update" in slack_client.messages[-1]["text"]
-    assert "Scheduler DB is the source of truth here" in slack_client.messages[-1]["text"]
+    assert slack_client.messages[-1]["text"] == humanized_answer
+    assert "Daily stock market update" in synthesizer.raw_answers[0]
+    assert "Scheduler DB is the source of truth here" in synthesizer.raw_answers[0]
     assert "schedule_state_fast_path_completed" in event_messages
     assert "routing_decision_recorded" in event_messages
     assert "routing_chain_completed" in event_messages
-    assert "response_humanizer_skipped" in event_messages
+    assert "response_humanizer_started" in event_messages
+    assert "response_humanizer_completed" in event_messages
+    assert "response_humanizer_skipped" not in event_messages
     assert "planned_workflow_classified" not in event_messages
     assert "runtime_handoff_evaluated" not in event_messages
     assert "adk_runtime_started" not in event_messages
-    assert "response_humanizer_started" not in event_messages
     assert "witness_opportunity_candidates_projected" not in event_messages
     route_event = next(
         event

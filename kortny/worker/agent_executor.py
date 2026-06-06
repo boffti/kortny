@@ -57,7 +57,10 @@ from kortny.observe.assessment import (
 from kortny.observe.profiles import ObserveChannelProfileService
 from kortny.routing import (
     ROUTING_DECISION_RECORDED_MESSAGE,
+    SEMANTIC_ROUTER_PROMPT_VERSION,
+    LLMSemanticRouter,
     RoutingDecisionTrace,
+    SemanticRouteRequest,
 )
 from kortny.schedule_intent import (
     is_schedule_state_question,
@@ -245,6 +248,12 @@ class AgentTaskExecutor:
                     task=task,
                     task_service=task_service,
                     result_summary=agent_result.result_summary,
+                )
+                self._record_semantic_router_shadow(
+                    settings=settings,
+                    session=session,
+                    task=task,
+                    task_service=task_service,
                 )
                 self._record_routing_chain_completed(
                     session=session,
@@ -922,6 +931,127 @@ class AgentTaskExecutor:
             tool_result_prompt_max_chars=settings.tool_result_prompt_max_chars,
             thread_transcript_provider=self._build_thread_transcript_provider(settings),
         ).run(task)
+
+    def _record_semantic_router_shadow(
+        self,
+        *,
+        settings: Settings,
+        session: Session,
+        task: Task,
+        task_service: TaskService,
+    ) -> None:
+        """Run the Tier 1 semantic router in observe-only mode."""
+
+        if self.llm_provider is not None:
+            return
+
+        handoff = evaluate_runtime_handoff(settings=settings, task=task)
+        events = _task_events(session, task)
+        planned_workflow_payload = _latest_payload_event(
+            events,
+            message="planned_workflow_classified",
+        )
+        planned_candidate = None
+        if planned_workflow_payload is not None:
+            raw_planned_candidate = planned_workflow_payload.get("planned_candidate")
+            if isinstance(raw_planned_candidate, bool):
+                planned_candidate = raw_planned_candidate
+
+        model_route = ModelRouter(settings).route_for_tier(
+            ModelRouteTier.cheap_fast,
+            reason="semantic_router_shadow",
+        )
+        try:
+            selection = self._select_runtime_model(
+                settings=settings,
+                session=session,
+                task=task,
+                model_route=model_route,
+            )
+            decision = LLMSemanticRouter(
+                LLMService(
+                    session=session,
+                    provider=create_provider_for_selection(
+                        settings=settings,
+                        selection=selection,
+                    ),
+                    provider_name=selection.provider_name,
+                    task_service=task_service,
+                    model_route=selection.model_route,
+                )
+            ).classify(
+                task_id=task.id,
+                request=SemanticRouteRequest(
+                    user_request=task.input,
+                    surface=_routing_surface_from_task(task),
+                    identity_kind=task.identity_kind,
+                ),
+            )
+        except Exception as exc:
+            task_service.append_event(
+                task,
+                TaskEventType.log,
+                {
+                    "message": "semantic_router_shadow_failed",
+                    "behavior": "observe_only",
+                    "prompt_version": SEMANTIC_ROUTER_PROMPT_VERSION,
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                    "fallback_policy": "ignore_shadow_router_failure",
+                },
+            )
+            log_observation(
+                logger,
+                "semantic_router_shadow_failed",
+                task=task,
+                behavior="observe_only",
+                prompt_version=SEMANTIC_ROUTER_PROMPT_VERSION,
+                error_type=type(exc).__name__,
+                error_summary=str(exc)[:500],
+            )
+            return
+
+        metadata = decision.comparison_payload(
+            handoff_runtime_class=handoff.runtime_class.value,
+            handoff_recommended_backend=handoff.recommended_backend,
+            selected_backend=handoff.selected_backend,
+            planned_classifier_route=_routing_payload_str(
+                planned_workflow_payload,
+                "route",
+            ),
+            planned_candidate=planned_candidate,
+        )
+        task_service.append_event(
+            task,
+            TaskEventType.log,
+            RoutingDecisionTrace(
+                stage="semantic_router_shadow",
+                route_tier="tier1_shadow",
+                source="llm_semantic_router",
+                runtime_class=decision.runtime_class.value,
+                intent=decision.intent,
+                confidence=decision.confidence,
+                margin=decision.margin,
+                escalated=decision.execution_path.value != "inline",
+                reason=decision.reason,
+                shadow_runtime_class=decision.runtime_class.value,
+                shadow_route=decision.execution_path.value,
+                shadow_confidence=decision.confidence,
+                metadata=metadata,
+            ).to_payload(),
+        )
+        log_observation(
+            logger,
+            "semantic_router_shadow_completed",
+            task=task,
+            runtime_class=decision.runtime_class.value,
+            intent=decision.intent,
+            execution_path=decision.execution_path.value,
+            confidence=decision.confidence,
+            margin=decision.margin,
+            runtime_disagreement=metadata["runtime_disagreement"],
+            execution_path_disagreement=metadata["execution_path_disagreement"],
+        )
 
     def _shadow_start_temporal_workflow(
         self,
@@ -2696,6 +2826,16 @@ def _routing_confidence_from_planned_payload(
     if isinstance(value, int | float):
         return float(value)
     return None
+
+
+def _routing_surface_from_task(task: Task) -> str:
+    if task.slack_channel_id.startswith("D"):
+        return "dm"
+    if task.identity_kind == "scheduled":
+        return "scheduled"
+    if task.identity_kind == "synthetic":
+        return "synthetic"
+    return "channel"
 
 
 def _should_suppress_slack_post(session: Session, task: Task) -> bool:

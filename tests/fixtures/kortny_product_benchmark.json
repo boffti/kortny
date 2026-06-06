@@ -1,8 +1,32 @@
 {
-  "version": 1,
+  "version": 2,
   "name": "Kortny Product Benchmark",
   "purpose": "Keep Kortny engineering grounded in visible Slack coworker quality, latency and cost, context/tool correctness, and operator trust.",
   "operating_rule": "New slices should improve Slack response quality, latency/cost, correct context/tool selection, or operator trust/debuggability.",
+  "routing_taxonomy": {
+    "version": 1,
+    "runtime_classes": [
+      "quick_response",
+      "inline_tool_task",
+      "durable_workflow_task",
+      "scheduled_workflow_task"
+    ],
+    "execution_paths": [
+      "inline",
+      "durable_workflow",
+      "scheduled_workflow"
+    ],
+    "risk_types": [
+      "none",
+      "regression_guard",
+      "over_routing",
+      "under_routing",
+      "classifier_over_routing",
+      "classifier_under_routing",
+      "multi_intent_collapse",
+      "tool_inventory_accuracy"
+    ]
+  },
   "default_manual_budget": {
     "quick_target_seconds": 20,
     "planned_target_seconds": 180,
@@ -19,6 +43,15 @@
       "desired_runtime_route": "inline",
       "baseline_classifier_route": "inline",
       "known_gap": null,
+      "routing_expectation": {
+        "expected_runtime_class": "quick_response",
+        "expected_intent": "conversation.quick",
+        "expected_execution_path": "inline",
+        "expected_tool_families": [],
+        "current_runtime_class_baseline": "quick_response",
+        "current_backend_baseline": "inline",
+        "routing_risk": "none"
+      },
       "expected": {
         "slack": [
           "Responds briefly and naturally.",
@@ -27,7 +60,8 @@
         ],
         "logs": [
           "No adk_planned_workflow_selected event.",
-          "No Composio catalog fanout for this prompt."
+          "No Composio catalog fanout for this prompt.",
+          "routing_decision_recorded shows quick_response or direct quick path."
         ],
         "db": [
           "Task succeeds with one posted result message.",
@@ -40,6 +74,47 @@
       }
     },
     {
+      "id": "schedule_state_query",
+      "title": "Schedule state query stays system-of-record",
+      "surface": "dm",
+      "prompt": "Do I have an active stock market update scheduled?",
+      "primary_guardrail": "latency_cost",
+      "desired_runtime_route": "inline",
+      "baseline_classifier_route": "inline",
+      "known_gap": null,
+      "routing_expectation": {
+        "expected_runtime_class": "inline_tool_task",
+        "expected_intent": "scheduler.query",
+        "expected_execution_path": "inline",
+        "expected_tool_families": [
+          "schedules"
+        ],
+        "current_runtime_class_baseline": "inline_tool_task",
+        "current_backend_baseline": "inline",
+        "routing_risk": "regression_guard"
+      },
+      "expected": {
+        "slack": [
+          "Answers directly from the scheduler state.",
+          "Includes whether a matching schedule is active and where it delivers.",
+          "Does not mention internal planning or schedule IDs unless asked."
+        ],
+        "logs": [
+          "routing_decision_recorded route_tier_resolved is tier0 or equivalent system-of-record route.",
+          "No adk_planned_workflow_selected event.",
+          "list_schedules or scheduler repository lookup is visible."
+        ],
+        "db": [
+          "Task events include routing_decision_recorded and routing_chain_completed.",
+          "No planned workflow branch events are recorded."
+        ],
+        "dashboard": [
+          "Timeline explains that scheduler state was the source of truth.",
+          "Route summary shows inline scheduler query."
+        ]
+      }
+    },
+    {
       "id": "channel_context_usage",
       "title": "Channel profile with provenance",
       "surface": "channel_mention",
@@ -48,6 +123,19 @@
       "desired_runtime_route": "inline",
       "baseline_classifier_route": "inline",
       "known_gap": null,
+      "routing_expectation": {
+        "expected_runtime_class": "inline_tool_task",
+        "expected_intent": "workspace.channel_profile",
+        "expected_execution_path": "inline",
+        "expected_tool_families": [
+          "workspace_graph",
+          "slack_history",
+          "memory"
+        ],
+        "current_runtime_class_baseline": "inline_tool_task",
+        "current_backend_baseline": "inline",
+        "routing_risk": "none"
+      },
       "expected": {
         "slack": [
           "Explains the channel purpose and recurring work patterns.",
@@ -56,7 +144,8 @@
         ],
         "logs": [
           "Uses channel context, workspace graph, or Slack history where available.",
-          "Records kg_retrieval_completed or channel history tool evidence when used."
+          "Records kg_retrieval_completed or channel history tool evidence when used.",
+          "routing_decision_recorded stays inline and does not mark durable solely from channel context."
         ],
         "db": [
           "Task event timeline includes context assembly.",
@@ -77,6 +166,18 @@
       "desired_runtime_route": "inline",
       "baseline_classifier_route": "inline",
       "known_gap": null,
+      "routing_expectation": {
+        "expected_runtime_class": "inline_tool_task",
+        "expected_intent": "workspace.decision_summary",
+        "expected_execution_path": "inline",
+        "expected_tool_families": [
+          "slack_history",
+          "workspace_graph"
+        ],
+        "current_runtime_class_baseline": "inline_tool_task",
+        "current_backend_baseline": "inline",
+        "routing_risk": "none"
+      },
       "expected": {
         "slack": [
           "Separates decisions from unresolved items.",
@@ -85,7 +186,8 @@
         ],
         "logs": [
           "Uses Slack/channel context when needed.",
-          "Does not run broad web research for a local channel-summary request."
+          "Does not run broad web research for a local channel-summary request.",
+          "routing_decision_recorded keeps the task inline unless the user asks for durable follow-up work."
         ],
         "db": [
           "Task succeeds with source/tool trace if channel history is read.",
@@ -105,7 +207,18 @@
       "primary_guardrail": "correct_context_tool_selection",
       "desired_runtime_route": "inline",
       "baseline_classifier_route": "inline",
-      "known_gap": "Intent handling can classify the memory candidate correctly while the later task path still performs unrelated follow-up work.",
+      "known_gap": "Mixed follow-up plus memory candidate can collapse into one dominant intent unless routing preserves both.",
+      "routing_expectation": {
+        "expected_runtime_class": "inline_tool_task",
+        "expected_intent": "multi_intent.follow_up_plus_memory",
+        "expected_execution_path": "inline",
+        "expected_tool_families": [
+          "memory"
+        ],
+        "current_runtime_class_baseline": "inline_tool_task",
+        "current_backend_baseline": "inline",
+        "routing_risk": "multi_intent_collapse"
+      },
       "expected": {
         "slack": [
           "Acknowledges the memory candidate or asks one concise clarification.",
@@ -113,7 +226,8 @@
         ],
         "logs": [
           "Records memory candidate or memory confirmation flow.",
-          "Does not route to planned workflow solely because the phrase is a follow-up."
+          "Does not route to planned workflow solely because the phrase is a follow-up.",
+          "routing_decision_recorded or a future multi-intent route shows both action and memory intent."
         ],
         "db": [
           "Creates or proposes one memory row only when the preference text is specific enough.",
@@ -126,14 +240,67 @@
       }
     },
     {
+      "id": "tool_inventory_question",
+      "title": "Scoped tool and integration inventory",
+      "surface": "channel_mention",
+      "prompt": "@Kortny what tools and integrations can you use here?",
+      "primary_guardrail": "operator_trust_debuggability",
+      "desired_runtime_route": "inline",
+      "baseline_classifier_route": "inline",
+      "known_gap": "Tool inventory answers can become stale or self-inconsistent unless routed through scoped inventory evidence.",
+      "routing_expectation": {
+        "expected_runtime_class": "inline_tool_task",
+        "expected_intent": "capability.tool_inventory",
+        "expected_execution_path": "inline",
+        "expected_tool_families": [
+          "list_integrations",
+          "tool_registry"
+        ],
+        "current_runtime_class_baseline": "inline_tool_task",
+        "current_backend_baseline": "inline",
+        "routing_risk": "tool_inventory_accuracy"
+      },
+      "expected": {
+        "slack": [
+          "Lists current native tools and scoped connected integrations.",
+          "Does not describe Kortny as a separate main agent plus helper agent.",
+          "Clearly distinguishes available integrations from missing ones."
+        ],
+        "logs": [
+          "Uses a scoped inventory path or tool registry evidence.",
+          "No planned workflow event.",
+          "routing_decision_recorded identifies a capability/tool inventory intent."
+        ],
+        "db": [
+          "Task succeeds with lightweight LLM usage.",
+          "Tool inventory lookup is recorded if used."
+        ],
+        "dashboard": [
+          "Timeline shows scoped tool inventory evidence.",
+          "Route summary stays inline."
+        ]
+      }
+    },
+    {
       "id": "linear_project_tasks",
       "title": "Scoped Linear project task summary",
       "surface": "channel_mention",
       "prompt": "@Kortny can you summarize my open tasks in the Linear kortny project?",
       "primary_guardrail": "correct_context_tool_selection",
-      "desired_runtime_route": "planned_candidate",
+      "desired_runtime_route": "inline",
       "baseline_classifier_route": "planned_candidate",
-      "known_gap": "Composio tool signatures can still cause weak Linear filtering or ask for details already present in the prompt.",
+      "known_gap": "A single scoped Linear read should be inline, but the current planned classifier marks it as a planned candidate because Linear plus project context looks multi-integration.",
+      "routing_expectation": {
+        "expected_runtime_class": "inline_tool_task",
+        "expected_intent": "integration.linear_project_summary",
+        "expected_execution_path": "inline",
+        "expected_tool_families": [
+          "linear"
+        ],
+        "current_runtime_class_baseline": "durable_workflow_task",
+        "current_backend_baseline": "temporal_candidate",
+        "routing_risk": "over_routing"
+      },
       "expected": {
         "slack": [
           "Uses the connected Linear integration when eligible.",
@@ -142,7 +309,8 @@
         ],
         "logs": [
           "Shows Linear Composio tool selection and execution.",
-          "Tool errors are recoverable and summarized rather than causing a generic failure."
+          "Tool errors are recoverable and summarized rather than causing a generic failure.",
+          "routing_decision_recorded should eventually choose inline_tool_task, not durable workflow."
         ],
         "db": [
           "Connection scope respects channel/workspace vs DM/user policy.",
@@ -163,6 +331,20 @@
       "desired_runtime_route": "planned_candidate",
       "baseline_classifier_route": "planned_candidate",
       "known_gap": null,
+      "routing_expectation": {
+        "expected_runtime_class": "durable_workflow_task",
+        "expected_intent": "research.workspace_comparison",
+        "expected_execution_path": "durable_workflow",
+        "expected_tool_families": [
+          "web_search",
+          "linear",
+          "workspace_docs",
+          "slack_history"
+        ],
+        "current_runtime_class_baseline": "durable_workflow_task",
+        "current_backend_baseline": "temporal_candidate",
+        "routing_risk": "none"
+      },
       "expected": {
         "slack": [
           "Leads with recommendation and separates evidence from blockers.",
@@ -170,8 +352,9 @@
           "Mentions material source/tool limitations."
         ],
         "logs": [
-          "Emits adk_planned_workflow_selected.",
-          "Records branch, tool, budget, and sanitizer events."
+          "Emits adk_planned_workflow_selected when planned workflows are controlling this class.",
+          "Records branch, tool, budget, and sanitizer events.",
+          "routing_decision_recorded shows durable workflow intent."
         ],
         "db": [
           "LLM usage cost is nonzero for every priced model call.",
@@ -192,6 +375,17 @@
       "desired_runtime_route": "planned_candidate",
       "baseline_classifier_route": "inline",
       "known_gap": "Current planned-workflow classifier treats this as inline even though the user asked for a deeper multi-source synthesis.",
+      "routing_expectation": {
+        "expected_runtime_class": "durable_workflow_task",
+        "expected_intent": "research.synthesis",
+        "expected_execution_path": "durable_workflow",
+        "expected_tool_families": [
+          "web_search"
+        ],
+        "current_runtime_class_baseline": "durable_workflow_task",
+        "current_backend_baseline": "temporal_candidate",
+        "routing_risk": "classifier_under_routing"
+      },
       "expected": {
         "slack": [
           "Gives a ranked answer with a clear scoring lens.",
@@ -200,7 +394,8 @@
         ],
         "logs": [
           "Should enter planned workflow or a bounded research path.",
-          "Should avoid runaway repeated search calls."
+          "Should avoid runaway repeated search calls.",
+          "routing_decision_recorded should classify this as durable workflow even if the old planned classifier misses it."
         ],
         "db": [
           "Cost and token totals remain under the planned benchmark budget.",
@@ -221,6 +416,18 @@
       "desired_runtime_route": "planned_candidate",
       "baseline_classifier_route": "inline",
       "known_gap": "Current planned-workflow classifier misses website audit plus named-framework requests as complex planned work.",
+      "routing_expectation": {
+        "expected_runtime_class": "durable_workflow_task",
+        "expected_intent": "website.audit",
+        "expected_execution_path": "durable_workflow",
+        "expected_tool_families": [
+          "web_search",
+          "web_crawl"
+        ],
+        "current_runtime_class_baseline": "inline_tool_task",
+        "current_backend_baseline": "inline",
+        "routing_risk": "under_routing"
+      },
       "expected": {
         "slack": [
           "Crawls or searches the site before making claims.",
@@ -229,7 +436,8 @@
         ],
         "logs": [
           "Uses web/search/crawl integration when available.",
-          "Records tool evidence and any pages that could not be accessed."
+          "Records tool evidence and any pages that could not be accessed.",
+          "routing_decision_recorded should eventually classify this as durable workflow."
         ],
         "db": [
           "Source refs or tool output include inspected site pages.",
@@ -250,6 +458,17 @@
       "desired_runtime_route": "inline",
       "baseline_classifier_route": "planned_candidate",
       "known_gap": "Current planned-workflow classifier can treat forget-memory requests as planned due keyword noise from 'PDF'.",
+      "routing_expectation": {
+        "expected_runtime_class": "inline_tool_task",
+        "expected_intent": "memory.forget",
+        "expected_execution_path": "inline",
+        "expected_tool_families": [
+          "memory"
+        ],
+        "current_runtime_class_baseline": "inline_tool_task",
+        "current_backend_baseline": "inline",
+        "routing_risk": "classifier_over_routing"
+      },
       "expected": {
         "slack": [
           "If no matching memory exists, explains that naturally.",
@@ -258,7 +477,8 @@
         ],
         "logs": [
           "Uses forget_fact or inspect_memory only as needed.",
-          "No planned workflow event for a simple memory mutation."
+          "No planned workflow event for a simple memory mutation.",
+          "routing_decision_recorded stays inline despite PDF keyword noise."
         ],
         "db": [
           "If a matching fact exists, status changes preserve audit history.",
@@ -279,6 +499,20 @@
       "desired_runtime_route": "planned_candidate",
       "baseline_classifier_route": "planned_candidate",
       "known_gap": "Document iterations still need stronger artifact versioning and proof that the new file materially differs from the prior file.",
+      "routing_expectation": {
+        "expected_runtime_class": "durable_workflow_task",
+        "expected_intent": "document.current_data_report",
+        "expected_execution_path": "durable_workflow",
+        "expected_tool_families": [
+          "alpha_vantage",
+          "web_search",
+          "slack_file_read",
+          "pdf_generation"
+        ],
+        "current_runtime_class_baseline": "inline_tool_task",
+        "current_backend_baseline": "inline",
+        "routing_risk": "under_routing"
+      },
       "expected": {
         "slack": [
           "States what changed from the prior report.",
@@ -288,7 +522,8 @@
         "logs": [
           "Reads the attached/prior PDF when available.",
           "Uses current-data tools for price and earnings evidence.",
-          "Records artifact creation and Slack file posting."
+          "Records artifact creation and Slack file posting.",
+          "routing_decision_recorded should eventually mark this as durable workflow."
         ],
         "db": [
           "Artifact row has stable filename lineage or version suffix.",

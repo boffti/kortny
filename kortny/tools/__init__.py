@@ -15,7 +15,12 @@ from kortny.tools.pdf_generator import PdfGeneratorTool
 from kortny.tools.registry import DuplicateToolError, ToolNotFoundError, ToolRegistry
 from kortny.tools.resolve_slack_identity import ResolveSlackIdentityTool
 from kortny.tools.search_observed_slack_history import SearchObservedSlackHistoryTool
-from kortny.tools.slack_actions import SlackAddReactionTool, SlackReplyThreadTool
+from kortny.tools.slack_actions import (
+    SlackAddBookmarkTool,
+    SlackAddReactionTool,
+    SlackPinMessageTool,
+    SlackReplyThreadTool,
+)
 from kortny.tools.slack_channel_history import (
     ObservationChannelHistoryCache,
     SlackChannelHistoryError,
@@ -57,11 +62,13 @@ __all__ = [
     "RememberFactTool",
     "ResolveSlackIdentityTool",
     "SearchObservedSlackHistoryTool",
+    "SlackAddBookmarkTool",
     "SlackAddReactionTool",
     "SlackChannelHistoryError",
     "SlackChannelHistoryTool",
     "SlackFileReadError",
     "SlackFileReadTool",
+    "SlackPinMessageTool",
     "SlackReplyThreadTool",
     "ToolDescriptor",
     "ToolMetadata",

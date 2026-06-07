@@ -18,7 +18,12 @@ from kortny.db.models import (
     TaskStatus,
 )
 from kortny.db.session import make_engine, make_session_factory, normalize_database_url
-from kortny.tools.slack_actions import SlackAddReactionTool, SlackReplyThreadTool
+from kortny.tools.slack_actions import (
+    SlackAddBookmarkTool,
+    SlackAddReactionTool,
+    SlackPinMessageTool,
+    SlackReplyThreadTool,
+)
 
 TEST_POSTGRES_URL = os.environ.get("KORTNY_TEST_POSTGRES_URL")
 
@@ -32,6 +37,8 @@ class FakeSlackActionClient:
     def __init__(self) -> None:
         self.messages: list[dict[str, Any]] = []
         self.reactions: list[dict[str, Any]] = []
+        self.pins: list[dict[str, Any]] = []
+        self.bookmarks: list[dict[str, Any]] = []
 
     def chat_postMessage(
         self,
@@ -64,6 +71,49 @@ class FakeSlackActionClient:
             }
         )
         return {"ok": True}
+
+    def pins_add(
+        self,
+        *,
+        channel: str,
+        timestamp: str,
+    ) -> dict[str, Any]:
+        self.pins.append(
+            {
+                "channel": channel,
+                "timestamp": timestamp,
+            }
+        )
+        return {"ok": True}
+
+    def bookmarks_add(
+        self,
+        *,
+        channel_id: str,
+        title: str,
+        type: str,
+        link: str,
+        emoji: str | None = None,
+    ) -> dict[str, Any]:
+        self.bookmarks.append(
+            {
+                "channel_id": channel_id,
+                "title": title,
+                "type": type,
+                "link": link,
+                "emoji": emoji,
+            }
+        )
+        return {
+            "ok": True,
+            "bookmark": {
+                "id": f"Bk{len(self.bookmarks):06d}",
+                "channel_id": channel_id,
+                "title": title,
+                "link": link,
+                "type": type,
+            },
+        }
 
 
 @pytest.fixture(scope="session")
@@ -231,6 +281,134 @@ def test_slack_add_reaction_rejects_other_message(
         ).invoke({"name": "eyes", "message_ts": "1716400099.000001"})
 
     assert client.reactions == []
+
+
+def test_slack_pin_message_uses_current_message_and_records_side_effect(
+    db_session: Session,
+) -> None:
+    task = create_task(db_session)
+    client = FakeSlackActionClient()
+
+    result = SlackPinMessageTool(
+        client=client,
+        session=db_session,
+        task=task,
+    ).invoke({})
+
+    event = db_session.scalar(
+        select(TaskEvent).where(
+            TaskEvent.task_id == task.id,
+            TaskEvent.type == TaskEventType.log,
+            TaskEvent.payload["message"].as_string() == "slack_message_pinned",
+        )
+    )
+    side_effect = db_session.scalar(
+        select(SlackSideEffect).where(SlackSideEffect.task_id == task.id)
+    )
+
+    assert result.output["successful"] is True
+    assert client.pins == [
+        {
+            "channel": "C123",
+            "timestamp": "1716400000.000001",
+        }
+    ]
+    assert event is not None
+    assert event.payload["tool"] == "slack_pin_message"
+    assert event.payload["message_ts"] == "1716400000.000001"
+    assert side_effect is not None
+    assert side_effect.operation == "pins_add"
+    assert side_effect.target_message_ts == "1716400000.000001"
+
+
+def test_slack_pin_message_rejects_other_message(
+    db_session: Session,
+) -> None:
+    task = create_task(db_session)
+    client = FakeSlackActionClient()
+
+    with pytest.raises(ValueError, match="current Slack message"):
+        SlackPinMessageTool(
+            client=client,
+            session=db_session,
+            task=task,
+        ).invoke({"message_ts": "1716400099.000001"})
+
+    assert client.pins == []
+
+
+def test_slack_add_bookmark_adds_link_to_current_channel(
+    db_session: Session,
+) -> None:
+    task = create_task(db_session)
+    client = FakeSlackActionClient()
+
+    result = SlackAddBookmarkTool(
+        client=client,
+        session=db_session,
+        task=task,
+    ).invoke(
+        {
+            "title": "Slack API docs",
+            "link": "https://docs.slack.dev/reference/methods/bookmarks.add",
+            "emoji": ":bookmark:",
+        }
+    )
+
+    event = db_session.scalar(
+        select(TaskEvent).where(
+            TaskEvent.task_id == task.id,
+            TaskEvent.type == TaskEventType.log,
+            TaskEvent.payload["message"].as_string() == "slack_bookmark_added",
+        )
+    )
+    side_effect = db_session.scalar(
+        select(SlackSideEffect).where(SlackSideEffect.task_id == task.id)
+    )
+
+    assert result.output["successful"] is True
+    assert result.output["bookmark_id"] == "Bk000001"
+    assert client.bookmarks == [
+        {
+            "channel_id": "C123",
+            "title": "Slack API docs",
+            "type": "link",
+            "link": "https://docs.slack.dev/reference/methods/bookmarks.add",
+            "emoji": "bookmark",
+        }
+    ]
+    assert event is not None
+    assert event.payload["tool"] == "slack_add_bookmark"
+    assert event.payload["bookmark_id"] == "Bk000001"
+    assert side_effect is not None
+    assert side_effect.operation == "bookmarks_add"
+    assert side_effect.target_channel_id == "C123"
+    assert side_effect.request_json["type"] == "link"
+
+
+def test_slack_add_bookmark_rejects_dm_and_invalid_link(
+    db_session: Session,
+) -> None:
+    task = create_task(db_session, channel_id="D123", thread_ts="D123")
+    client = FakeSlackActionClient()
+
+    with pytest.raises(ValueError, match="only available in Slack channels"):
+        SlackAddBookmarkTool(
+            client=client,
+            session=db_session,
+            task=task,
+        ).invoke({"title": "Bad", "link": "https://example.com"})
+
+    task.slack_channel_id = "C123"
+    db_session.flush()
+    with pytest.raises(ValueError, match="must start with http:// or https://"):
+        SlackAddBookmarkTool(
+            client=client,
+            session=db_session,
+            task=task,
+        ).invoke({"title": "Bad", "link": "ftp://example.com"})
+
+    assert client.bookmarks == []
 
 
 def cleanup_database(session: Session) -> None:

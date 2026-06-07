@@ -110,6 +110,8 @@ def test_resolve_slack_identity_metadata_is_local_and_read_only() -> None:
 def test_slack_action_metadata_is_current_scope_and_write_classed() -> None:
     reply = tool_metadata("slack_reply_thread")
     reaction = tool_metadata("slack_add_reaction")
+    pin = tool_metadata("slack_pin_message")
+    bookmark = tool_metadata("slack_add_bookmark")
 
     assert reply.category == "Slack actions"
     assert reply.side_effect == "write"
@@ -119,6 +121,14 @@ def test_slack_action_metadata_is_current_scope_and_write_classed() -> None:
     assert reaction.side_effect == "write"
     assert reaction.required_slack_scopes == ("reactions:write",)
     assert "current_message_only" in reaction.plan_gates
+    assert pin.category == "Slack actions"
+    assert pin.side_effect == "write"
+    assert pin.required_slack_scopes == ("pins:write",)
+    assert "current_message_only" in pin.plan_gates
+    assert bookmark.category == "Slack actions"
+    assert bookmark.side_effect == "write"
+    assert bookmark.required_slack_scopes == ("bookmarks:write",)
+    assert "current_channel_only" in bookmark.plan_gates
 
 
 def test_slack_action_tools_do_not_require_human_approval_by_default() -> None:
@@ -132,9 +142,19 @@ def test_slack_action_tools_do_not_require_human_approval_by_default() -> None:
         SimpleNamespace(name="slack_add_reaction", description="Add a reaction"),
         {},
     )
+    pin = policy.requirement_for(
+        SimpleNamespace(name="slack_pin_message", description="Pin a message"),
+        {},
+    )
+    bookmark = policy.requirement_for(
+        SimpleNamespace(name="slack_add_bookmark", description="Add a bookmark"),
+        {},
+    )
 
     assert reply.scope is ApprovalScope.none
     assert reaction.scope is ApprovalScope.none
+    assert pin.scope is ApprovalScope.none
+    assert bookmark.scope is ApprovalScope.none
 
 
 def test_describe_tools_metadata_is_read_only_runtime_inventory() -> None:

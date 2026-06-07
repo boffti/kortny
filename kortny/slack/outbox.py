@@ -257,6 +257,28 @@ def slack_reaction_key(
     return f"slack:{operation}:{task_id}:{channel_id}:{message_ts}:{reaction}"
 
 
+def slack_pin_key(
+    *,
+    task_id: uuid.UUID,
+    channel_id: str,
+    message_ts: str,
+) -> str:
+    """Return the deterministic outbox key for a task-bound Slack pin."""
+
+    return f"slack:pins_add:{task_id}:{channel_id}:{message_ts}"
+
+
+def slack_bookmark_key(
+    *,
+    task_id: uuid.UUID,
+    channel_id: str,
+    digest: str,
+) -> str:
+    """Return the deterministic outbox key for a task-bound Slack bookmark."""
+
+    return f"slack:bookmarks_add:{task_id}:{channel_id}:{digest}"
+
+
 def slack_channel_intro_key(*, installation_id: uuid.UUID, channel_id: str) -> str:
     """Return the deterministic outbox key for channel onboarding intro posts."""
 
@@ -273,6 +295,8 @@ def _idempotent_success_response(
     if operation == "reactions_add" and error == "already_reacted":
         return {"ok": True, "deduped_by_slack": True, "error": error}
     if operation == "reactions_remove" and error in {"no_reaction", "not_reacted"}:
+        return {"ok": True, "deduped_by_slack": True, "error": error}
+    if operation == "pins_add" and error == "already_pinned":
         return {"ok": True, "deduped_by_slack": True, "error": error}
     return None
 

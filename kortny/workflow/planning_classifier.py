@@ -440,6 +440,8 @@ _TOOL_TO_INTEGRATION = {
     "resolve_slack_identity": "slack",
     "slack_reply_thread": "slack",
     "slack_add_reaction": "slack",
+    "slack_pin_message": "slack",
+    "slack_add_bookmark": "slack",
     "slack_file_read": "slack",
     "pdf_generator": "documents",
 }

@@ -145,6 +145,8 @@ LOW_RISK_NATIVE_WRITE_TOOLS = frozenset(
     {
         "slack_reply_thread",
         "slack_add_reaction",
+        "slack_pin_message",
+        "slack_add_bookmark",
     }
 )
 USER_APPROVAL_NATIVE_TOOLS = frozenset({"forget_fact"})

@@ -79,7 +79,12 @@ from kortny.tools.schedules import (
     UpdateScheduleTool,
 )
 from kortny.tools.search_observed_slack_history import SearchObservedSlackHistoryTool
-from kortny.tools.slack_actions import SlackAddReactionTool, SlackReplyThreadTool
+from kortny.tools.slack_actions import (
+    SlackAddBookmarkTool,
+    SlackAddReactionTool,
+    SlackPinMessageTool,
+    SlackReplyThreadTool,
+)
 from kortny.tools.slack_channel_history import SlackChannelHistoryTool
 from kortny.tools.slack_file_read import SlackFileReadTool
 from kortny.tools.web_search import WebSearchTool
@@ -139,6 +144,8 @@ _NATIVE_DASHBOARD_TOOL_CLASSES: tuple[type[Any], ...] = (
     ResolveSlackIdentityTool,
     SlackReplyThreadTool,
     SlackAddReactionTool,
+    SlackPinMessageTool,
+    SlackAddBookmarkTool,
     SlackFileReadTool,
     QueryWorkspaceGraphTool,
     ListSchedulesTool,

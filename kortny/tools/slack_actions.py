@@ -13,6 +13,8 @@ from sqlalchemy.orm import Session
 from kortny.db.models import Task, TaskEvent, TaskEventType
 from kortny.slack.outbox import (
     SlackSideEffectOutbox,
+    slack_bookmark_key,
+    slack_pin_key,
     slack_reaction_key,
 )
 from kortny.slack_mrkdwn import normalize_slack_mrkdwn
@@ -20,8 +22,10 @@ from kortny.tasks import TaskService
 from kortny.tools.types import JsonObject, JsonSchema, ToolResult
 
 MAX_TOOL_REPLY_CHARS = 4_000
+MAX_BOOKMARK_TITLE_CHARS = 150
 SLACK_TS_RE = re.compile(r"^\d{10,}\.\d+$")
 REACTION_NAME_RE = re.compile(r"^[A-Za-z0-9_+-]+(?:::skin-tone-[2-6])?$")
+HTTP_LINK_RE = re.compile(r"^https?://[^\s]+$", re.IGNORECASE)
 
 
 class SlackActionClient(Protocol):
@@ -44,6 +48,25 @@ class SlackActionClient(Protocol):
         name: str,
     ) -> Any:
         """Add a Slack reaction."""
+
+    def pins_add(
+        self,
+        *,
+        channel: str,
+        timestamp: str,
+    ) -> Any:
+        """Pin a Slack message."""
+
+    def bookmarks_add(
+        self,
+        *,
+        channel_id: str,
+        title: str,
+        type: str,
+        link: str,
+        emoji: str | None = None,
+    ) -> Any:
+        """Add a Slack bookmark."""
 
 
 class SlackReplyThreadTool:
@@ -241,7 +264,11 @@ class SlackAddReactionTool:
             task=self.task,
             tool_name=self.name,
         )
-        message_ts = _current_message_ts_arg(args.get("message_ts"), task=self.task)
+        message_ts = _current_message_ts_arg(
+            args.get("message_ts"),
+            task=self.task,
+            tool_name=self.name,
+        )
         idempotency_key = slack_reaction_key(
             task_id=self.task.id,
             operation="reactions_add",
@@ -306,6 +333,253 @@ class SlackAddReactionTool:
         )
 
 
+class SlackPinMessageTool:
+    """Pin the current triggering Slack message."""
+
+    name = "slack_pin_message"
+    description = (
+        "Pins the current triggering Slack message in its channel. Use this "
+        "only when the user explicitly asks to pin this message or when Kortny "
+        "has just produced a message that should be kept visible and the user "
+        "asked for it. The tool is scoped to the current Slack channel and "
+        "current message."
+    )
+    parameters: JsonSchema = {
+        "type": "object",
+        "properties": {
+            "channel_id": {
+                "type": "string",
+                "description": (
+                    "Optional current Slack channel ID. Omit unless copying the "
+                    "current task channel exactly."
+                ),
+            },
+            "message_ts": {
+                "type": "string",
+                "description": (
+                    "Optional current triggering message timestamp. Omit to use "
+                    "the task message timestamp. This cannot target another "
+                    "message."
+                ),
+            },
+        },
+        "additionalProperties": False,
+    }
+
+    def __init__(
+        self,
+        *,
+        client: SlackActionClient,
+        session: Session,
+        task: Task,
+        task_service: TaskService | None = None,
+    ) -> None:
+        self.client = client
+        self.session = session
+        self.task = task
+        self.task_service = task_service or TaskService(session)
+
+    def invoke(self, args: JsonObject) -> ToolResult:
+        channel_id = _current_channel_arg(
+            value=args.get("channel_id"),
+            task=self.task,
+            tool_name=self.name,
+        )
+        message_ts = _current_message_ts_arg(
+            args.get("message_ts"),
+            task=self.task,
+            tool_name=self.name,
+        )
+        idempotency_key = slack_pin_key(
+            task_id=self.task.id,
+            channel_id=channel_id,
+            message_ts=message_ts,
+        )
+        request: JsonObject = {
+            "channel": channel_id,
+            "timestamp": message_ts,
+        }
+        result = SlackSideEffectOutbox(self.session).deliver(
+            installation_id=self.task.installation_id,
+            task_id=self.task.id,
+            idempotency_key=idempotency_key,
+            operation="pins_add",
+            purpose="tool_pin_message",
+            target_channel_id=channel_id,
+            target_message_ts=message_ts,
+            request=request,
+            call=lambda: self.client.pins_add(
+                channel=channel_id,
+                timestamp=message_ts,
+            ),
+        )
+        response = _require_ok(result.response, "pins.add")
+        side_effect_id = str(result.side_effect.id)
+        if not _task_event_exists(
+            self.session,
+            task=self.task,
+            event_type=TaskEventType.log,
+            side_effect_id=side_effect_id,
+        ):
+            self.task_service.append_event(
+                self.task,
+                TaskEventType.log,
+                {
+                    "message": "slack_message_pinned",
+                    "channel": channel_id,
+                    "message_ts": message_ts,
+                    "purpose": "tool_pin_message",
+                    "slack_side_effect_id": side_effect_id,
+                    "idempotency_key": idempotency_key,
+                    "tool": self.name,
+                    "deduped": result.deduped,
+                    "deduped_by_slack": response.get("deduped_by_slack") is True,
+                },
+            )
+        return ToolResult(
+            output={
+                "successful": True,
+                "channel": channel_id,
+                "message_ts": message_ts,
+                "deduped": result.deduped,
+                "deduped_by_slack": response.get("deduped_by_slack") is True,
+                "slack_side_effect_id": side_effect_id,
+            }
+        )
+
+
+class SlackAddBookmarkTool:
+    """Add a link bookmark to the current Slack channel."""
+
+    name = "slack_add_bookmark"
+    description = (
+        "Adds a link bookmark to the current Slack channel header. Use this "
+        "only when the user explicitly asks to bookmark a link or save a link "
+        "for the channel. This slice supports link bookmarks only and is scoped "
+        "to the current Slack channel."
+    )
+    parameters: JsonSchema = {
+        "type": "object",
+        "properties": {
+            "title": {
+                "type": "string",
+                "description": "Short human-readable bookmark title.",
+            },
+            "link": {
+                "type": "string",
+                "description": "HTTP or HTTPS link to bookmark.",
+            },
+            "emoji": {
+                "type": "string",
+                "description": (
+                    "Optional emoji tag without surrounding colons, for example "
+                    "bookmark, link, or white_check_mark."
+                ),
+            },
+            "channel_id": {
+                "type": "string",
+                "description": (
+                    "Optional current Slack channel ID. Omit unless copying the "
+                    "current task channel exactly."
+                ),
+            },
+        },
+        "required": ["title", "link"],
+        "additionalProperties": False,
+    }
+
+    def __init__(
+        self,
+        *,
+        client: SlackActionClient,
+        session: Session,
+        task: Task,
+        task_service: TaskService | None = None,
+    ) -> None:
+        self.client = client
+        self.session = session
+        self.task = task
+        self.task_service = task_service or TaskService(session)
+
+    def invoke(self, args: JsonObject) -> ToolResult:
+        channel_id = _current_channel_arg(
+            value=args.get("channel_id"),
+            task=self.task,
+            tool_name=self.name,
+        )
+        if channel_id.startswith("D"):
+            raise ValueError("slack_add_bookmark is only available in Slack channels")
+        title = _coerce_bookmark_title(args.get("title"))
+        link = _coerce_bookmark_link(args.get("link"))
+        emoji = _coerce_optional_emoji(args.get("emoji"))
+        digest = _bookmark_digest(title=title, link=link)
+        idempotency_key = slack_bookmark_key(
+            task_id=self.task.id,
+            channel_id=channel_id,
+            digest=digest,
+        )
+        request: JsonObject = {
+            "channel_id": channel_id,
+            "title": title,
+            "type": "link",
+            "link": link,
+        }
+        if emoji is not None:
+            request["emoji"] = emoji
+        result = SlackSideEffectOutbox(self.session).deliver(
+            installation_id=self.task.installation_id,
+            task_id=self.task.id,
+            idempotency_key=idempotency_key,
+            operation="bookmarks_add",
+            purpose="tool_add_bookmark",
+            target_channel_id=channel_id,
+            request=request,
+            call=lambda: self.client.bookmarks_add(
+                channel_id=channel_id,
+                title=title,
+                type="link",
+                link=link,
+                emoji=emoji,
+            ),
+        )
+        response = _require_ok(result.response, "bookmarks.add")
+        bookmark_id = _response_bookmark_id(response)
+        side_effect_id = str(result.side_effect.id)
+        if not _task_event_exists(
+            self.session,
+            task=self.task,
+            event_type=TaskEventType.log,
+            side_effect_id=side_effect_id,
+        ):
+            self.task_service.append_event(
+                self.task,
+                TaskEventType.log,
+                {
+                    "message": "slack_bookmark_added",
+                    "channel": channel_id,
+                    "bookmark_id": bookmark_id,
+                    "title": title,
+                    "link": link,
+                    "purpose": "tool_add_bookmark",
+                    "slack_side_effect_id": side_effect_id,
+                    "idempotency_key": idempotency_key,
+                    "tool": self.name,
+                    "deduped": result.deduped,
+                },
+            )
+        return ToolResult(
+            output={
+                "successful": True,
+                "channel": channel_id,
+                "bookmark_id": bookmark_id,
+                "title": title,
+                "link": link,
+                "deduped": result.deduped,
+                "slack_side_effect_id": side_effect_id,
+            }
+        )
+
+
 def _coerce_reply_text(value: object) -> str:
     if not isinstance(value, str):
         raise ValueError("slack_reply_thread 'text' is required")
@@ -343,21 +617,26 @@ def _current_thread_arg(value: object, *, task: Task) -> str | None:
     return thread_ts
 
 
-def _current_message_ts_arg(value: object, *, task: Task) -> str:
+def _current_message_ts_arg(
+    value: object,
+    *,
+    task: Task,
+    tool_name: str,
+) -> str:
     current_message_ts = task.slack_message_ts
     if current_message_ts is None and _is_slack_timestamp(task.slack_thread_ts):
         current_message_ts = task.slack_thread_ts
     if value is None:
         if current_message_ts is None:
-            raise ValueError("slack_add_reaction requires a current message timestamp")
+            raise ValueError(f"{tool_name} requires a current message timestamp")
         return current_message_ts
     if not isinstance(value, str) or not value.strip():
-        raise ValueError("slack_add_reaction 'message_ts' must be a Slack timestamp")
+        raise ValueError(f"{tool_name} 'message_ts' must be a Slack timestamp")
     message_ts = value.strip()
     if not _is_slack_timestamp(message_ts):
-        raise ValueError("slack_add_reaction 'message_ts' must be a Slack timestamp")
+        raise ValueError(f"{tool_name} 'message_ts' must be a Slack timestamp")
     if message_ts != current_message_ts:
-        raise ValueError("slack_add_reaction can only target the current Slack message")
+        raise ValueError(f"{tool_name} can only target the current Slack message")
     return message_ts
 
 
@@ -368,6 +647,34 @@ def _coerce_reaction_name(value: object) -> str:
     if not reaction or not REACTION_NAME_RE.match(reaction):
         raise ValueError("slack_add_reaction 'name' must be a valid Slack emoji name")
     return reaction
+
+
+def _coerce_bookmark_title(value: object) -> str:
+    if not isinstance(value, str):
+        raise ValueError("slack_add_bookmark 'title' is required")
+    title = " ".join(value.strip().split())
+    if not title:
+        raise ValueError("slack_add_bookmark 'title' cannot be empty")
+    if len(title) > MAX_BOOKMARK_TITLE_CHARS:
+        raise ValueError(
+            f"slack_add_bookmark 'title' must be {MAX_BOOKMARK_TITLE_CHARS} characters or fewer"
+        )
+    return title
+
+
+def _coerce_bookmark_link(value: object) -> str:
+    if not isinstance(value, str):
+        raise ValueError("slack_add_bookmark 'link' is required")
+    link = value.strip()
+    if not HTTP_LINK_RE.match(link):
+        raise ValueError("slack_add_bookmark 'link' must start with http:// or https://")
+    return link
+
+
+def _coerce_optional_emoji(value: object) -> str | None:
+    if value is None:
+        return None
+    return _coerce_reaction_name(value)
 
 
 def _coerce_purpose(value: object, *, default: str) -> str:
@@ -401,6 +708,10 @@ def _reply_idempotency_key(
     return f"slack:tool_reply:{task.id}:{purpose}:{channel_id}:{thread_ts or 'root'}:{digest}"
 
 
+def _bookmark_digest(*, title: str, link: str) -> str:
+    return hashlib.sha256(f"{title}\n{link}".encode()).hexdigest()[:16]
+
+
 def _require_ok(response: Mapping[str, Any], method: str) -> Mapping[str, Any]:
     ok = response.get("ok")
     if ok is False:
@@ -418,6 +729,15 @@ def _response_ts(response: Mapping[str, Any]) -> str | None:
         message_ts = message.get("ts")
         if isinstance(message_ts, str) and message_ts:
             return message_ts
+    return None
+
+
+def _response_bookmark_id(response: Mapping[str, Any]) -> str | None:
+    bookmark = response.get("bookmark")
+    if isinstance(bookmark, Mapping):
+        bookmark_id = bookmark.get("id")
+        if isinstance(bookmark_id, str) and bookmark_id:
+            return bookmark_id
     return None
 
 

@@ -23,7 +23,11 @@ class ToolMetadata:
     display_name: str
     capabilities: tuple[str, ...]
     side_effect: ToolSideEffect
+    integration: str = ""
     approval: ToolApproval = "none"
+    runtime_registered: bool = True
+    dashboard_exposed: bool = True
+    context_hint: bool = False
     required_env_vars: tuple[str, ...] = ()
     required_slack_scopes: tuple[str, ...] = ()
     plan_gates: tuple[str, ...] = ()
@@ -109,6 +113,7 @@ NATIVE_TOOL_METADATA: dict[str, ToolMetadata] = {
             "im:history",
             "mpim:history",
         ),
+        context_hint=True,
         plan_gates=("slack_rate_limited",),
         result_budget="history_window",
         notes=("Uses observed local cache first when available.",),
@@ -126,9 +131,12 @@ NATIVE_TOOL_METADATA: dict[str, ToolMetadata] = {
         ),
         side_effect="read",
         required_env_vars=("POSTGRES_URL",),
+        context_hint=True,
         plan_gates=("scope_guarded_context",),
         result_budget="bounded_results",
-        notes=("Searches Kortny's local observed Slack cache without Slack API calls.",),
+        notes=(
+            "Searches Kortny's local observed Slack cache without Slack API calls.",
+        ),
     ),
     "resolve_slack_identity": ToolMetadata(
         name="resolve_slack_identity",
@@ -143,9 +151,12 @@ NATIVE_TOOL_METADATA: dict[str, ToolMetadata] = {
         ),
         side_effect="read",
         required_env_vars=("POSTGRES_URL",),
+        context_hint=True,
         plan_gates=("scope_guarded_context",),
         result_budget="small_lookup",
-        notes=("Resolves cached Slack user and channel names without Slack API calls.",),
+        notes=(
+            "Resolves cached Slack user and channel names without Slack API calls.",
+        ),
     ),
     "slack_user_info": ToolMetadata(
         name="slack_user_info",
@@ -160,9 +171,12 @@ NATIVE_TOOL_METADATA: dict[str, ToolMetadata] = {
         side_effect="read",
         required_env_vars=("SLACK_BOT_TOKEN", "POSTGRES_URL"),
         required_slack_scopes=("users:read",),
+        context_hint=True,
         plan_gates=("slack_rate_limited", "identity_cache_refresh"),
         result_budget="small_lookup",
-        notes=("Refreshes missing or stale user identity cache entries with Slack users.info.",),
+        notes=(
+            "Refreshes missing or stale user identity cache entries with Slack users.info.",
+        ),
     ),
     "slack_channel_info": ToolMetadata(
         name="slack_channel_info",
@@ -182,9 +196,16 @@ NATIVE_TOOL_METADATA: dict[str, ToolMetadata] = {
             "im:read",
             "mpim:read",
         ),
-        plan_gates=("slack_rate_limited", "current_channel_only", "identity_cache_refresh"),
+        context_hint=True,
+        plan_gates=(
+            "slack_rate_limited",
+            "current_channel_only",
+            "identity_cache_refresh",
+        ),
         result_budget="small_lookup",
-        notes=("Refreshes the current channel identity cache entry with Slack conversations.info.",),
+        notes=(
+            "Refreshes the current channel identity cache entry with Slack conversations.info.",
+        ),
     ),
     "slack_reply_thread": ToolMetadata(
         name="slack_reply_thread",
@@ -303,6 +324,7 @@ NATIVE_TOOL_METADATA: dict[str, ToolMetadata] = {
         side_effect="read",
         required_env_vars=("SLACK_BOT_TOKEN",),
         required_slack_scopes=("canvases:read",),
+        context_hint=True,
         plan_gates=("known_canvas_id_required", "criteria_required"),
         result_budget="small_lookup",
         notes=(
@@ -486,6 +508,8 @@ NATIVE_TOOL_METADATA: dict[str, ToolMetadata] = {
         display_name="Echo",
         capabilities=("diagnostic",),
         side_effect="read",
+        runtime_registered=False,
+        dashboard_exposed=False,
         notes=("Test-only registry probe.",),
     ),
 }
@@ -505,6 +529,73 @@ def tool_metadata(name: str) -> ToolMetadata:
             side_effect="read",
             notes=("No explicit metadata has been registered yet.",),
         ),
+    )
+
+
+def read_only_native_tool_names() -> frozenset[str]:
+    """Return native tools marked read-only in the metadata catalog."""
+
+    return frozenset(
+        name
+        for name, metadata in NATIVE_TOOL_METADATA.items()
+        if metadata.side_effect == "read"
+    )
+
+
+def native_tool_names_by_approval(approval: ToolApproval) -> frozenset[str]:
+    """Return native tools with a specific approval classification."""
+
+    return frozenset(
+        name
+        for name, metadata in NATIVE_TOOL_METADATA.items()
+        if metadata.approval == approval
+    )
+
+
+def low_risk_native_write_tool_names() -> frozenset[str]:
+    """Return write tools whose metadata declares no extra approval gate."""
+
+    return frozenset(
+        name
+        for name, metadata in NATIVE_TOOL_METADATA.items()
+        if metadata.side_effect == "write" and metadata.approval == "none"
+    )
+
+
+def native_tool_integration_map() -> dict[str, str]:
+    """Return tool name to integration family mapping derived from metadata."""
+
+    return {
+        name: _metadata_integration(metadata)
+        for name, metadata in NATIVE_TOOL_METADATA.items()
+    }
+
+
+def dashboard_native_tool_names() -> tuple[str, ...]:
+    """Return native tool names exposed on dashboard capability surfaces."""
+
+    return tuple(
+        name
+        for name, metadata in NATIVE_TOOL_METADATA.items()
+        if metadata.runtime_registered and metadata.dashboard_exposed
+    )
+
+
+def runtime_native_tool_names() -> tuple[str, ...]:
+    """Return production native tool names expected in runtime registration."""
+
+    return tuple(
+        name
+        for name, metadata in NATIVE_TOOL_METADATA.items()
+        if metadata.runtime_registered
+    )
+
+
+def native_slack_context_hint_names() -> frozenset[str]:
+    """Return likely-tool hints that can stay on local Slack context tools."""
+
+    return frozenset(
+        name for name, metadata in NATIVE_TOOL_METADATA.items() if metadata.context_hint
     )
 
 
@@ -582,7 +673,9 @@ def _descriptor(
         settings=settings,
         config_available=config_available,
     )
-    resolved_enabled = enabled if enabled is not None else dynamic_disabled_reason is None
+    resolved_enabled = (
+        enabled if enabled is not None else dynamic_disabled_reason is None
+    )
     return ToolDescriptor(
         name=metadata.name,
         namespace=metadata.namespace,
@@ -659,6 +752,24 @@ def _settings_has_env_var(settings: Settings, env_var: str) -> bool:
     if isinstance(value, str):
         return bool(value.strip())
     return value is not None
+
+
+def _metadata_integration(metadata: ToolMetadata) -> str:
+    if metadata.integration:
+        return metadata.integration
+    return _NAMESPACE_INTEGRATIONS.get(metadata.namespace, metadata.namespace)
+
+
+_NAMESPACE_INTEGRATIONS = {
+    "native.context": "workspace",
+    "native.diagnostics": "diagnostics",
+    "native.documents": "documents",
+    "native.memory": "memory",
+    "native.meta": "runtime",
+    "native.research": "web",
+    "native.scheduler": "scheduler",
+    "native.slack": "slack",
+}
 
 
 _SETTINGS_ENV_ATTRS = {

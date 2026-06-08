@@ -16,6 +16,7 @@ from typing import Any
 from kortny.db.models import Task, TaskEvent
 from kortny.llm.routing import effective_intent_decision, latest_intent_decision
 from kortny.schedule_intent import is_schedule_state_question
+from kortny.tools.catalog import native_tool_integration_map
 from kortny.tools.types import JsonObject
 
 
@@ -433,20 +434,4 @@ _INTEGRATION_PATTERNS = {
     "calendar": re.compile(r"\bcalendar|meeting\b"),
     "email": re.compile(r"\bemail|gmail|inbox\b"),
 }
-_TOOL_TO_INTEGRATION = {
-    "web_search": "web",
-    "slack_channel_history": "slack",
-    "search_observed_slack_history": "slack",
-    "resolve_slack_identity": "slack",
-    "slack_user_info": "slack",
-    "slack_channel_info": "slack",
-    "slack_reply_thread": "slack",
-    "slack_add_reaction": "slack",
-    "slack_pin_message": "slack",
-    "slack_add_bookmark": "slack",
-    "slack_create_channel_canvas": "slack",
-    "slack_lookup_canvas_sections": "slack",
-    "slack_edit_canvas": "slack",
-    "slack_file_read": "slack",
-    "pdf_generator": "documents",
-}
+_TOOL_TO_INTEGRATION = native_tool_integration_map()

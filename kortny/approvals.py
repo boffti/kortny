@@ -6,6 +6,12 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Protocol, TypeAlias
 
+from kortny.tools.catalog import (
+    low_risk_native_write_tool_names,
+    native_tool_names_by_approval,
+    read_only_native_tool_names,
+)
+
 JsonObject: TypeAlias = dict[str, Any]
 
 
@@ -127,34 +133,10 @@ NO_APPROVAL_REQUIRED = ToolApprovalRequirement(
     reason="Tool is read-only or already has its own confirmation path.",
 )
 
-READ_ONLY_NATIVE_TOOLS = frozenset(
-    {
-        "web_search",
-        "slack_channel_history",
-        "search_observed_slack_history",
-        "resolve_slack_identity",
-        "slack_user_info",
-        "slack_channel_info",
-        "slack_lookup_canvas_sections",
-        "slack_file_read",
-        "recall_fact",
-        "inspect_memory",
-        "describe_tools",
-        "list_integrations",
-    }
-)
-SELF_GATED_NATIVE_TOOLS = frozenset({"remember_fact"})
-LOW_RISK_NATIVE_WRITE_TOOLS = frozenset(
-    {
-        "slack_reply_thread",
-        "slack_add_reaction",
-        "slack_pin_message",
-        "slack_add_bookmark",
-        "slack_create_channel_canvas",
-        "slack_edit_canvas",
-    }
-)
-USER_APPROVAL_NATIVE_TOOLS = frozenset({"forget_fact"})
+READ_ONLY_NATIVE_TOOLS = read_only_native_tool_names()
+SELF_GATED_NATIVE_TOOLS = native_tool_names_by_approval("self_gated")
+LOW_RISK_NATIVE_WRITE_TOOLS = low_risk_native_write_tool_names()
+USER_APPROVAL_NATIVE_TOOLS = native_tool_names_by_approval("user_approval")
 WRITE_VERBS = frozenset(
     {
         "add",

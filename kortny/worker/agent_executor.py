@@ -103,42 +103,17 @@ from kortny.tool_selection import (
     ToolSelector,
     compact_tool_cards,
 )
-from kortny.tools import (
-    DescribeToolsTool,
-    ForgetFactTool,
-    InspectMemoryTool,
-    JsonObject,
-    ListIntegrationsTool,
-    ObservationChannelHistoryCache,
-    PdfGeneratorTool,
-    QueryWorkspaceGraphTool,
-    RecallFactTool,
-    RememberFactTool,
-    ResolveSlackIdentityTool,
-    SearchObservedSlackHistoryTool,
-    SlackAddBookmarkTool,
-    SlackAddReactionTool,
-    SlackChannelHistoryTool,
-    SlackChannelInfoTool,
-    SlackCreateChannelCanvasTool,
-    SlackEditCanvasTool,
-    SlackFileReadTool,
-    SlackLookupCanvasSectionsTool,
-    SlackPinMessageTool,
-    SlackReplyThreadTool,
-    SlackUserInfoTool,
-    Tool,
-    ToolRegistry,
-    WebSearchTool,
+from kortny.tools import JsonObject, Tool, ToolRegistry, WebSearchTool
+from kortny.tools.catalog import native_slack_context_hint_names
+from kortny.tools.native_runtime import (
+    NativeToolBuildContext,
+    build_native_inventory_tools,
+    build_native_tools,
 )
-from kortny.tools.schedules import (
-    CancelScheduleTool,
-    CreateScheduleTool,
-    GetScheduleTool,
-    ListSchedulesTool,
-    PauseScheduleTool,
-    ResumeScheduleTool,
-    UpdateScheduleTool,
+from kortny.tools.schedules import ListSchedulesTool
+from kortny.tools.slack_channel_history import (
+    ObservationChannelHistoryCache,
+    SlackChannelHistoryTool,
 )
 from kortny.witness import (
     WITNESS_OPPORTUNITY_CANDIDATES_PROJECTED_MESSAGE,
@@ -1167,26 +1142,6 @@ class AgentTaskExecutor:
             task=task,
             task_service=task_service,
         )
-        pdf_generator = PdfGeneratorTool(
-            working_dir=working_dir,
-            session=session,
-            task_id=task.id,
-            task_service=task_service,
-        )
-        slack_channel_history = SlackChannelHistoryTool(
-            self._build_slack_history_client(settings),
-            default_channel_id=task.slack_channel_id,
-            cache=ObservationChannelHistoryCache(
-                session,
-                installation_id=task.installation_id,
-            ),
-        )
-        slack_file_read = SlackFileReadTool(
-            client=self._build_slack_file_client(settings),
-            bot_token=settings.slack_bot_token,
-            working_dir=working_dir,
-            max_file_size_bytes=settings.slack_file_read_max_bytes,
-        )
         slack_identity_client = self._build_slack_identity_client(settings)
         slack_action_client = self._build_slack_posting_client(settings)
         memory_service = WorkspaceStateService(
@@ -1198,104 +1153,20 @@ class AgentTaskExecutor:
                 task_service=task_service,
             ),
         )
-        remember_fact = RememberFactTool(service=memory_service, task=task)
-        recall_fact = RecallFactTool(service=memory_service, task=task)
-        inspect_memory = InspectMemoryTool(service=memory_service, task=task)
-        forget_fact = ForgetFactTool(service=memory_service, task=task)
-        query_workspace_graph = QueryWorkspaceGraphTool(session=session, task=task)
-        schedule_tools: tuple[Tool, ...] = (
-            ListSchedulesTool(session=session, task=task),
-            GetScheduleTool(session=session, task=task),
-            CreateScheduleTool(
-                session=session,
-                task=task,
-                task_service=task_service,
-            ),
-            UpdateScheduleTool(
-                session=session,
-                task=task,
-                task_service=task_service,
-            ),
-            PauseScheduleTool(
-                session=session,
-                task=task,
-                task_service=task_service,
-            ),
-            ResumeScheduleTool(
-                session=session,
-                task=task,
-                task_service=task_service,
-            ),
-            CancelScheduleTool(
-                session=session,
-                task=task,
-                task_service=task_service,
-            ),
+        native_context = NativeToolBuildContext(
+            settings=settings,
+            session=session,
+            task=task,
+            task_service=task_service,
+            working_dir=working_dir,
+            web_search_tool=web_search,
+            slack_history_client=self._build_slack_history_client(settings),
+            slack_file_client=self._build_slack_file_client(settings),
+            slack_identity_client=slack_identity_client,
+            slack_action_client=slack_action_client,
+            memory_service=memory_service,
         )
-        native_tools: list[Tool] = [
-            pdf_generator,
-            slack_channel_history,
-            SearchObservedSlackHistoryTool(session=session, task=task),
-            ResolveSlackIdentityTool(session=session, task=task),
-            SlackUserInfoTool(
-                client=slack_identity_client,
-                session=session,
-                task=task,
-            ),
-            SlackChannelInfoTool(
-                client=slack_identity_client,
-                session=session,
-                task=task,
-            ),
-            SlackReplyThreadTool(
-                client=slack_action_client,
-                session=session,
-                task=task,
-                task_service=task_service,
-            ),
-            SlackAddReactionTool(
-                client=slack_action_client,
-                session=session,
-                task=task,
-                task_service=task_service,
-            ),
-            SlackPinMessageTool(
-                client=slack_action_client,
-                session=session,
-                task=task,
-                task_service=task_service,
-            ),
-            SlackAddBookmarkTool(
-                client=slack_action_client,
-                session=session,
-                task=task,
-                task_service=task_service,
-            ),
-            SlackCreateChannelCanvasTool(
-                client=slack_action_client,
-                session=session,
-                task=task,
-                task_service=task_service,
-            ),
-            SlackLookupCanvasSectionsTool(
-                client=slack_action_client,
-            ),
-            SlackEditCanvasTool(
-                client=slack_action_client,
-                session=session,
-                task=task,
-                task_service=task_service,
-            ),
-            slack_file_read,
-            remember_fact,
-            recall_fact,
-            inspect_memory,
-            forget_fact,
-            query_workspace_graph,
-            *schedule_tools,
-        ]
-        if web_search is not None:
-            native_tools.insert(0, web_search)
+        native_tools = list(build_native_tools(native_context))
         raw_intent_decision = _latest_intent_decision(session, task)
         effective_decision = effective_intent_decision(raw_intent_decision)
         native_scope = NativeToolScopePolicy().apply(
@@ -1343,28 +1214,14 @@ class AgentTaskExecutor:
             intent_classification=native_scope.intent_classification,
             likely_tools=list(native_scope.likely_tools),
         )
-        describe_tools = DescribeToolsTool(
-            session=session,
-            task=task,
-            native_tools=(),
-        )
-        list_integrations = ListIntegrationsTool(
-            session=session,
-            task=task,
-            native_tools=(),
-        )
-        native_inventory_tools = (
-            *tuple(native_tools),
-            describe_tools,
-            list_integrations,
-        )
-        describe_tools.native_tools = native_inventory_tools
-        list_integrations.native_tools = native_inventory_tools
+        inventory_tools = list(build_native_inventory_tools(native_context, ()))
+        native_inventory_tools = (*tuple(native_tools), *tuple(inventory_tools))
+        for inventory_tool in inventory_tools:
+            cast(Any, inventory_tool).native_tools = native_inventory_tools
         native_tools = [
             cast(Tool, scoped_tool) for scoped_tool in native_scope.selected_tools
         ]
-        native_tools.append(describe_tools)
-        native_tools.append(list_integrations)
+        native_tools.extend(inventory_tools)
         _record_deferred_secondary_intents(
             session=session,
             task=task,
@@ -3421,16 +3278,7 @@ NATIVE_WEB_SEARCH_HINTS = frozenset(
     }
 )
 
-NATIVE_SLACK_CONTEXT_HINTS = frozenset(
-    {
-        "slack_channel_history",
-        "search_observed_slack_history",
-        "resolve_slack_identity",
-        "slack_user_info",
-        "slack_channel_info",
-        "slack_lookup_canvas_sections",
-    }
-)
+NATIVE_SLACK_CONTEXT_HINTS = native_slack_context_hint_names()
 
 LINEAR_TASK_LOOKUP_WORDS = frozenset(
     {

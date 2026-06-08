@@ -16,8 +16,23 @@ from kortny.tools import (
     ToolRegistry,
     ToolResult,
 )
-from kortny.tools.catalog import tool_descriptor_from_class, tool_metadata
+from kortny.tools.catalog import (
+    NATIVE_TOOL_METADATA,
+    dashboard_native_tool_names,
+    low_risk_native_write_tool_names,
+    native_slack_context_hint_names,
+    native_tool_integration_map,
+    native_tool_names_by_approval,
+    read_only_native_tool_names,
+    runtime_native_tool_names,
+    tool_descriptor_from_class,
+    tool_metadata,
+)
+from kortny.tools.list_integrations import _USER_CAPABILITY_GROUPS
+from kortny.tools.native_runtime import native_tool_classes_by_name
 from kortny.tools.types import JsonObject, JsonSchema
+from kortny.worker.agent_executor import NATIVE_SLACK_CONTEXT_HINTS
+from kortny.workflow.planning_classifier import _TOOL_TO_INTEGRATION
 
 
 class CostingTool:
@@ -76,6 +91,41 @@ def test_registry_exposes_metadata_rich_descriptors() -> None:
     assert descriptor.enabled is True
     assert descriptor.required_args == ("message",)
     assert descriptor.to_payload()["parameters"] == EchoTool.parameters
+
+
+def test_native_tool_surfaces_are_derived_from_metadata() -> None:
+    runtime_names = set(runtime_native_tool_names())
+    class_names = set(native_tool_classes_by_name())
+
+    assert class_names == runtime_names
+    assert set(dashboard_native_tool_names()) <= runtime_names
+    assert read_only_native_tool_names() == frozenset(
+        name
+        for name, metadata in NATIVE_TOOL_METADATA.items()
+        if metadata.side_effect == "read"
+    )
+    assert low_risk_native_write_tool_names() == frozenset(
+        name
+        for name, metadata in NATIVE_TOOL_METADATA.items()
+        if metadata.side_effect == "write" and metadata.approval == "none"
+    )
+    assert native_tool_names_by_approval("self_gated") == frozenset({"remember_fact"})
+    assert native_tool_names_by_approval("user_approval") == frozenset({"forget_fact"})
+    assert native_tool_integration_map() == _TOOL_TO_INTEGRATION
+    assert native_slack_context_hint_names() == NATIVE_SLACK_CONTEXT_HINTS
+
+
+def test_native_capability_groups_cover_user_facing_metadata_categories() -> None:
+    grouped_categories = {category for category, _payload in _USER_CAPABILITY_GROUPS}
+    user_facing_categories = {
+        metadata.category
+        for metadata in NATIVE_TOOL_METADATA.values()
+        if metadata.runtime_registered
+        and metadata.dashboard_exposed
+        and metadata.category != "Runtime"
+    }
+
+    assert user_facing_categories <= grouped_categories
 
 
 def test_native_tool_metadata_captures_safety_and_scope() -> None:

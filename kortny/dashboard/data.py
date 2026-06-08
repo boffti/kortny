@@ -66,39 +66,7 @@ from kortny.llm.litellm_catalog import (
 )
 from kortny.llm.provider_config import CONFIG_TIERS
 from kortny.tools.catalog import ToolDescriptor, tool_descriptor_from_class
-from kortny.tools.list_integrations import DescribeToolsTool, ListIntegrationsTool
-from kortny.tools.pdf_generator import PdfGeneratorTool
-from kortny.tools.resolve_slack_identity import ResolveSlackIdentityTool
-from kortny.tools.schedules import (
-    CancelScheduleTool,
-    CreateScheduleTool,
-    GetScheduleTool,
-    ListSchedulesTool,
-    PauseScheduleTool,
-    ResumeScheduleTool,
-    UpdateScheduleTool,
-)
-from kortny.tools.search_observed_slack_history import SearchObservedSlackHistoryTool
-from kortny.tools.slack_actions import (
-    SlackAddBookmarkTool,
-    SlackAddReactionTool,
-    SlackCreateChannelCanvasTool,
-    SlackEditCanvasTool,
-    SlackLookupCanvasSectionsTool,
-    SlackPinMessageTool,
-    SlackReplyThreadTool,
-)
-from kortny.tools.slack_channel_history import SlackChannelHistoryTool
-from kortny.tools.slack_file_read import SlackFileReadTool
-from kortny.tools.slack_identity_info import SlackChannelInfoTool, SlackUserInfoTool
-from kortny.tools.web_search import WebSearchTool
-from kortny.tools.workspace_graph import QueryWorkspaceGraphTool
-from kortny.tools.workspace_memory import (
-    ForgetFactTool,
-    InspectMemoryTool,
-    RecallFactTool,
-    RememberFactTool,
-)
+from kortny.tools.native_runtime import native_dashboard_tool_classes
 
 DEFAULT_PAGE_SIZE = 25
 MAX_PAGE_SIZE = 100
@@ -141,37 +109,7 @@ PLANNED_TRACE_MESSAGES = frozenset(
         "final_response_sanitized",
     }
 )
-_NATIVE_DASHBOARD_TOOL_CLASSES: tuple[type[Any], ...] = (
-    WebSearchTool,
-    SlackChannelHistoryTool,
-    SearchObservedSlackHistoryTool,
-    ResolveSlackIdentityTool,
-    SlackUserInfoTool,
-    SlackChannelInfoTool,
-    SlackReplyThreadTool,
-    SlackAddReactionTool,
-    SlackPinMessageTool,
-    SlackAddBookmarkTool,
-    SlackCreateChannelCanvasTool,
-    SlackLookupCanvasSectionsTool,
-    SlackEditCanvasTool,
-    SlackFileReadTool,
-    QueryWorkspaceGraphTool,
-    ListSchedulesTool,
-    GetScheduleTool,
-    CreateScheduleTool,
-    UpdateScheduleTool,
-    PauseScheduleTool,
-    ResumeScheduleTool,
-    CancelScheduleTool,
-    PdfGeneratorTool,
-    RememberFactTool,
-    RecallFactTool,
-    InspectMemoryTool,
-    ForgetFactTool,
-    DescribeToolsTool,
-    ListIntegrationsTool,
-)
+_NATIVE_DASHBOARD_TOOL_CLASSES: tuple[type[Any], ...] = native_dashboard_tool_classes()
 
 
 @dataclass(frozen=True)
@@ -5408,7 +5346,11 @@ def _witness_candidate_rows(
         session, [candidate.source_task_id for candidate in candidates]
     )
     profile_ids = tuple(
-        {candidate.source_profile_id for candidate in candidates if candidate.source_profile_id}
+        {
+            candidate.source_profile_id
+            for candidate in candidates
+            if candidate.source_profile_id
+        }
     )
     profiles = (
         {
@@ -5468,7 +5410,9 @@ def _witness_candidate_rows(
                     else None
                 ),
                 evidence=_witness_evidence_preview(candidate),
-                tone=_witness_status_tone(candidate.status, candidate.cooldown_until, now),
+                tone=_witness_status_tone(
+                    candidate.status, candidate.cooldown_until, now
+                ),
                 type_label=_labelize(candidate.candidate_type),
                 status_label=_labelize(candidate.status),
                 source_label=_labelize(candidate.source_type),
@@ -5500,7 +5444,9 @@ def _witness_candidate_filters(
     if type_filter != "all":
         filters.append(WitnessOpportunityCandidate.candidate_type == type_filter)
     if scope_filter != "all":
-        filters.append(WitnessOpportunityCandidate.visibility_scope_type == scope_filter)
+        filters.append(
+            WitnessOpportunityCandidate.visibility_scope_type == scope_filter
+        )
     if query:
         pattern = f"%{query}%"
         channel_identity_match = (
@@ -5599,14 +5545,18 @@ def _witness_candidate_identity_keys(
 def _witness_evidence_preview(
     candidate: WitnessOpportunityCandidate,
 ) -> tuple[WitnessEvidencePreview, ...]:
-    evidence = candidate.evidence_json if isinstance(candidate.evidence_json, list) else []
+    evidence = (
+        candidate.evidence_json if isinstance(candidate.evidence_json, list) else []
+    )
     previews: list[WitnessEvidencePreview] = []
     for item in evidence:
         if not isinstance(item, dict):
             continue
         source_label = _labelize(str(item.get("type") or "evidence"))
         snippet = _witness_evidence_snippet(item)
-        previews.append(WitnessEvidencePreview(source_label=source_label, snippet=snippet))
+        previews.append(
+            WitnessEvidencePreview(source_label=source_label, snippet=snippet)
+        )
         if len(previews) >= 3:
             break
     if not previews and candidate.confidence_reason:

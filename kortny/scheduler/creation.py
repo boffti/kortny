@@ -376,6 +376,7 @@ class ScheduleCreationService:
                 delivery_surface=delivery.legacy_surface,
                 needs_confirmation=needs_confirmation,
                 delivery_label=delivery.response_label,
+                now=parse_time,
             ),
         )
 
@@ -535,11 +536,12 @@ def format_schedule_proposal(
     delivery_surface: str,
     needs_confirmation: bool,
     delivery_label: str | None = None,
+    now: datetime | None = None,
 ) -> str:
     """Render a Slack-native schedule response."""
 
     destination = delivery_label or ("in this DM" if delivery_surface == "dm" else "in this thread")
-    first_run = _human_next_run(draft.next_run_at, timezone=draft.timezone)
+    first_run = _human_next_run(draft.next_run_at, timezone=draft.timezone, now=now)
     task_summary = _human_task_summary(draft.task_input)
     cadence = draft.cadence_label[:1].lower() + draft.cadence_label[1:]
     if needs_confirmation:
@@ -633,12 +635,17 @@ def _artifact_delivery_policy(text: str) -> str:
     return "message_only"
 
 
-def _human_next_run(value: datetime, *, timezone: str) -> str:
+def _human_next_run(
+    value: datetime,
+    *,
+    timezone: str,
+    now: datetime | None = None,
+) -> str:
     normalized_timezone, tzinfo = _timezone(timezone)
     local = _coerce_utc(value).astimezone(tzinfo)
-    now = datetime.now(UTC).astimezone(tzinfo)
+    reference = _coerce_utc(now or datetime.now(UTC)).astimezone(tzinfo)
     local_date = local.date()
-    today = now.date()
+    today = reference.date()
     time_text = _format_time(hour=local.hour, minute=local.minute)
     timezone_label = _timezone_label(normalized_timezone)
     if local_date == today:

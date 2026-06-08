@@ -115,6 +115,7 @@ def test_parse_daily_schedule_with_explicit_central_time_humanizes_response() ->
         draft=draft,
         delivery_surface="dm",
         needs_confirmation=False,
+        now=datetime(2026, 6, 4, 19, 29, tzinfo=UTC),
     )
 
     assert "I'll send a stock market update every morning at 8:00 AM Central time" in response

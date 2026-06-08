@@ -1,4 +1,15 @@
-"""Tool contracts and registry helpers."""
+"""Tool contracts and registry helpers.
+
+Keep this package surface light. Low-level modules import
+``kortny.tools.catalog`` during task persistence and approval checks; eagerly
+importing every concrete tool here creates avoidable cycles with task services.
+Concrete tools are lazy-loaded through ``__getattr__`` below.
+"""
+
+from __future__ import annotations
+
+from importlib import import_module
+from typing import Any
 
 from kortny.tools.catalog import (
     ToolDescriptor,
@@ -15,29 +26,7 @@ from kortny.tools.catalog import (
     tool_descriptors,
     tool_metadata,
 )
-from kortny.tools.composio_execute import ComposioExecuteTool
-from kortny.tools.echo import EchoTool
-from kortny.tools.list_integrations import DescribeToolsTool, ListIntegrationsTool
-from kortny.tools.pdf_generator import PdfGeneratorTool
 from kortny.tools.registry import DuplicateToolError, ToolNotFoundError, ToolRegistry
-from kortny.tools.resolve_slack_identity import ResolveSlackIdentityTool
-from kortny.tools.search_observed_slack_history import SearchObservedSlackHistoryTool
-from kortny.tools.slack_actions import (
-    SlackAddBookmarkTool,
-    SlackAddReactionTool,
-    SlackCreateChannelCanvasTool,
-    SlackEditCanvasTool,
-    SlackLookupCanvasSectionsTool,
-    SlackPinMessageTool,
-    SlackReplyThreadTool,
-)
-from kortny.tools.slack_channel_history import (
-    ObservationChannelHistoryCache,
-    SlackChannelHistoryError,
-    SlackChannelHistoryTool,
-)
-from kortny.tools.slack_file_read import SlackFileReadError, SlackFileReadTool
-from kortny.tools.slack_identity_info import SlackChannelInfoTool, SlackUserInfoTool
 from kortny.tools.types import (
     JsonObject,
     JsonSchema,
@@ -46,14 +35,48 @@ from kortny.tools.types import (
     ToolArtifact,
     ToolResult,
 )
-from kortny.tools.web_search import WebSearchTool
-from kortny.tools.workspace_graph import QueryWorkspaceGraphTool
-from kortny.tools.workspace_memory import (
-    ForgetFactTool,
-    InspectMemoryTool,
-    RecallFactTool,
-    RememberFactTool,
-)
+
+_LAZY_EXPORTS = {
+    "ComposioExecuteTool": "kortny.tools.composio_execute",
+    "DescribeToolsTool": "kortny.tools.list_integrations",
+    "EchoTool": "kortny.tools.echo",
+    "ForgetFactTool": "kortny.tools.workspace_memory",
+    "InspectMemoryTool": "kortny.tools.workspace_memory",
+    "ListIntegrationsTool": "kortny.tools.list_integrations",
+    "ObservationChannelHistoryCache": "kortny.tools.slack_channel_history",
+    "PdfGeneratorTool": "kortny.tools.pdf_generator",
+    "QueryWorkspaceGraphTool": "kortny.tools.workspace_graph",
+    "RecallFactTool": "kortny.tools.workspace_memory",
+    "RememberFactTool": "kortny.tools.workspace_memory",
+    "ResolveSlackIdentityTool": "kortny.tools.resolve_slack_identity",
+    "SearchObservedSlackHistoryTool": "kortny.tools.search_observed_slack_history",
+    "SlackAddBookmarkTool": "kortny.tools.slack_actions",
+    "SlackAddReactionTool": "kortny.tools.slack_actions",
+    "SlackCreateChannelCanvasTool": "kortny.tools.slack_actions",
+    "SlackEditCanvasTool": "kortny.tools.slack_actions",
+    "SlackLookupCanvasSectionsTool": "kortny.tools.slack_actions",
+    "SlackChannelHistoryError": "kortny.tools.slack_channel_history",
+    "SlackChannelHistoryTool": "kortny.tools.slack_channel_history",
+    "SlackFileReadError": "kortny.tools.slack_file_read",
+    "SlackFileReadTool": "kortny.tools.slack_file_read",
+    "SlackChannelInfoTool": "kortny.tools.slack_identity_info",
+    "SlackUserInfoTool": "kortny.tools.slack_identity_info",
+    "SlackPinMessageTool": "kortny.tools.slack_actions",
+    "SlackReplyThreadTool": "kortny.tools.slack_actions",
+    "WebSearchTool": "kortny.tools.web_search",
+}
+
+
+def __getattr__(name: str) -> Any:
+    """Lazily expose concrete tool classes without eager import cycles."""
+
+    module_name = _LAZY_EXPORTS.get(name)
+    if module_name is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    module = import_module(module_name)
+    value = getattr(module, name)
+    globals()[name] = value
+    return value
 
 __all__ = [
     "ComposioExecuteTool",

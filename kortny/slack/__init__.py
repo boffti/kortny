@@ -5,9 +5,15 @@ from __future__ import annotations
 from importlib import import_module
 from typing import Any
 
-from kortny.slack_mrkdwn import normalize_slack_mrkdwn as _normalize_slack_mrkdwn
+from kortny.slack_mrkdwn import (
+    normalize_slack_mrkdwn as _normalize_slack_mrkdwn,
+)
+from kortny.slack_mrkdwn import (
+    normalize_user_facing_text as _normalize_user_facing_text,
+)
 
 normalize_slack_mrkdwn = _normalize_slack_mrkdwn
+normalize_user_facing_text = _normalize_user_facing_text
 
 _EXPORTS = {
     "AppMentionResult": ("kortny.slack.ingress", "AppMentionResult"),
@@ -59,7 +65,7 @@ _EXPORTS = {
     "synthesize_response": ("kortny.slack.humanizer", "synthesize_response"),
 }
 
-__all__ = sorted((*_EXPORTS, "normalize_slack_mrkdwn"))
+__all__ = sorted((*_EXPORTS, "normalize_slack_mrkdwn", "normalize_user_facing_text"))
 
 
 def __getattr__(name: str) -> Any:

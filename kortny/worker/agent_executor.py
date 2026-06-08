@@ -1706,7 +1706,9 @@ class AgentTaskExecutor:
             message="agent_runtime_selected",
         )
         adk_completed = _latest_payload_event(events, message="adk_runtime_completed")
-        tool_selection = _latest_payload_event(events, message="tool_selection_completed")
+        tool_selection = _latest_payload_event(
+            events, message="tool_selection_completed"
+        )
         final_route = next(
             (
                 payload
@@ -1875,7 +1877,7 @@ class AgentTaskExecutor:
                 raw_text=response_source,
             )
             if skip_humanizer_reason is not None:
-                response_text = normalize_slack_mrkdwn(response_source)
+                response_text = response_source
                 task_service.append_event(
                     task,
                     TaskEventType.log,
@@ -2112,7 +2114,7 @@ class AgentTaskExecutor:
                     "when it helps but never stiff, no user mentions, no emoji, "
                     "no markdown headings, "
                     "no backend/agent/model/runtime/tool language, no explanation of "
-                    "what the user is asking, no em dashes, no phrase "
+                    "what the user is asking, no phrase "
                     "`split this into workstreams`."
                 ),
             ),
@@ -2121,9 +2123,7 @@ class AgentTaskExecutor:
                 content=json.dumps(
                     {
                         "slack_surface": (
-                            "dm"
-                            if task.slack_channel_id.startswith("D")
-                            else "channel"
+                            "dm" if task.slack_channel_id.startswith("D") else "channel"
                         ),
                         "user_request": task.input,
                     },
@@ -2782,8 +2782,7 @@ def _schedule_state_fast_path_response(
     if not schedule_rows:
         target = f" {status_label}" if status_label else ""
         return (
-            f"I checked the scheduler and don't see any{target} schedules"
-            f"{query_label}."
+            f"I checked the scheduler and don't see any{target} schedules{query_label}."
         )
 
     if fallback_used and query:
@@ -2799,9 +2798,7 @@ def _schedule_state_fast_path_response(
         )
 
     details = [
-        _schedule_state_row(row)
-        for row in schedule_rows[:5]
-        if isinstance(row, dict)
+        _schedule_state_row(row) for row in schedule_rows[:5] if isinstance(row, dict)
     ]
     if len(schedule_rows) > 5:
         details.append(f"• Plus {len(schedule_rows) - 5} more.")
@@ -2887,7 +2884,10 @@ def _should_skip_witness_extraction(session: Session, task: Task) -> bool:
     if _is_witness_autopilot_task(task):
         return True
     events = _task_events(session, task)
-    if _latest_payload_event(events, message="schedule_state_fast_path_completed") is not None:
+    if (
+        _latest_payload_event(events, message="schedule_state_fast_path_completed")
+        is not None
+    ):
         return True
     if _latest_payload_event(events, message="adk_quick_response_selected") is not None:
         return True
@@ -2933,7 +2933,10 @@ def _routing_intent_from_handoff(
         reason_set.update(str(reason) for reason in planned_reasons)
     if "schedule_state_query" in reason_set:
         return "scheduler.query"
-    if "scheduled_or_recurring" in reason_set or "scheduled_task_identity" in reason_set:
+    if (
+        "scheduled_or_recurring" in reason_set
+        or "scheduled_task_identity" in reason_set
+    ):
         return "scheduler.create_or_run"
     if "quick_conversation" in reason_set:
         return "conversation.quick"
@@ -2943,7 +2946,10 @@ def _routing_intent_from_handoff(
         return "research.synthesis"
     if "multi_source_synthesis" in reason_set:
         return "workspace.multi_source"
-    if "integration_tool_work" in reason_set or "integration_scope_present" in reason_set:
+    if (
+        "integration_tool_work" in reason_set
+        or "integration_scope_present" in reason_set
+    ):
         return "integration.read"
     return "task.general"
 

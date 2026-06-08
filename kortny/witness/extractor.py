@@ -14,18 +14,12 @@ from kortny.witness.opportunities import (
     WitnessOpportunityCandidateInput,
 )
 
-WITNESS_TASK_RESPONSE_EXTRACTOR_PROMPT_NAME = (
-    "kortny.witness_task_response_extractor"
-)
-WITNESS_TASK_RESPONSE_EXTRACTOR_RESPONSE_FORMAT: JsonObject = {
-    "type": "json_object"
-}
+WITNESS_TASK_RESPONSE_EXTRACTOR_PROMPT_NAME = "kortny.witness_task_response_extractor"
+WITNESS_TASK_RESPONSE_EXTRACTOR_RESPONSE_FORMAT: JsonObject = {"type": "json_object"}
 WITNESS_CHANNEL_PROFILE_EXTRACTOR_PROMPT_NAME = (
     "kortny.witness_channel_profile_extractor"
 )
-WITNESS_CHANNEL_PROFILE_EXTRACTOR_RESPONSE_FORMAT: JsonObject = {
-    "type": "json_object"
-}
+WITNESS_CHANNEL_PROFILE_EXTRACTOR_RESPONSE_FORMAT: JsonObject = {"type": "json_object"}
 MAX_EXTRACTED_CANDIDATES = 5
 
 
@@ -176,17 +170,15 @@ def _task_response_messages(
                 "things Kortny should watch for, proactively help with, or remember "
                 "as candidate opportunities. Use semantic judgment; do not require "
                 "specific headings or phrases. Return JSON only. Schema: "
-                "{\"candidates\":[{\"candidate_type\":\"workflow_gap|"
+                '{"candidates":[{"candidate_type":"workflow_gap|'
                 "artifact_followup|unresolved_decision|data_quality_issue|"
-                "recurring_check|project_status_gap|general_help\","
-                "\"title\":\"short title\",\"summary\":\"what Kortny should watch "
-                "for or help with\",\"suggested_action\":\"operator-facing action\","
-                "\"suggested_message\":\"low-pressure Slack DM or channel suggestion\","
-                "\"evidence\":[\"short evidence from the answer or request\"],"
-                "\"confidence_score\":0.0,\"confidence_reason\":\"why\"}],"
-                "\"skipped_reason\":\"only when no candidates\"}. "
-                "Never use em dashes in JSON string values. Use commas, colons, "
-                "semicolons, periods, or simple hyphens instead. "
+                'recurring_check|project_status_gap|general_help",'
+                '"title":"short title","summary":"what Kortny should watch '
+                'for or help with","suggested_action":"operator-facing action",'
+                '"suggested_message":"low-pressure Slack DM or channel suggestion",'
+                '"evidence":["short evidence from the answer or request"],'
+                '"confidence_score":0.0,"confidence_reason":"why"}],'
+                '"skipped_reason":"only when no candidates"}. '
                 "Only create candidates that would make Kortny more useful later. "
                 "Return no candidates for routine greetings, generic answers, or "
                 "claims without evidence."
@@ -232,19 +224,17 @@ def _channel_profile_messages(
                 "Use semantic judgment from the provided evidence; do not depend "
                 "on headings, regexes, or fixed phrases. Do not infer private DMs "
                 "or cross-channel facts that are not in the payload. Return JSON "
-                "only. Schema: {\"candidates\":[{\"candidate_type\":\""
+                'only. Schema: {"candidates":[{"candidate_type":"'
                 "workflow_gap|artifact_followup|unresolved_decision|"
                 "data_quality_issue|recurring_check|project_status_gap|"
-                "general_help\",\"title\":\"short title\",\"summary\":\"what "
-                "Kortny should watch for or help with\",\"suggested_action\":"
-                "\"operator-facing action\",\"suggested_message\":\"low-pressure "
-                "Slack DM or channel suggestion\",\"evidence\":[\"short evidence "
-                "from the profile\"],\"confidence_score\":0.0,"
-                "\"confidence_reason\":\"why\"}],\"skipped_reason\":\"only when "
-                "no candidates\"}. Only create candidates that would make Kortny "
-                "more useful later. Never use em dashes in JSON string values. "
-                "Use commas, colons, semicolons, periods, or simple hyphens "
-                "instead. Return no candidates when the profile is too "
+                'general_help","title":"short title","summary":"what '
+                'Kortny should watch for or help with","suggested_action":'
+                '"operator-facing action","suggested_message":"low-pressure '
+                'Slack DM or channel suggestion","evidence":["short evidence '
+                'from the profile"],"confidence_score":0.0,'
+                '"confidence_reason":"why"}],"skipped_reason":"only when '
+                'no candidates"}. Only create candidates that would make Kortny '
+                "more useful later. Return no candidates when the profile is too "
                 "thin, too speculative, or lacks actionable future help."
             ),
         ),
@@ -303,15 +293,21 @@ def _channel_profile_payload(
 
 
 def _semantic_extraction_payload(profile: ObserveChannelProfile) -> JsonObject:
-    profile_payload = profile.profile_json if isinstance(profile.profile_json, dict) else {}
+    profile_payload = (
+        profile.profile_json if isinstance(profile.profile_json, dict) else {}
+    )
     extraction = profile_payload.get("semantic_extraction")
     if not isinstance(extraction, dict):
-        metadata = profile.metadata_json if isinstance(profile.metadata_json, dict) else {}
+        metadata = (
+            profile.metadata_json if isinstance(profile.metadata_json, dict) else {}
+        )
         extraction = metadata.get("semantic_extraction")
     if not isinstance(extraction, dict):
         return {}
     return {
-        "likely_purpose": _optional_text(extraction.get("likely_purpose"), max_chars=260),
+        "likely_purpose": _optional_text(
+            extraction.get("likely_purpose"), max_chars=260
+        ),
         "recurring_topics": _string_tuple(
             extraction.get("recurring_topics"),
             max_items=5,

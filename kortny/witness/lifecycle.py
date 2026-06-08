@@ -12,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from kortny.db.models import WitnessOpportunityCandidate
-from kortny.slack.formatting import normalize_slack_mrkdwn
+from kortny.slack.formatting import normalize_user_facing_text
 from kortny.slack.outbox import SlackSideEffectOutbox
 
 WITNESS_SUGGESTION_PURPOSE = "witness_suggestion"
@@ -299,7 +299,7 @@ def _suggestion_text(candidate: WitnessOpportunityCandidate) -> str:
         "I noticed something that might be worth keeping an eye on: "
         f"{candidate.summary}"
     )
-    return normalize_slack_mrkdwn(_bounded(text, 1800))
+    return normalize_user_facing_text(_bounded(text, 1800))
 
 
 def _record_feedback(

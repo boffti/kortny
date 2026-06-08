@@ -240,7 +240,9 @@ class WitnessAutopilot:
             ),
         ]
         if installation_id is not None:
-            filters.append(WitnessOpportunityCandidate.installation_id == installation_id)
+            filters.append(
+                WitnessOpportunityCandidate.installation_id == installation_id
+            )
         return tuple(
             self.session.scalars(
                 select(WitnessOpportunityCandidate)
@@ -647,7 +649,9 @@ def parse_witness_autopilot_decision(
     allowed_without_confirmation = _bool(
         payload.get("allowed_without_confirmation"), default=False
     )
-    reason = _bounded(_optional_text(payload.get("reason")) or "No reason provided.", 500)
+    reason = _bounded(
+        _optional_text(payload.get("reason")) or "No reason provided.", 500
+    )
     task_input = _optional_text(payload.get("task_input"))
     confidence = _decimal(payload.get("confidence_score"), default=Decimal("0.500"))
     return WitnessAutopilotDecision(
@@ -686,25 +690,23 @@ def _review_messages(
                 "that needs approval; performs external writes; exposes private "
                 "data; or is stale/speculative. For those, return defer, "
                 "monitor_only, ask_user, or dismiss. Return JSON only with schema: "
-                "{\"decision\":\"execute_task|defer|dismiss|monitor_only|ask_user\","
-                "\"risk\":\"low|medium|high\","
-                "\"action_kind\":\"read_only_analysis|status_check|"
+                '{"decision":"execute_task|defer|dismiss|monitor_only|ask_user",'
+                '"risk":"low|medium|high",'
+                '"action_kind":"read_only_analysis|status_check|'
                 "schedule_management|memory_write|external_write|approval_request|"
-                "reminder|monitoring_setup|other\","
-                "\"delivery_target\":\"channel|dm|none|unknown\","
-                "\"requires_user_reply\":false,"
-                "\"allowed_without_confirmation\":true,"
-                "\"reason\":\"brief reason\","
-                "\"task_input\":\"normal Slack-style task request for Kortny to run "
-                "when decision is execute_task\",\"confidence_score\":0.0}. "
-                "Never use em dashes in JSON string values. Use commas, colons, "
-                "semicolons, periods, or simple hyphens instead. "
+                'reminder|monitoring_setup|other",'
+                '"delivery_target":"channel|dm|none|unknown",'
+                '"requires_user_reply":false,'
+                '"allowed_without_confirmation":true,'
+                '"reason":"brief reason",'
+                '"task_input":"normal Slack-style task request for Kortny to run '
+                'when decision is execute_task","confidence_score":0.0}. '
                 "The task_input must be self-contained and humanlike. It should "
                 "make Kortny act like a smart coworker who noticed a concrete "
                 "gap and is delivering the finished useful output, not drafting "
                 "for review or exposing internal planning. A good shape is: "
-                "\"I noticed [specific gap], so check/prepare [useful output] "
-                "and respond with what you found.\" The task_input must not "
+                '"I noticed [specific gap], so check/prepare [useful output] '
+                'and respond with what you found." The task_input must not '
                 "mention internal candidate IDs, autopilot, this review, chain "
                 "of thought, or backend infrastructure."
             ),

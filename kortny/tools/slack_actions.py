@@ -19,7 +19,7 @@ from kortny.slack.outbox import (
     slack_pin_key,
     slack_reaction_key,
 )
-from kortny.slack_mrkdwn import normalize_slack_mrkdwn
+from kortny.slack_mrkdwn import normalize_user_facing_text
 from kortny.tasks import TaskService
 from kortny.tools.types import JsonObject, JsonSchema, ToolResult
 
@@ -889,7 +889,9 @@ class SlackEditCanvasTool:
     def invoke(self, args: JsonObject) -> ToolResult:
         canvas_id = _coerce_canvas_id(args.get("canvas_id"), tool_name=self.name)
         operation = _coerce_canvas_operation(args.get("operation"), tool_name=self.name)
-        change = _canvas_change_from_args(args, operation=operation, tool_name=self.name)
+        change = _canvas_change_from_args(
+            args, operation=operation, tool_name=self.name
+        )
         digest = _canvas_edit_digest(canvas_id=canvas_id, change=change)
         idempotency_key = slack_canvas_edit_key(
             task_id=self.task.id,
@@ -951,7 +953,7 @@ class SlackEditCanvasTool:
 def _coerce_reply_text(value: object) -> str:
     if not isinstance(value, str):
         raise ValueError("slack_reply_thread 'text' is required")
-    text = normalize_slack_mrkdwn(value)
+    text = normalize_user_facing_text(value)
     if not text:
         raise ValueError("slack_reply_thread 'text' cannot be empty")
     if len(text) > MAX_TOOL_REPLY_CHARS:
@@ -1035,7 +1037,9 @@ def _coerce_bookmark_link(value: object) -> str:
         raise ValueError("slack_add_bookmark 'link' is required")
     link = value.strip()
     if not HTTP_LINK_RE.match(link):
-        raise ValueError("slack_add_bookmark 'link' must start with http:// or https://")
+        raise ValueError(
+            "slack_add_bookmark 'link' must start with http:// or https://"
+        )
     return link
 
 
@@ -1323,8 +1327,7 @@ def _task_event_exists(
             .where(
                 TaskEvent.task_id == task.id,
                 TaskEvent.type == event_type,
-                TaskEvent.payload["slack_side_effect_id"].as_string()
-                == side_effect_id,
+                TaskEvent.payload["slack_side_effect_id"].as_string() == side_effect_id,
             )
             .limit(1)
         )

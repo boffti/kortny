@@ -1,4 +1,14 @@
-from kortny.slack.humanizer import sanitize_humanized_response
+from kortny.slack.humanizer import (
+    ResponseMode,
+    ResponseRecord,
+    ResponseShape,
+    ResponseShapeProfile,
+    ResponseStyleProfile,
+    SlackSurface,
+    _synthesis_payload,
+    sanitize_humanized_response,
+)
+from kortny.slack.synthesis import SynthesisContext, SynthesisOutcome
 
 
 def test_sanitize_humanized_response_falls_back_when_empty() -> None:
@@ -53,6 +63,46 @@ def test_sanitize_humanized_response_falls_back_on_humanizer_leak() -> None:
             fallback="*Search & Research*\n• Web search",
         )
         == "*Search & Research*\n• Web search"
+    )
+
+
+def test_synthesis_payload_does_not_normalize_raw_answer_prompt_content() -> None:
+    em_dash = chr(0x2014)
+    response_record = ResponseRecord(
+        user_request="Summarize this",
+        raw_answer=f"Raw answer {em_dash} keep internal prompt content unchanged.",
+        response_mode=ResponseMode.quick_answer,
+        response_shape=ResponseShapeProfile(
+            shape=ResponseShape.quick_reply,
+            label="Quick reply",
+            selected_reason="test",
+            required_elements=[],
+            quality_checks=[],
+            avoid=[],
+        ),
+        task_status="succeeded",
+        slack_surface=SlackSurface(kind="dm", threaded=False),
+        style_profile=ResponseStyleProfile(),
+        actions_taken=[],
+        evidence=[],
+        artifacts=[],
+        failures=[],
+        uncertainties=[],
+        suggested_next_actions=[],
+        procedural_skills=[],
+    )
+    synthesis_context = SynthesisContext(
+        user_intent="Summarize this",
+        outcome=SynthesisOutcome.ok,
+        outcome_reason="test",
+        slack_surface="dm",
+        threaded=False,
+    )
+
+    payload = _synthesis_payload(response_record, synthesis_context)
+
+    assert payload["response_record"]["raw_answer"] == (
+        f"Raw answer {em_dash} keep internal prompt content unchanged."
     )
 
 

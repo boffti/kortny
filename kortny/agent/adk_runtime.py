@@ -103,8 +103,6 @@ ADK_SINGLE_PERSONA_PROMPT = """User-facing identity rules:
 - If asked what tools, integrations, or capabilities you have, answer as Kortny:
   describe what you can access now from available tools/context, and state any
   uncertainty plainly without implying there is a separate Kortny elsewhere.
-- Never use em dashes in user-facing text. Use a comma, colon, semicolon,
-  period, or simple hyphen instead.
 - Do not call or invent Slack posting/reply tools. Kortny's worker posts your
   final answer to Slack after the runtime returns text.
 """
@@ -647,9 +645,9 @@ class AdkAgentRuntime:
                         "reason_codes",
                     ),
                     shadow_route=_payload_str(planned_workflow_payload, "route"),
-                    shadow_planned_candidate=(
-                        planned_workflow_payload or {}
-                    ).get("planned_candidate")
+                    shadow_planned_candidate=(planned_workflow_payload or {}).get(
+                        "planned_candidate"
+                    )
                     is True,
                     shadow_confidence=_payload_float(
                         planned_workflow_payload,

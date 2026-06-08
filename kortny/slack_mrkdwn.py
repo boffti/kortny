@@ -26,6 +26,12 @@ def normalize_slack_mrkdwn(text: str) -> str:
     return _restore_code(normalized, protected_segments)
 
 
+def normalize_user_facing_text(text: str) -> str:
+    """Normalize text at Slack-facing output boundaries."""
+
+    return normalize_slack_mrkdwn(text)
+
+
 def _protect_code(text: str) -> tuple[str, list[str]]:
     protected_segments: list[str] = []
 

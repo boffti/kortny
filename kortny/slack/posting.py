@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from kortny.db.models import Artifact, Task, TaskEvent, TaskEventType
 from kortny.observability import set_span_attributes, start_span
-from kortny.slack.formatting import normalize_slack_mrkdwn
+from kortny.slack.formatting import normalize_user_facing_text
 from kortny.slack.outbox import (
     SlackSideEffectOutbox,
     slack_file_upload_key,
@@ -99,7 +99,7 @@ class SlackPoster:
         """Post text into a Slack thread and return the Slack message ts."""
 
         post_thread_ts = _post_thread_ts(thread)
-        slack_text = normalize_slack_mrkdwn(text)
+        slack_text = normalize_user_facing_text(text)
         if thread.channel_id == "playground":
             import uuid
 

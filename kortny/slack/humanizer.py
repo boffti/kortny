@@ -7,7 +7,7 @@ import logging
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from enum import StrEnum
-from typing import Protocol, cast
+from typing import Protocol
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -31,7 +31,7 @@ from kortny.skills import (
     SkillActivation,
     SkillRegistryService,
 )
-from kortny.slack.formatting import normalize_slack_mrkdwn
+from kortny.slack.formatting import normalize_user_facing_text
 from kortny.slack.synthesis import (
     EvidenceKind,
     EvidenceTrust,
@@ -74,8 +74,6 @@ Rules:
   "scheduler DB", "workspace graph", "planned workflow", "runtime", "agent",
   "branch", or "source of truth" unless the user explicitly asks about
   internals.
-- Never use em dashes. Use a comma, colon, semicolon, period, or simple hyphen
-  instead.
 - For schedules and recurring work, speak in user-facing terms: what Kortny
   will do, when it runs, where it will be delivered, and the next useful time.
 - Follow the selected response_shape. Include required elements when the
@@ -455,7 +453,7 @@ class StaticResponseSynthesizer:
     ) -> ResponseSynthesisResult:
         del session, task, synthesis_context, task_service
         raw_text = response_record.raw_answer
-        normalized = normalize_slack_mrkdwn(raw_text)
+        normalized = normalize_user_facing_text(raw_text)
         return ResponseSynthesisResult(
             text=normalized,
             changed=normalized != raw_text,
@@ -495,7 +493,7 @@ class LLMResponseSynthesizer:
         task_service: TaskService,
     ) -> ResponseSynthesisResult:
         if _should_skip(response_record, min_chars=self.min_chars):
-            normalized = normalize_slack_mrkdwn(response_record.raw_answer)
+            normalized = normalize_user_facing_text(response_record.raw_answer)
             return ResponseSynthesisResult(
                 text=normalized,
                 changed=normalized != response_record.raw_answer,
@@ -553,7 +551,7 @@ class LLMResponseSynthesizer:
         )
         return ResponseSynthesisResult(
             text=text,
-            changed=text != normalize_slack_mrkdwn(response_record.raw_answer),
+            changed=text != normalize_user_facing_text(response_record.raw_answer),
             reason="llm_humanizer",
         )
 
@@ -658,9 +656,8 @@ def synthesize_response(
 def sanitize_humanized_response(text: str | None, *, fallback: str) -> str:
     """Normalize a model-generated Slack response."""
 
-    safe_fallback: str = cast(
-        str,
-        normalize_slack_mrkdwn(strip_internal_response_preamble(fallback)),
+    safe_fallback = normalize_user_facing_text(
+        strip_internal_response_preamble(fallback)
     )
     if text is None:
         return safe_fallback
@@ -674,7 +671,7 @@ def sanitize_humanized_response(text: str | None, *, fallback: str) -> str:
         return safe_fallback
     if len(normalized) > MAX_HUMANIZED_CHARS:
         normalized = normalized[: MAX_HUMANIZED_CHARS - 1].rstrip() + "."
-    return cast(str, normalize_slack_mrkdwn(normalized))
+    return normalize_user_facing_text(normalized)
 
 
 def strip_internal_response_preamble(text: str) -> str:
@@ -880,7 +877,11 @@ def _should_skip(response_record: ResponseRecord, *, min_chars: int) -> bool:
     raw_text = response_record.raw_answer
     if response_record.response_mode is ResponseMode.artifact_delivery:
         return True
-    if response_record.actions_taken or response_record.evidence or response_record.failures:
+    if (
+        response_record.actions_taken
+        or response_record.evidence
+        or response_record.failures
+    ):
         return False
     return len(raw_text) < min_chars
 

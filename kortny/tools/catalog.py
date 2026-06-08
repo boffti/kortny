@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from kortny.config import Settings
+from kortny.execution.sandbox import ToolSandboxPolicy
 from kortny.tools.types import JsonObject, JsonSchema, Tool
 
 ToolSideEffect = Literal["read", "write", "destructive"]
@@ -34,6 +35,7 @@ class ToolMetadata:
     result_budget: str = "normal"
     notes: tuple[str, ...] = ()
     can_replace_native_tools: tuple[str, ...] = ()
+    sandbox: ToolSandboxPolicy = field(default_factory=ToolSandboxPolicy)
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,6 +57,7 @@ class ToolDescriptor:
     result_budget: str
     notes: tuple[str, ...]
     can_replace_native_tools: tuple[str, ...]
+    sandbox: ToolSandboxPolicy
     enabled: bool
     disabled_reason: str | None
     required_args: tuple[str, ...]
@@ -79,6 +82,7 @@ class ToolDescriptor:
             "result_budget": self.result_budget,
             "notes": list(self.notes),
             "can_replace_native_tools": list(self.can_replace_native_tools),
+            "sandbox": self.sandbox.to_payload(),
             "enabled": self.enabled,
             "disabled_reason": self.disabled_reason,
             "required_args": list(self.required_args),
@@ -692,6 +696,7 @@ def _descriptor(
         result_budget=metadata.result_budget,
         notes=metadata.notes,
         can_replace_native_tools=metadata.can_replace_native_tools,
+        sandbox=metadata.sandbox,
         enabled=resolved_enabled,
         disabled_reason=dynamic_disabled_reason if not resolved_enabled else None,
         required_args=required_args,

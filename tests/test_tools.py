@@ -10,6 +10,7 @@ from kortny.tools import (
     EchoTool,
     ForgetFactTool,
     InspectMemoryTool,
+    PdfGeneratorTool,
     RememberFactTool,
     ToolArtifact,
     ToolNotFoundError,
@@ -91,6 +92,8 @@ def test_registry_exposes_metadata_rich_descriptors() -> None:
     assert descriptor.enabled is True
     assert descriptor.required_args == ("message",)
     assert descriptor.to_payload()["parameters"] == EchoTool.parameters
+    assert descriptor.sandbox.requires_sandbox is False
+    assert descriptor.to_payload()["sandbox"]["requires_sandbox"] is False
 
 
 def test_native_tool_surfaces_are_derived_from_metadata() -> None:
@@ -135,6 +138,16 @@ def test_native_tool_metadata_captures_safety_and_scope() -> None:
     assert metadata.side_effect == "read"
     assert "channels:history" in metadata.required_slack_scopes
     assert "slack_rate_limited" in metadata.plan_gates
+    assert metadata.sandbox.requires_sandbox is False
+
+
+def test_pdf_generator_stays_unsandboxed_until_runner_slice() -> None:
+    metadata = tool_metadata("pdf_generator")
+    descriptor = tool_descriptor_from_class(PdfGeneratorTool)
+
+    assert metadata.sandbox.requires_sandbox is False
+    assert metadata.sandbox.network == "none"
+    assert descriptor.to_payload()["sandbox"] == metadata.sandbox.to_payload()
 
 
 def test_observed_slack_search_metadata_is_local_and_read_only() -> None:

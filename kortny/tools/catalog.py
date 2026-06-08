@@ -367,11 +367,11 @@ NATIVE_TOOL_METADATA: dict[str, ToolMetadata] = {
         display_name="Code execution",
         capabilities=("sandboxed_code_execution", "python_execution"),
         side_effect="destructive",
-        approval="admin_approval",
+        approval="user_approval",
         required_env_vars=("KORTNY_SANDBOX_RUNNER_URL",),
         plan_gates=(
             "explicit_user_request_required",
-            "admin_approval_required",
+            "requester_approval_required",
             "sandbox_required",
             "network_disabled",
         ),

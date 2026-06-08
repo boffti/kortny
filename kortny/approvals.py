@@ -106,6 +106,14 @@ class ToolApprovalPolicy:
         ):
             return NO_APPROVAL_REQUIRED
         if tool_name in USER_APPROVAL_NATIVE_TOOLS:
+            if tool_name in SANDBOXED_CODE_NATIVE_TOOLS:
+                return ToolApprovalRequirement(
+                    scope=ApprovalScope.user,
+                    risk="sandboxed_code_execution",
+                    reason=(
+                        f"{tool.name} can execute code in Kortny's isolated sandbox."
+                    ),
+                )
             return ToolApprovalRequirement(
                 scope=ApprovalScope.user,
                 risk="workspace_state_mutation",
@@ -144,6 +152,7 @@ SELF_GATED_NATIVE_TOOLS = native_tool_names_by_approval("self_gated")
 LOW_RISK_NATIVE_WRITE_TOOLS = low_risk_native_write_tool_names()
 USER_APPROVAL_NATIVE_TOOLS = native_tool_names_by_approval("user_approval")
 ADMIN_APPROVAL_NATIVE_TOOLS = native_tool_names_by_approval("admin_approval")
+SANDBOXED_CODE_NATIVE_TOOLS = frozenset({"code_exec"})
 WRITE_VERBS = frozenset(
     {
         "add",

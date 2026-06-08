@@ -114,8 +114,10 @@ def test_native_tool_surfaces_are_derived_from_metadata() -> None:
         if metadata.side_effect == "write" and metadata.approval == "none"
     )
     assert native_tool_names_by_approval("self_gated") == frozenset({"remember_fact"})
-    assert native_tool_names_by_approval("user_approval") == frozenset({"forget_fact"})
-    assert native_tool_names_by_approval("admin_approval") == frozenset({"code_exec"})
+    assert native_tool_names_by_approval("user_approval") == frozenset(
+        {"code_exec", "forget_fact"}
+    )
+    assert native_tool_names_by_approval("admin_approval") == frozenset()
     assert native_tool_integration_map() == _TOOL_TO_INTEGRATION
     assert native_slack_context_hint_names() == NATIVE_SLACK_CONTEXT_HINTS
 
@@ -152,7 +154,7 @@ def test_pdf_generator_stays_unsandboxed_until_runner_slice() -> None:
     assert descriptor.to_payload()["sandbox"] == metadata.sandbox.to_payload()
 
 
-def test_code_exec_metadata_requires_sandbox_and_admin_approval() -> None:
+def test_code_exec_metadata_requires_sandbox_and_requester_approval() -> None:
     metadata = tool_metadata("code_exec")
     descriptor = tool_descriptor_from_class(CodeExecTool)
     policy = ToolApprovalPolicy()
@@ -165,13 +167,13 @@ def test_code_exec_metadata_requires_sandbox_and_admin_approval() -> None:
     assert metadata.namespace == "native.execution"
     assert metadata.category == "Execution"
     assert metadata.side_effect == "destructive"
-    assert metadata.approval == "admin_approval"
+    assert metadata.approval == "user_approval"
     assert metadata.required_env_vars == ("KORTNY_SANDBOX_RUNNER_URL",)
     assert metadata.sandbox.requires_sandbox is True
     assert metadata.sandbox.network == "none"
     assert metadata.sandbox.resource_limits.timeout_seconds == 30
     assert descriptor.to_payload()["sandbox"] == metadata.sandbox.to_payload()
-    assert requirement.scope is ApprovalScope.admin
+    assert requirement.scope is ApprovalScope.user
     assert requirement.risk == "sandboxed_code_execution"
 
 

@@ -558,6 +558,7 @@ def test_slack_channel_info_tool_refreshes_current_channel(
                 "id": "C123",
                 "name": "research-room",
                 "is_private": True,
+                "properties": {"canvas": {"id": "FCANVAS123"}},
             },
         }
     )
@@ -577,6 +578,7 @@ def test_slack_channel_info_tool_refreshes_current_channel(
     )
     assert result.output["successful"] is True
     assert result.output["display_name"] == "#research-room"
+    assert result.output["canvas_id"] == "FCANVAS123"
     assert result.output["is_private"] is True
     assert result.output["refreshed"] is True
     assert identity is not None

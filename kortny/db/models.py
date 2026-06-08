@@ -622,7 +622,8 @@ class SlackSideEffect(Base):
         CheckConstraint(
             "operation in "
             "('chat_postMessage', 'files_upload_v2', 'reactions_add', "
-            "'reactions_remove', 'pins_add', 'bookmarks_add')",
+            "'reactions_remove', 'pins_add', 'bookmarks_add', "
+            "'conversations_canvases_create', 'canvases_edit')",
             name="ck_slack_side_effects_operation",
         ),
         CheckConstraint(

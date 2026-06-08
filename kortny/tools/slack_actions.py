@@ -14,6 +14,8 @@ from kortny.db.models import Task, TaskEvent, TaskEventType
 from kortny.slack.outbox import (
     SlackSideEffectOutbox,
     slack_bookmark_key,
+    slack_canvas_edit_key,
+    slack_channel_canvas_key,
     slack_pin_key,
     slack_reaction_key,
 )
@@ -23,9 +25,16 @@ from kortny.tools.types import JsonObject, JsonSchema, ToolResult
 
 MAX_TOOL_REPLY_CHARS = 4_000
 MAX_BOOKMARK_TITLE_CHARS = 150
+MAX_CANVAS_TITLE_CHARS = 150
+MAX_CANVAS_MARKDOWN_CHARS = 12_000
 SLACK_TS_RE = re.compile(r"^\d{10,}\.\d+$")
 REACTION_NAME_RE = re.compile(r"^[A-Za-z0-9_+-]+(?:::skin-tone-[2-6])?$")
 HTTP_LINK_RE = re.compile(r"^https?://[^\s]+$", re.IGNORECASE)
+CANVAS_ID_RE = re.compile(r"^[A-Za-z0-9]{4,}$")
+CANVAS_SECTION_ID_RE = re.compile(r"^[A-Za-z0-9:_-]{6,}$")
+CANVAS_CONTENT_OPERATIONS = frozenset(
+    {"insert_at_start", "insert_at_end", "insert_before", "insert_after", "replace"}
+)
 
 
 class SlackActionClient(Protocol):
@@ -67,6 +76,23 @@ class SlackActionClient(Protocol):
         emoji: str | None = None,
     ) -> Any:
         """Add a Slack bookmark."""
+
+    def conversations_canvases_create(
+        self,
+        *,
+        channel_id: str,
+        document_content: dict[str, str],
+        title: str | None = None,
+    ) -> Any:
+        """Create a Slack channel canvas."""
+
+    def canvases_edit(
+        self,
+        *,
+        canvas_id: str,
+        changes: list[dict[str, Any]],
+    ) -> Any:
+        """Edit a Slack canvas."""
 
 
 class SlackReplyThreadTool:
@@ -580,6 +606,266 @@ class SlackAddBookmarkTool:
         )
 
 
+class SlackCreateChannelCanvasTool:
+    """Create the current Slack channel's canvas."""
+
+    name = "slack_create_channel_canvas"
+    description = (
+        "Creates the current Slack channel canvas with Markdown content. Use "
+        "this when the user explicitly asks Kortny to create or set up a "
+        "channel canvas, project canvas, team notes canvas, or channel hub. "
+        "This is scoped to the current Slack channel and is not available in DMs."
+    )
+    parameters: JsonSchema = {
+        "type": "object",
+        "properties": {
+            "title": {
+                "type": "string",
+                "description": "Short title for the channel canvas.",
+            },
+            "markdown": {
+                "type": "string",
+                "description": (
+                    "Markdown content for the canvas. Canvas markdown supports "
+                    "headings, lists, checkboxes, links, tables, and mentions."
+                ),
+            },
+            "channel_id": {
+                "type": "string",
+                "description": (
+                    "Optional current Slack channel ID. Omit unless copying the "
+                    "current task channel exactly."
+                ),
+            },
+        },
+        "required": ["title", "markdown"],
+        "additionalProperties": False,
+    }
+
+    def __init__(
+        self,
+        *,
+        client: SlackActionClient,
+        session: Session,
+        task: Task,
+        task_service: TaskService | None = None,
+    ) -> None:
+        self.client = client
+        self.session = session
+        self.task = task
+        self.task_service = task_service or TaskService(session)
+
+    def invoke(self, args: JsonObject) -> ToolResult:
+        channel_id = _current_channel_arg(
+            value=args.get("channel_id"),
+            task=self.task,
+            tool_name=self.name,
+        )
+        if channel_id.startswith("D"):
+            raise ValueError(
+                "slack_create_channel_canvas is only available in Slack channels"
+            )
+        title = _coerce_canvas_title(args.get("title"), tool_name=self.name)
+        markdown = _coerce_canvas_markdown(args.get("markdown"), tool_name=self.name)
+        document_content = _canvas_document_content(markdown)
+        digest = _canvas_digest(title=title, markdown=markdown)
+        idempotency_key = slack_channel_canvas_key(
+            task_id=self.task.id,
+            channel_id=channel_id,
+            digest=digest,
+        )
+        request: JsonObject = {
+            "channel_id": channel_id,
+            "title": title,
+            "document_content": document_content,
+        }
+        result = SlackSideEffectOutbox(self.session).deliver(
+            installation_id=self.task.installation_id,
+            task_id=self.task.id,
+            idempotency_key=idempotency_key,
+            operation="conversations_canvases_create",
+            purpose="tool_create_channel_canvas",
+            target_channel_id=channel_id,
+            request=request,
+            call=lambda: self.client.conversations_canvases_create(
+                channel_id=channel_id,
+                title=title,
+                document_content=document_content,
+            ),
+        )
+        response = _require_ok(result.response, "conversations.canvases.create")
+        canvas_id = _response_canvas_id(response)
+        if canvas_id is None:
+            raise RuntimeError(
+                "Slack conversations.canvases.create response is missing canvas_id"
+            )
+        side_effect_id = str(result.side_effect.id)
+        if not _task_event_exists(
+            self.session,
+            task=self.task,
+            event_type=TaskEventType.log,
+            side_effect_id=side_effect_id,
+        ):
+            self.task_service.append_event(
+                self.task,
+                TaskEventType.log,
+                {
+                    "message": "slack_channel_canvas_created",
+                    "channel": channel_id,
+                    "canvas_id": canvas_id,
+                    "title": title,
+                    "markdown_chars": len(markdown),
+                    "purpose": "tool_create_channel_canvas",
+                    "slack_side_effect_id": side_effect_id,
+                    "idempotency_key": idempotency_key,
+                    "tool": self.name,
+                    "deduped": result.deduped,
+                },
+            )
+        return ToolResult(
+            output={
+                "successful": True,
+                "channel": channel_id,
+                "canvas_id": canvas_id,
+                "title": title,
+                "markdown_chars": len(markdown),
+                "deduped": result.deduped,
+                "slack_side_effect_id": side_effect_id,
+            }
+        )
+
+
+class SlackEditCanvasTool:
+    """Edit an existing Slack canvas."""
+
+    name = "slack_edit_canvas"
+    description = (
+        "Edits a known Slack canvas by appending, inserting, replacing, or "
+        "renaming content. Use this only when the user explicitly asks Kortny "
+        "to update a canvas and a canvas_id is known from Slack context, a "
+        "previous tool result, or the user's message. This tool performs one "
+        "canvas edit per call."
+    )
+    parameters: JsonSchema = {
+        "type": "object",
+        "properties": {
+            "canvas_id": {
+                "type": "string",
+                "description": "Slack canvas ID, such as F1234ABCD.",
+            },
+            "operation": {
+                "type": "string",
+                "description": (
+                    "Canvas edit operation: insert_at_end, insert_at_start, "
+                    "insert_before, insert_after, replace, or rename."
+                ),
+                "enum": [
+                    "insert_at_end",
+                    "insert_at_start",
+                    "insert_before",
+                    "insert_after",
+                    "replace",
+                    "rename",
+                ],
+            },
+            "markdown": {
+                "type": "string",
+                "description": (
+                    "Markdown content for content operations. Required unless "
+                    "operation is rename."
+                ),
+            },
+            "title": {
+                "type": "string",
+                "description": "New canvas title. Required for rename.",
+            },
+            "section_id": {
+                "type": "string",
+                "description": (
+                    "Section ID required for insert_before, insert_after, and "
+                    "section-level replace."
+                ),
+            },
+        },
+        "required": ["canvas_id", "operation"],
+        "additionalProperties": False,
+    }
+
+    def __init__(
+        self,
+        *,
+        client: SlackActionClient,
+        session: Session,
+        task: Task,
+        task_service: TaskService | None = None,
+    ) -> None:
+        self.client = client
+        self.session = session
+        self.task = task
+        self.task_service = task_service or TaskService(session)
+
+    def invoke(self, args: JsonObject) -> ToolResult:
+        canvas_id = _coerce_canvas_id(args.get("canvas_id"), tool_name=self.name)
+        operation = _coerce_canvas_operation(args.get("operation"), tool_name=self.name)
+        change = _canvas_change_from_args(args, operation=operation, tool_name=self.name)
+        digest = _canvas_edit_digest(canvas_id=canvas_id, change=change)
+        idempotency_key = slack_canvas_edit_key(
+            task_id=self.task.id,
+            canvas_id=canvas_id,
+            digest=digest,
+        )
+        request: JsonObject = {
+            "canvas_id": canvas_id,
+            "changes": [change],
+        }
+        result = SlackSideEffectOutbox(self.session).deliver(
+            installation_id=self.task.installation_id,
+            task_id=self.task.id,
+            idempotency_key=idempotency_key,
+            operation="canvases_edit",
+            purpose="tool_edit_canvas",
+            request=request,
+            call=lambda: self.client.canvases_edit(
+                canvas_id=canvas_id,
+                changes=[change],
+            ),
+        )
+        response = _require_ok(result.response, "canvases.edit")
+        side_effect_id = str(result.side_effect.id)
+        if not _task_event_exists(
+            self.session,
+            task=self.task,
+            event_type=TaskEventType.log,
+            side_effect_id=side_effect_id,
+        ):
+            self.task_service.append_event(
+                self.task,
+                TaskEventType.log,
+                {
+                    "message": "slack_canvas_edited",
+                    "canvas_id": canvas_id,
+                    "operation": operation,
+                    "section_id": change.get("section_id"),
+                    "purpose": "tool_edit_canvas",
+                    "slack_side_effect_id": side_effect_id,
+                    "idempotency_key": idempotency_key,
+                    "tool": self.name,
+                    "deduped": result.deduped,
+                    "ok": response.get("ok") is not False,
+                },
+            )
+        return ToolResult(
+            output={
+                "successful": True,
+                "canvas_id": canvas_id,
+                "operation": operation,
+                "section_id": change.get("section_id"),
+                "deduped": result.deduped,
+                "slack_side_effect_id": side_effect_id,
+            }
+        )
+
+
 def _coerce_reply_text(value: object) -> str:
     if not isinstance(value, str):
         raise ValueError("slack_reply_thread 'text' is required")
@@ -677,6 +963,94 @@ def _coerce_optional_emoji(value: object) -> str | None:
     return _coerce_reaction_name(value)
 
 
+def _coerce_canvas_title(value: object, *, tool_name: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{tool_name} 'title' is required")
+    title = " ".join(value.strip().split())
+    if not title:
+        raise ValueError(f"{tool_name} 'title' cannot be empty")
+    if len(title) > MAX_CANVAS_TITLE_CHARS:
+        raise ValueError(
+            f"{tool_name} 'title' must be {MAX_CANVAS_TITLE_CHARS} characters or fewer"
+        )
+    return title
+
+
+def _coerce_canvas_markdown(value: object, *, tool_name: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{tool_name} 'markdown' is required")
+    markdown = value.strip()
+    if not markdown:
+        raise ValueError(f"{tool_name} 'markdown' cannot be empty")
+    if len(markdown) > MAX_CANVAS_MARKDOWN_CHARS:
+        raise ValueError(
+            f"{tool_name} 'markdown' must be {MAX_CANVAS_MARKDOWN_CHARS} characters or fewer"
+        )
+    return markdown
+
+
+def _coerce_canvas_id(value: object, *, tool_name: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{tool_name} 'canvas_id' is required")
+    canvas_id = value.strip()
+    if not CANVAS_ID_RE.match(canvas_id):
+        raise ValueError(f"{tool_name} 'canvas_id' must be a Slack canvas ID")
+    return canvas_id
+
+
+def _coerce_canvas_section_id(value: object, *, tool_name: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{tool_name} 'section_id' is required for this operation")
+    section_id = value.strip()
+    if not CANVAS_SECTION_ID_RE.match(section_id):
+        raise ValueError(f"{tool_name} 'section_id' must be a Slack canvas section ID")
+    return section_id
+
+
+def _coerce_canvas_operation(value: object, *, tool_name: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{tool_name} 'operation' is required")
+    operation = value.strip()
+    allowed = CANVAS_CONTENT_OPERATIONS | {"rename"}
+    if operation not in allowed:
+        allowed_text = ", ".join(sorted(allowed))
+        raise ValueError(f"{tool_name} 'operation' must be one of: {allowed_text}")
+    return operation
+
+
+def _canvas_document_content(markdown: str) -> dict[str, str]:
+    return {"type": "markdown", "markdown": markdown}
+
+
+def _canvas_change_from_args(
+    args: JsonObject,
+    *,
+    operation: str,
+    tool_name: str,
+) -> JsonObject:
+    if operation == "rename":
+        return {
+            "operation": "rename",
+            "title_content": _canvas_document_content(
+                _coerce_canvas_title(args.get("title"), tool_name=tool_name)
+            ),
+        }
+
+    change: JsonObject = {
+        "operation": operation,
+        "document_content": _canvas_document_content(
+            _coerce_canvas_markdown(args.get("markdown"), tool_name=tool_name)
+        ),
+    }
+    section_id = args.get("section_id")
+    if operation in {"insert_before", "insert_after"} or section_id is not None:
+        change["section_id"] = _coerce_canvas_section_id(
+            section_id,
+            tool_name=tool_name,
+        )
+    return change
+
+
 def _coerce_purpose(value: object, *, default: str) -> str:
     if value is None:
         return default
@@ -712,6 +1086,15 @@ def _bookmark_digest(*, title: str, link: str) -> str:
     return hashlib.sha256(f"{title}\n{link}".encode()).hexdigest()[:16]
 
 
+def _canvas_digest(*, title: str, markdown: str) -> str:
+    return hashlib.sha256(f"{title}\n{markdown}".encode()).hexdigest()[:16]
+
+
+def _canvas_edit_digest(*, canvas_id: str, change: JsonObject) -> str:
+    payload = repr(sorted((key, repr(value)) for key, value in change.items()))
+    return hashlib.sha256(f"{canvas_id}\n{payload}".encode()).hexdigest()[:16]
+
+
 def _require_ok(response: Mapping[str, Any], method: str) -> Mapping[str, Any]:
     ok = response.get("ok")
     if ok is False:
@@ -738,6 +1121,18 @@ def _response_bookmark_id(response: Mapping[str, Any]) -> str | None:
         bookmark_id = bookmark.get("id")
         if isinstance(bookmark_id, str) and bookmark_id:
             return bookmark_id
+    return None
+
+
+def _response_canvas_id(response: Mapping[str, Any]) -> str | None:
+    canvas_id = response.get("canvas_id")
+    if isinstance(canvas_id, str) and canvas_id:
+        return canvas_id
+    canvas = response.get("canvas")
+    if isinstance(canvas, Mapping):
+        nested_canvas_id = canvas.get("id") or canvas.get("canvas_id")
+        if isinstance(nested_canvas_id, str) and nested_canvas_id:
+            return nested_canvas_id
     return None
 
 

@@ -120,6 +120,8 @@ from kortny.tools import (
     SlackAddReactionTool,
     SlackChannelHistoryTool,
     SlackChannelInfoTool,
+    SlackCreateChannelCanvasTool,
+    SlackEditCanvasTool,
     SlackFileReadTool,
     SlackPinMessageTool,
     SlackReplyThreadTool,
@@ -1263,6 +1265,18 @@ class AgentTaskExecutor:
                 task_service=task_service,
             ),
             SlackAddBookmarkTool(
+                client=slack_action_client,
+                session=session,
+                task=task,
+                task_service=task_service,
+            ),
+            SlackCreateChannelCanvasTool(
+                client=slack_action_client,
+                session=session,
+                task=task,
+                task_service=task_service,
+            ),
+            SlackEditCanvasTool(
                 client=slack_action_client,
                 session=session,
                 task=task,

@@ -82,6 +82,8 @@ from kortny.tools.search_observed_slack_history import SearchObservedSlackHistor
 from kortny.tools.slack_actions import (
     SlackAddBookmarkTool,
     SlackAddReactionTool,
+    SlackCreateChannelCanvasTool,
+    SlackEditCanvasTool,
     SlackPinMessageTool,
     SlackReplyThreadTool,
 )
@@ -149,6 +151,8 @@ _NATIVE_DASHBOARD_TOOL_CLASSES: tuple[type[Any], ...] = (
     SlackAddReactionTool,
     SlackPinMessageTool,
     SlackAddBookmarkTool,
+    SlackCreateChannelCanvasTool,
+    SlackEditCanvasTool,
     SlackFileReadTool,
     QueryWorkspaceGraphTool,
     ListSchedulesTool,

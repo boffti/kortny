@@ -21,6 +21,8 @@ from kortny.db.session import make_engine, make_session_factory, normalize_datab
 from kortny.tools.slack_actions import (
     SlackAddBookmarkTool,
     SlackAddReactionTool,
+    SlackCreateChannelCanvasTool,
+    SlackEditCanvasTool,
     SlackPinMessageTool,
     SlackReplyThreadTool,
 )
@@ -39,6 +41,8 @@ class FakeSlackActionClient:
         self.reactions: list[dict[str, Any]] = []
         self.pins: list[dict[str, Any]] = []
         self.bookmarks: list[dict[str, Any]] = []
+        self.channel_canvases: list[dict[str, Any]] = []
+        self.canvas_edits: list[dict[str, Any]] = []
 
     def chat_postMessage(
         self,
@@ -114,6 +118,39 @@ class FakeSlackActionClient:
                 "type": type,
             },
         }
+
+    def conversations_canvases_create(
+        self,
+        *,
+        channel_id: str,
+        document_content: dict[str, str],
+        title: str | None = None,
+    ) -> dict[str, Any]:
+        self.channel_canvases.append(
+            {
+                "channel_id": channel_id,
+                "document_content": document_content,
+                "title": title,
+            }
+        )
+        return {
+            "ok": True,
+            "canvas_id": f"Fcanvas{len(self.channel_canvases):06d}",
+        }
+
+    def canvases_edit(
+        self,
+        *,
+        canvas_id: str,
+        changes: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        self.canvas_edits.append(
+            {
+                "canvas_id": canvas_id,
+                "changes": changes,
+            }
+        )
+        return {"ok": True}
 
 
 @pytest.fixture(scope="session")
@@ -409,6 +446,149 @@ def test_slack_add_bookmark_rejects_dm_and_invalid_link(
         ).invoke({"title": "Bad", "link": "ftp://example.com"})
 
     assert client.bookmarks == []
+
+
+def test_slack_create_channel_canvas_records_side_effect_and_event(
+    db_session: Session,
+) -> None:
+    task = create_task(db_session)
+    client = FakeSlackActionClient()
+
+    result = SlackCreateChannelCanvasTool(
+        client=client,
+        session=db_session,
+        task=task,
+    ).invoke(
+        {
+            "title": "Channel Brief",
+            "markdown": "# Channel Brief\n\n- Owner: Aneesh\n- Status: active",
+        }
+    )
+
+    event = db_session.scalar(
+        select(TaskEvent).where(
+            TaskEvent.task_id == task.id,
+            TaskEvent.type == TaskEventType.log,
+            TaskEvent.payload["message"].as_string()
+            == "slack_channel_canvas_created",
+        )
+    )
+    side_effect = db_session.scalar(
+        select(SlackSideEffect).where(SlackSideEffect.task_id == task.id)
+    )
+
+    assert result.output["successful"] is True
+    assert result.output["canvas_id"] == "Fcanvas000001"
+    assert client.channel_canvases == [
+        {
+            "channel_id": "C123",
+            "title": "Channel Brief",
+            "document_content": {
+                "type": "markdown",
+                "markdown": "# Channel Brief\n\n- Owner: Aneesh\n- Status: active",
+            },
+        }
+    ]
+    assert event is not None
+    assert event.payload["tool"] == "slack_create_channel_canvas"
+    assert event.payload["canvas_id"] == "Fcanvas000001"
+    assert event.payload["title"] == "Channel Brief"
+    assert side_effect is not None
+    assert side_effect.operation == "conversations_canvases_create"
+    assert side_effect.purpose == "tool_create_channel_canvas"
+    assert side_effect.target_channel_id == "C123"
+
+
+def test_slack_create_channel_canvas_rejects_dm(
+    db_session: Session,
+) -> None:
+    task = create_task(db_session, channel_id="D123", thread_ts="D123")
+    client = FakeSlackActionClient()
+
+    with pytest.raises(ValueError, match="only available in Slack channels"):
+        SlackCreateChannelCanvasTool(
+            client=client,
+            session=db_session,
+            task=task,
+        ).invoke({"title": "DM Canvas", "markdown": "Nope"})
+
+    assert client.channel_canvases == []
+
+
+def test_slack_edit_canvas_appends_markdown_and_records_event(
+    db_session: Session,
+) -> None:
+    task = create_task(db_session)
+    client = FakeSlackActionClient()
+
+    result = SlackEditCanvasTool(
+        client=client,
+        session=db_session,
+        task=task,
+    ).invoke(
+        {
+            "canvas_id": "Fcanvas123",
+            "operation": "insert_at_end",
+            "markdown": "## Follow-up\n\n- Check pricing",
+        }
+    )
+
+    event = db_session.scalar(
+        select(TaskEvent).where(
+            TaskEvent.task_id == task.id,
+            TaskEvent.type == TaskEventType.log,
+            TaskEvent.payload["message"].as_string() == "slack_canvas_edited",
+        )
+    )
+    side_effect = db_session.scalar(
+        select(SlackSideEffect).where(SlackSideEffect.task_id == task.id)
+    )
+
+    assert result.output["successful"] is True
+    assert result.output["operation"] == "insert_at_end"
+    assert client.canvas_edits == [
+        {
+            "canvas_id": "Fcanvas123",
+            "changes": [
+                {
+                    "operation": "insert_at_end",
+                    "document_content": {
+                        "type": "markdown",
+                        "markdown": "## Follow-up\n\n- Check pricing",
+                    },
+                }
+            ],
+        }
+    ]
+    assert event is not None
+    assert event.payload["tool"] == "slack_edit_canvas"
+    assert event.payload["canvas_id"] == "Fcanvas123"
+    assert event.payload["operation"] == "insert_at_end"
+    assert side_effect is not None
+    assert side_effect.operation == "canvases_edit"
+    assert side_effect.purpose == "tool_edit_canvas"
+
+
+def test_slack_edit_canvas_requires_section_for_insert_after(
+    db_session: Session,
+) -> None:
+    task = create_task(db_session)
+    client = FakeSlackActionClient()
+
+    with pytest.raises(ValueError, match="section_id"):
+        SlackEditCanvasTool(
+            client=client,
+            session=db_session,
+            task=task,
+        ).invoke(
+            {
+                "canvas_id": "Fcanvas123",
+                "operation": "insert_after",
+                "markdown": "Needs a section target.",
+            }
+        )
+
+    assert client.canvas_edits == []
 
 
 def cleanup_database(session: Session) -> None:

@@ -126,6 +126,8 @@ def test_slack_action_metadata_is_current_scope_and_write_classed() -> None:
     reaction = tool_metadata("slack_add_reaction")
     pin = tool_metadata("slack_pin_message")
     bookmark = tool_metadata("slack_add_bookmark")
+    channel_canvas = tool_metadata("slack_create_channel_canvas")
+    edit_canvas = tool_metadata("slack_edit_canvas")
 
     assert reply.category == "Slack actions"
     assert reply.side_effect == "write"
@@ -143,6 +145,15 @@ def test_slack_action_metadata_is_current_scope_and_write_classed() -> None:
     assert bookmark.side_effect == "write"
     assert bookmark.required_slack_scopes == ("bookmarks:write",)
     assert "current_channel_only" in bookmark.plan_gates
+    assert channel_canvas.category == "Slack actions"
+    assert channel_canvas.side_effect == "write"
+    assert channel_canvas.required_slack_scopes == ("canvases:write",)
+    assert "current_channel_only" in channel_canvas.plan_gates
+    assert "no_dm_canvas" in channel_canvas.plan_gates
+    assert edit_canvas.category == "Slack actions"
+    assert edit_canvas.side_effect == "write"
+    assert edit_canvas.required_slack_scopes == ("canvases:write",)
+    assert "known_canvas_id_required" in edit_canvas.plan_gates
 
 
 def test_slack_action_tools_do_not_require_human_approval_by_default() -> None:
@@ -164,11 +175,24 @@ def test_slack_action_tools_do_not_require_human_approval_by_default() -> None:
         SimpleNamespace(name="slack_add_bookmark", description="Add a bookmark"),
         {},
     )
+    channel_canvas = policy.requirement_for(
+        SimpleNamespace(
+            name="slack_create_channel_canvas",
+            description="Create a channel canvas",
+        ),
+        {},
+    )
+    edit_canvas = policy.requirement_for(
+        SimpleNamespace(name="slack_edit_canvas", description="Edit a canvas"),
+        {},
+    )
 
     assert reply.scope is ApprovalScope.none
     assert reaction.scope is ApprovalScope.none
     assert pin.scope is ApprovalScope.none
     assert bookmark.scope is ApprovalScope.none
+    assert channel_canvas.scope is ApprovalScope.none
+    assert edit_canvas.scope is ApprovalScope.none
 
 
 def test_describe_tools_metadata_is_read_only_runtime_inventory() -> None:

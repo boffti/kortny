@@ -168,13 +168,15 @@ _USER_CAPABILITY_GROUPS: tuple[tuple[str, JsonObject], ...] = (
                 "I can reply in the active Slack thread or add a reaction to "
                 "the current message when that is the right lightweight action. "
                 "I can also pin the current message or add a link bookmark to "
-                "the current channel when asked."
+                "the current channel when asked. I can create or update a Slack "
+                "Canvas when the channel needs a durable note or hub."
             ),
             "examples": [
                 "leave a quick follow-up in this thread",
                 "add a reaction to the message I am handling",
                 "pin this message",
                 "bookmark this link for the channel",
+                "create a channel canvas with the decisions from this thread",
             ],
         },
     ),

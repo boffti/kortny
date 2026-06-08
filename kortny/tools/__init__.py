@@ -18,6 +18,8 @@ from kortny.tools.search_observed_slack_history import SearchObservedSlackHistor
 from kortny.tools.slack_actions import (
     SlackAddBookmarkTool,
     SlackAddReactionTool,
+    SlackCreateChannelCanvasTool,
+    SlackEditCanvasTool,
     SlackPinMessageTool,
     SlackReplyThreadTool,
 )
@@ -65,6 +67,8 @@ __all__ = [
     "SearchObservedSlackHistoryTool",
     "SlackAddBookmarkTool",
     "SlackAddReactionTool",
+    "SlackCreateChannelCanvasTool",
+    "SlackEditCanvasTool",
     "SlackChannelHistoryError",
     "SlackChannelHistoryTool",
     "SlackFileReadError",

@@ -182,7 +182,31 @@ def _identity_result_payload(
             if identity.refreshed_at is not None
             else None
         ),
+        **_identity_extra_payload(identity),
     }
+
+
+def _identity_extra_payload(identity: SlackIdentity) -> JsonObject:
+    if identity.kind != "channel" or not isinstance(identity.raw_json, dict):
+        return {}
+    canvas_id = _channel_canvas_id(identity.raw_json)
+    if canvas_id is None:
+        return {}
+    return {"canvas_id": canvas_id}
+
+
+def _channel_canvas_id(channel: JsonObject) -> str | None:
+    properties = channel.get("properties")
+    if not isinstance(properties, dict):
+        return None
+    canvas = properties.get("canvas")
+    if isinstance(canvas, str) and canvas.strip():
+        return canvas.strip()
+    if isinstance(canvas, dict):
+        canvas_id = canvas.get("id") or canvas.get("canvas_id")
+        if isinstance(canvas_id, str) and canvas_id.strip():
+            return canvas_id.strip()
+    return None
 
 
 def _coerce_user_id(value: object, *, default: str) -> str:

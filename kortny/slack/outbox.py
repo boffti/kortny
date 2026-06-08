@@ -279,6 +279,28 @@ def slack_bookmark_key(
     return f"slack:bookmarks_add:{task_id}:{channel_id}:{digest}"
 
 
+def slack_channel_canvas_key(
+    *,
+    task_id: uuid.UUID,
+    channel_id: str,
+    digest: str,
+) -> str:
+    """Return the deterministic outbox key for a channel canvas create call."""
+
+    return f"slack:conversations_canvases_create:{task_id}:{channel_id}:{digest}"
+
+
+def slack_canvas_edit_key(
+    *,
+    task_id: uuid.UUID,
+    canvas_id: str,
+    digest: str,
+) -> str:
+    """Return the deterministic outbox key for a canvas edit call."""
+
+    return f"slack:canvases_edit:{task_id}:{canvas_id}:{digest}"
+
+
 def slack_channel_intro_key(*, installation_id: uuid.UUID, channel_id: str) -> str:
     """Return the deterministic outbox key for channel onboarding intro posts."""
 

@@ -444,6 +444,8 @@ _TOOL_TO_INTEGRATION = {
     "slack_add_reaction": "slack",
     "slack_pin_message": "slack",
     "slack_add_bookmark": "slack",
+    "slack_create_channel_canvas": "slack",
+    "slack_edit_canvas": "slack",
     "slack_file_read": "slack",
     "pdf_generator": "documents",
 }

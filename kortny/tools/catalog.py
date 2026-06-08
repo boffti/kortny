@@ -289,6 +289,27 @@ NATIVE_TOOL_METADATA: dict[str, ToolMetadata] = {
             "Supports append, insert, replace, and rename operations.",
         ),
     ),
+    "slack_lookup_canvas_sections": ToolMetadata(
+        name="slack_lookup_canvas_sections",
+        namespace="native.slack",
+        category="Slack context",
+        display_name="Lookup Slack canvas sections",
+        capabilities=(
+            "slack_canvas",
+            "slack_canvas_sections",
+            "channel_documentation",
+            "slack_context",
+        ),
+        side_effect="read",
+        required_env_vars=("SLACK_BOT_TOKEN",),
+        required_slack_scopes=("canvases:read",),
+        plan_gates=("known_canvas_id_required", "criteria_required"),
+        result_budget="small_lookup",
+        notes=(
+            "Finds section IDs in a known Slack canvas.",
+            "Use before targeted canvas edits when only a heading or phrase is known.",
+        ),
+    ),
     "slack_file_read": ToolMetadata(
         name="slack_file_read",
         namespace="native.slack",

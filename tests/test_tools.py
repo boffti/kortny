@@ -127,6 +127,7 @@ def test_slack_action_metadata_is_current_scope_and_write_classed() -> None:
     pin = tool_metadata("slack_pin_message")
     bookmark = tool_metadata("slack_add_bookmark")
     channel_canvas = tool_metadata("slack_create_channel_canvas")
+    lookup_canvas_sections = tool_metadata("slack_lookup_canvas_sections")
     edit_canvas = tool_metadata("slack_edit_canvas")
 
     assert reply.category == "Slack actions"
@@ -150,6 +151,11 @@ def test_slack_action_metadata_is_current_scope_and_write_classed() -> None:
     assert channel_canvas.required_slack_scopes == ("canvases:write",)
     assert "current_channel_only" in channel_canvas.plan_gates
     assert "no_dm_canvas" in channel_canvas.plan_gates
+    assert lookup_canvas_sections.category == "Slack context"
+    assert lookup_canvas_sections.side_effect == "read"
+    assert lookup_canvas_sections.required_slack_scopes == ("canvases:read",)
+    assert "known_canvas_id_required" in lookup_canvas_sections.plan_gates
+    assert "criteria_required" in lookup_canvas_sections.plan_gates
     assert edit_canvas.category == "Slack actions"
     assert edit_canvas.side_effect == "write"
     assert edit_canvas.required_slack_scopes == ("canvases:write",)
@@ -182,6 +188,13 @@ def test_slack_action_tools_do_not_require_human_approval_by_default() -> None:
         ),
         {},
     )
+    lookup_canvas_sections = policy.requirement_for(
+        SimpleNamespace(
+            name="slack_lookup_canvas_sections",
+            description="Look up canvas sections",
+        ),
+        {},
+    )
     edit_canvas = policy.requirement_for(
         SimpleNamespace(name="slack_edit_canvas", description="Edit a canvas"),
         {},
@@ -192,6 +205,7 @@ def test_slack_action_tools_do_not_require_human_approval_by_default() -> None:
     assert pin.scope is ApprovalScope.none
     assert bookmark.scope is ApprovalScope.none
     assert channel_canvas.scope is ApprovalScope.none
+    assert lookup_canvas_sections.scope is ApprovalScope.none
     assert edit_canvas.scope is ApprovalScope.none
 
 

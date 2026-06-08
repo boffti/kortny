@@ -84,6 +84,7 @@ from kortny.tools.slack_actions import (
     SlackAddReactionTool,
     SlackCreateChannelCanvasTool,
     SlackEditCanvasTool,
+    SlackLookupCanvasSectionsTool,
     SlackPinMessageTool,
     SlackReplyThreadTool,
 )
@@ -152,6 +153,7 @@ _NATIVE_DASHBOARD_TOOL_CLASSES: tuple[type[Any], ...] = (
     SlackPinMessageTool,
     SlackAddBookmarkTool,
     SlackCreateChannelCanvasTool,
+    SlackLookupCanvasSectionsTool,
     SlackEditCanvasTool,
     SlackFileReadTool,
     QueryWorkspaceGraphTool,

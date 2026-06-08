@@ -27,11 +27,13 @@ MAX_TOOL_REPLY_CHARS = 4_000
 MAX_BOOKMARK_TITLE_CHARS = 150
 MAX_CANVAS_TITLE_CHARS = 150
 MAX_CANVAS_MARKDOWN_CHARS = 12_000
+MAX_CANVAS_LOOKUP_TEXT_CHARS = 200
 SLACK_TS_RE = re.compile(r"^\d{10,}\.\d+$")
 REACTION_NAME_RE = re.compile(r"^[A-Za-z0-9_+-]+(?:::skin-tone-[2-6])?$")
 HTTP_LINK_RE = re.compile(r"^https?://[^\s]+$", re.IGNORECASE)
 CANVAS_ID_RE = re.compile(r"^[A-Za-z0-9]{4,}$")
 CANVAS_SECTION_ID_RE = re.compile(r"^[A-Za-z0-9:_-]{6,}$")
+CANVAS_SECTION_TYPES = frozenset({"h1", "h2", "h3", "any_header"})
 CANVAS_CONTENT_OPERATIONS = frozenset(
     {"insert_at_start", "insert_at_end", "insert_before", "insert_after", "replace"}
 )
@@ -93,6 +95,14 @@ class SlackActionClient(Protocol):
         changes: list[dict[str, Any]],
     ) -> Any:
         """Edit a Slack canvas."""
+
+    def canvases_sections_lookup(
+        self,
+        *,
+        canvas_id: str,
+        criteria: dict[str, Any],
+    ) -> Any:
+        """Look up Slack canvas sections."""
 
 
 class SlackReplyThreadTool:
@@ -735,6 +745,78 @@ class SlackCreateChannelCanvasTool:
         )
 
 
+class SlackLookupCanvasSectionsTool:
+    """Find sections in a known Slack canvas."""
+
+    name = "slack_lookup_canvas_sections"
+    description = (
+        "Finds section IDs in a known Slack canvas by heading type and/or text. "
+        "Use this before slack_edit_canvas when the user asks to update a "
+        "specific section, insert near a section, or replace a section but only "
+        "the section heading or text is known. This is read-only and requires a "
+        "known canvas_id from Slack channel info, prior context, or the user."
+    )
+    parameters: JsonSchema = {
+        "type": "object",
+        "properties": {
+            "canvas_id": {
+                "type": "string",
+                "description": "Slack canvas ID, such as F1234ABCD.",
+            },
+            "contains_text": {
+                "type": "string",
+                "description": (
+                    "Text that the target section contains, usually the heading "
+                    "or a distinctive phrase."
+                ),
+            },
+            "section_types": {
+                "type": "array",
+                "description": (
+                    "Heading section types to search. Use any_header when the "
+                    "heading level is unknown."
+                ),
+                "items": {
+                    "type": "string",
+                    "enum": ["h1", "h2", "h3", "any_header"],
+                },
+            },
+        },
+        "required": ["canvas_id"],
+        "additionalProperties": False,
+    }
+
+    def __init__(self, *, client: SlackActionClient) -> None:
+        self.client = client
+
+    def invoke(self, args: JsonObject) -> ToolResult:
+        canvas_id = _coerce_canvas_id(args.get("canvas_id"), tool_name=self.name)
+        criteria = _coerce_canvas_lookup_criteria(args, tool_name=self.name)
+        response = _require_ok(
+            self.client.canvases_sections_lookup(
+                canvas_id=canvas_id,
+                criteria=criteria,
+            ),
+            "canvases.sections.lookup",
+        )
+        sections = _response_canvas_sections(response)
+        section_ids = [
+            section["section_id"]
+            for section in sections
+            if isinstance(section.get("section_id"), str)
+        ]
+        return ToolResult(
+            output={
+                "successful": True,
+                "canvas_id": canvas_id,
+                "criteria": criteria,
+                "section_count": len(sections),
+                "section_ids": section_ids,
+                "sections": sections,
+            }
+        )
+
+
 class SlackEditCanvasTool:
     """Edit an existing Slack canvas."""
 
@@ -1007,6 +1089,64 @@ def _coerce_canvas_section_id(value: object, *, tool_name: str) -> str:
     return section_id
 
 
+def _coerce_canvas_lookup_text(value: object, *, tool_name: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"{tool_name} 'contains_text' must be a string")
+    text = " ".join(value.strip().split())
+    if not text:
+        raise ValueError(f"{tool_name} 'contains_text' cannot be empty")
+    if len(text) > MAX_CANVAS_LOOKUP_TEXT_CHARS:
+        raise ValueError(
+            f"{tool_name} 'contains_text' must be {MAX_CANVAS_LOOKUP_TEXT_CHARS} characters or fewer"
+        )
+    return text
+
+
+def _coerce_canvas_section_types(value: object, *, tool_name: str) -> list[str] | None:
+    if value is None:
+        return None
+    if not isinstance(value, list | tuple):
+        raise ValueError(f"{tool_name} 'section_types' must be a list")
+    if not value:
+        raise ValueError(f"{tool_name} 'section_types' cannot be empty")
+    section_types: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            raise ValueError(f"{tool_name} 'section_types' entries must be strings")
+        section_type = item.strip()
+        if section_type not in CANVAS_SECTION_TYPES:
+            allowed = ", ".join(sorted(CANVAS_SECTION_TYPES))
+            raise ValueError(
+                f"{tool_name} 'section_types' entries must be one of: {allowed}"
+            )
+        if section_type not in section_types:
+            section_types.append(section_type)
+    return section_types
+
+
+def _coerce_canvas_lookup_criteria(args: JsonObject, *, tool_name: str) -> JsonObject:
+    criteria: JsonObject = {}
+    contains_text = _coerce_canvas_lookup_text(
+        args.get("contains_text"),
+        tool_name=tool_name,
+    )
+    section_types = _coerce_canvas_section_types(
+        args.get("section_types"),
+        tool_name=tool_name,
+    )
+    if contains_text is not None:
+        criteria["contains_text"] = contains_text
+    if section_types is not None:
+        criteria["section_types"] = section_types
+    if not criteria:
+        raise ValueError(
+            f"{tool_name} requires 'contains_text' or 'section_types' criteria"
+        )
+    return criteria
+
+
 def _coerce_canvas_operation(value: object, *, tool_name: str) -> str:
     if not isinstance(value, str):
         raise ValueError(f"{tool_name} 'operation' is required")
@@ -1134,6 +1274,36 @@ def _response_canvas_id(response: Mapping[str, Any]) -> str | None:
         if isinstance(nested_canvas_id, str) and nested_canvas_id:
             return nested_canvas_id
     return None
+
+
+def _response_canvas_sections(response: Mapping[str, Any]) -> list[JsonObject]:
+    sections = response.get("sections")
+    if not isinstance(sections, list):
+        return []
+    normalized: list[JsonObject] = []
+    for section in sections:
+        payload = _normalize_canvas_section(section)
+        if payload is not None:
+            normalized.append(payload)
+    return normalized
+
+
+def _normalize_canvas_section(section: object) -> JsonObject | None:
+    if isinstance(section, str):
+        return {"section_id": section}
+    if not isinstance(section, Mapping):
+        return None
+    section_id = section.get("id") or section.get("section_id")
+    if not isinstance(section_id, str) or not section_id:
+        return None
+    payload: JsonObject = {"section_id": section_id}
+    section_type = section.get("type") or section.get("section_type")
+    if isinstance(section_type, str) and section_type:
+        payload["section_type"] = section_type
+    text = section.get("text") or section.get("plain_text")
+    if isinstance(text, str) and text:
+        payload["text"] = text
+    return payload
 
 
 def _is_slack_timestamp(value: str | None) -> bool:

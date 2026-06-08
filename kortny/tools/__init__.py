@@ -20,6 +20,7 @@ from kortny.tools.slack_actions import (
     SlackAddReactionTool,
     SlackCreateChannelCanvasTool,
     SlackEditCanvasTool,
+    SlackLookupCanvasSectionsTool,
     SlackPinMessageTool,
     SlackReplyThreadTool,
 )
@@ -69,6 +70,7 @@ __all__ = [
     "SlackAddReactionTool",
     "SlackCreateChannelCanvasTool",
     "SlackEditCanvasTool",
+    "SlackLookupCanvasSectionsTool",
     "SlackChannelHistoryError",
     "SlackChannelHistoryTool",
     "SlackFileReadError",

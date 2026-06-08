@@ -177,6 +177,7 @@ _USER_CAPABILITY_GROUPS: tuple[tuple[str, JsonObject], ...] = (
                 "pin this message",
                 "bookmark this link for the channel",
                 "create a channel canvas with the decisions from this thread",
+                "update a named section in a channel canvas",
             ],
         },
     ),

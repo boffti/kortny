@@ -1246,6 +1246,7 @@ def test_worker_registry_exposes_integration_inventory_for_capability_lookup(
         "slack_pin_message",
         "slack_add_bookmark",
         "slack_create_channel_canvas",
+        "slack_lookup_canvas_sections",
         "slack_edit_canvas",
         "slack_file_read",
         "describe_tools",

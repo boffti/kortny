@@ -123,6 +123,7 @@ from kortny.tools import (
     SlackCreateChannelCanvasTool,
     SlackEditCanvasTool,
     SlackFileReadTool,
+    SlackLookupCanvasSectionsTool,
     SlackPinMessageTool,
     SlackReplyThreadTool,
     SlackUserInfoTool,
@@ -1275,6 +1276,9 @@ class AgentTaskExecutor:
                 session=session,
                 task=task,
                 task_service=task_service,
+            ),
+            SlackLookupCanvasSectionsTool(
+                client=slack_action_client,
             ),
             SlackEditCanvasTool(
                 client=slack_action_client,
@@ -3418,6 +3422,7 @@ NATIVE_SLACK_CONTEXT_HINTS = frozenset(
         "resolve_slack_identity",
         "slack_user_info",
         "slack_channel_info",
+        "slack_lookup_canvas_sections",
     }
 )
 

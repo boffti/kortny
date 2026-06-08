@@ -23,6 +23,7 @@ from kortny.tools.slack_actions import (
     SlackAddReactionTool,
     SlackCreateChannelCanvasTool,
     SlackEditCanvasTool,
+    SlackLookupCanvasSectionsTool,
     SlackPinMessageTool,
     SlackReplyThreadTool,
 )
@@ -42,6 +43,7 @@ class FakeSlackActionClient:
         self.pins: list[dict[str, Any]] = []
         self.bookmarks: list[dict[str, Any]] = []
         self.channel_canvases: list[dict[str, Any]] = []
+        self.canvas_section_lookups: list[dict[str, Any]] = []
         self.canvas_edits: list[dict[str, Any]] = []
 
     def chat_postMessage(
@@ -151,6 +153,34 @@ class FakeSlackActionClient:
             }
         )
         return {"ok": True}
+
+    def canvases_sections_lookup(
+        self,
+        *,
+        canvas_id: str,
+        criteria: dict[str, Any],
+    ) -> dict[str, Any]:
+        self.canvas_section_lookups.append(
+            {
+                "canvas_id": canvas_id,
+                "criteria": criteria,
+            }
+        )
+        return {
+            "ok": True,
+            "sections": [
+                {
+                    "id": "section_open_items",
+                    "type": "h2",
+                    "text": "Open Items",
+                },
+                {
+                    "section_id": "section_risks",
+                    "section_type": "h2",
+                    "plain_text": "Risks",
+                },
+            ],
+        }
 
 
 @pytest.fixture(scope="session")
@@ -567,6 +597,69 @@ def test_slack_edit_canvas_appends_markdown_and_records_event(
     assert side_effect is not None
     assert side_effect.operation == "canvases_edit"
     assert side_effect.purpose == "tool_edit_canvas"
+
+
+def test_slack_lookup_canvas_sections_returns_normalized_sections(
+    db_session: Session,
+) -> None:
+    create_task(db_session)
+    client = FakeSlackActionClient()
+
+    result = SlackLookupCanvasSectionsTool(client=client).invoke(
+        {
+            "canvas_id": "Fcanvas123",
+            "contains_text": "  Open   Items  ",
+            "section_types": ["h2", "h2"],
+        }
+    )
+
+    assert client.canvas_section_lookups == [
+        {
+            "canvas_id": "Fcanvas123",
+            "criteria": {
+                "contains_text": "Open Items",
+                "section_types": ["h2"],
+            },
+        }
+    ]
+    assert result.output == {
+        "successful": True,
+        "canvas_id": "Fcanvas123",
+        "criteria": {
+            "contains_text": "Open Items",
+            "section_types": ["h2"],
+        },
+        "section_count": 2,
+        "section_ids": ["section_open_items", "section_risks"],
+        "sections": [
+            {
+                "section_id": "section_open_items",
+                "section_type": "h2",
+                "text": "Open Items",
+            },
+            {
+                "section_id": "section_risks",
+                "section_type": "h2",
+                "text": "Risks",
+            },
+        ],
+    }
+
+
+def test_slack_lookup_canvas_sections_requires_criteria(
+    db_session: Session,
+) -> None:
+    create_task(db_session)
+    client = FakeSlackActionClient()
+
+    with pytest.raises(ValueError, match="criteria"):
+        SlackLookupCanvasSectionsTool(client=client).invoke(
+            {
+                "canvas_id": "Fcanvas123",
+            }
+        )
+
+    assert client.canvas_section_lookups == []
 
 
 def test_slack_edit_canvas_requires_section_for_insert_after(

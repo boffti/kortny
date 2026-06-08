@@ -9,12 +9,16 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 
 JsonObject = dict[str, object]
 
 SandboxNetworkMode = Literal["none", "allowlist"]
 SandboxLifecyclePhase = Literal["created", "started", "exited", "killed"]
+SANDBOX_LIFECYCLE_MESSAGE = "sandbox_lifecycle"
+SANDBOX_RESULT_MESSAGE = "sandbox_result"
+SANDBOX_EVENT_SOURCE = "execution.sandbox"
+DEFAULT_SANDBOX_OUTPUT_PREVIEW_CHARS = 2_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,3 +190,149 @@ class SandboxRunner(Protocol):
 
 class SandboxUnavailableError(RuntimeError):
     """Raised when a sandboxed tool is invoked without a configured runner."""
+
+
+class SandboxEventSink(Protocol):
+    """Minimal event sink required for sandbox task-event recording."""
+
+    def append_event(
+        self,
+        task: Any,
+        event_type: str,
+        payload: JsonObject | None = None,
+    ) -> Any:
+        """Append an event to a task timeline."""
+        ...
+
+
+@dataclass(frozen=True, slots=True)
+class SandboxEventRecorder:
+    """Records sandbox lifecycle and result summaries into a task event sink."""
+
+    event_sink: SandboxEventSink
+    runner: str = "local"
+    output_preview_chars: int = DEFAULT_SANDBOX_OUTPUT_PREVIEW_CHARS
+
+    def __post_init__(self) -> None:
+        if self.output_preview_chars < 0:
+            raise ValueError("Sandbox output preview length cannot be negative")
+
+    def record_lifecycle(
+        self,
+        task: Any,
+        event: SandboxLifecycleEvent,
+        *,
+        spec: SandboxSpec | None = None,
+        tool_name: str | None = None,
+        tool_call_id: str | None = None,
+    ) -> Any:
+        """Append a sandbox lifecycle event to the task timeline."""
+
+        return self.event_sink.append_event(
+            task,
+            "log",
+            sandbox_lifecycle_event_payload(
+                event,
+                spec=spec,
+                runner=self.runner,
+                tool_name=tool_name,
+                tool_call_id=tool_call_id,
+            ),
+        )
+
+    def record_result(
+        self,
+        task: Any,
+        result: SandboxResult,
+        *,
+        spec: SandboxSpec | None = None,
+        tool_name: str | None = None,
+        tool_call_id: str | None = None,
+    ) -> Any:
+        """Append a sandbox result summary to the task timeline."""
+
+        return self.event_sink.append_event(
+            task,
+            "log",
+            sandbox_result_event_payload(
+                result,
+                spec=spec,
+                runner=self.runner,
+                tool_name=tool_name,
+                tool_call_id=tool_call_id,
+                output_preview_chars=self.output_preview_chars,
+            ),
+        )
+
+
+def sandbox_lifecycle_event_payload(
+    event: SandboxLifecycleEvent,
+    *,
+    spec: SandboxSpec | None = None,
+    runner: str = "local",
+    tool_name: str | None = None,
+    tool_call_id: str | None = None,
+) -> JsonObject:
+    """Return the task-event payload for one sandbox lifecycle transition."""
+
+    payload: JsonObject = {
+        "message": SANDBOX_LIFECYCLE_MESSAGE,
+        "source": SANDBOX_EVENT_SOURCE,
+        "runner": runner,
+        "phase": event.phase,
+        "event": event.to_payload(),
+    }
+    if spec is not None:
+        payload["spec"] = spec.to_payload()
+    if tool_name:
+        payload["tool"] = tool_name
+    if tool_call_id:
+        payload["tool_call_id"] = tool_call_id
+    return payload
+
+
+def sandbox_result_event_payload(
+    result: SandboxResult,
+    *,
+    spec: SandboxSpec | None = None,
+    runner: str = "local",
+    tool_name: str | None = None,
+    tool_call_id: str | None = None,
+    output_preview_chars: int = DEFAULT_SANDBOX_OUTPUT_PREVIEW_CHARS,
+) -> JsonObject:
+    """Return a bounded task-event payload for sandbox execution results."""
+
+    if output_preview_chars < 0:
+        raise ValueError("Sandbox output preview length cannot be negative")
+
+    payload: JsonObject = {
+        "message": SANDBOX_RESULT_MESSAGE,
+        "source": SANDBOX_EVENT_SOURCE,
+        "runner": runner,
+        "status": "succeeded" if result.exit_code == 0 else "failed",
+        "exit_code": result.exit_code,
+        "stdout_chars": len(result.stdout),
+        "stderr_chars": len(result.stderr),
+        "stdout_preview": _preview_text(result.stdout, output_preview_chars),
+        "stderr_preview": _preview_text(result.stderr, output_preview_chars),
+        "artifact_count": len(result.artifacts),
+        "artifacts": [artifact.to_payload() for artifact in result.artifacts],
+        "usage": result.usage,
+        "lifecycle_event_count": len(result.events),
+        "lifecycle_events": [event.to_payload() for event in result.events],
+    }
+    if spec is not None:
+        payload["spec"] = spec.to_payload()
+    if tool_name:
+        payload["tool"] = tool_name
+    if tool_call_id:
+        payload["tool_call_id"] = tool_call_id
+    return payload
+
+
+def _preview_text(value: str, max_chars: int) -> str:
+    if max_chars == 0 or not value:
+        return ""
+    if len(value) <= max_chars:
+        return value
+    return value[:max_chars]

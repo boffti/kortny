@@ -240,7 +240,76 @@ services:
       - .:/app
       - uv-cache:/tmp/uv-cache
 
+  sandbox-docker-proxy:
+    image: ${DOCKER_SOCKET_PROXY_IMAGE:-tecnativa/docker-socket-proxy:latest}
+    profiles:
+      - sandbox
+    environment:
+      CONTAINERS: 1
+      IMAGES: 1
+      NETWORKS: 1
+      INFO: 1
+      VERSION: 1
+      POST: 1
+      EXEC: 0
+      BUILD: 0
+      AUTH: 0
+      SECRETS: 0
+      SYSTEM: 0
+      VOLUMES: 0
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - sandbox-control
+
+  sandbox-runner:
+    image: ghcr.io/astral-sh/uv:python3.11-bookworm-slim
+    profiles:
+      - sandbox
+    working_dir: /app
+    command: ["uv", "run", "python", "-m", "kortny.sandbox_runner"]
+    depends_on:
+      sandbox-docker-proxy:
+        condition: service_started
+    environment:
+      DOCKER_HOST: tcp://sandbox-docker-proxy:2375
+      KORTNY_SANDBOX_EXECUTION_ENABLED: ${KORTNY_SANDBOX_EXECUTION_ENABLED:-false}
+      KORTNY_SANDBOX_RUNNER_NAME: ${KORTNY_SANDBOX_RUNNER_NAME:-kortny-sandbox-runner}
+      KORTNY_SANDBOX_DEFAULT_IMAGE: ${KORTNY_SANDBOX_DEFAULT_IMAGE:-kortny/sandbox-python:latest}
+      KORTNY_SANDBOX_DEFAULT_NETWORK: ${KORTNY_SANDBOX_DEFAULT_NETWORK:-none}
+      KORTNY_SANDBOX_CPUS: ${KORTNY_SANDBOX_CPUS:-1.0}
+      KORTNY_SANDBOX_MEMORY_MB: ${KORTNY_SANDBOX_MEMORY_MB:-512}
+      KORTNY_SANDBOX_PIDS_LIMIT: ${KORTNY_SANDBOX_PIDS_LIMIT:-128}
+      KORTNY_SANDBOX_TIMEOUT_SECONDS: ${KORTNY_SANDBOX_TIMEOUT_SECONDS:-60}
+      UV_CACHE_DIR: /tmp/uv-cache
+      UV_LINK_MODE: copy
+      UV_PROJECT_ENVIRONMENT: /tmp/kortny-venv
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "uv",
+          "run",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8090/health', timeout=2).read()",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+    volumes:
+      - .:/app
+      - uv-cache:/tmp/uv-cache
+    networks:
+      - default
+      - sandbox-control
+
 volumes:
   postgres-data:
   phoenix-data:
   uv-cache:
+
+networks:
+  sandbox-control:
+    internal: true

@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import json
+from dataclasses import dataclass, field
 from decimal import Decimal
 from time import monotonic
 from typing import Any, Protocol
@@ -62,6 +63,99 @@ class DockerContainerRunSpec:
 
 
 @dataclass(frozen=True, slots=True)
+class DockerSessionCreateSpec:
+    """One hardened long-lived session container request."""
+
+    image: str
+    session_id: str
+    task_id: str
+    profile: str
+    workspace_path: str = "/workspace"
+    env: dict[str, str] = field(default_factory=dict)
+    cpus: float = 2.0
+    memory_mb: int = 2048
+    pids_limit: int = 512
+    workspace_mb: int = 1024
+
+
+@dataclass(frozen=True, slots=True)
+class DockerSessionCreateResult:
+    """Result of one session container create+start attempt."""
+
+    ok: bool
+    status: str
+    container_id: str | None = None
+    status_code: int | None = None
+    error_type: str | None = None
+    error: str | None = None
+
+    def to_payload(self) -> JsonObject:
+        return {
+            "ok": self.ok,
+            "status": self.status,
+            "container_id": self.container_id,
+            "status_code": self.status_code,
+            "error_type": self.error_type,
+            "error": self.error,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class DockerExecResult:
+    """Result of one `docker exec` style command in a session container."""
+
+    ok: bool
+    status: str
+    exit_code: int | None = None
+    stdout: str = ""
+    stderr: str = ""
+    duration_ms: int | None = None
+    timed_out: bool = False
+    truncated: bool = False
+    status_code: int | None = None
+    error_type: str | None = None
+    error: str | None = None
+
+    def to_payload(self) -> JsonObject:
+        return {
+            "ok": self.ok,
+            "status": self.status,
+            "exit_code": self.exit_code,
+            "stdout": self.stdout,
+            "stderr": self.stderr,
+            "duration_ms": self.duration_ms,
+            "timed_out": self.timed_out,
+            "truncated": self.truncated,
+            "status_code": self.status_code,
+            "error_type": self.error_type,
+            "error": self.error,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class DockerArchiveResult:
+    """Result of one archive read/write against a session container."""
+
+    ok: bool
+    status: str
+    content: bytes = b""
+    status_code: int | None = None
+    error_type: str | None = None
+    error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class DockerSessionContainer:
+    """One labeled session container as listed from the Docker API."""
+
+    container_id: str
+    session_id: str
+    task_id: str
+    created_at_epoch: int
+    running: bool
+
+
+@dataclass(frozen=True, slots=True)
 class DockerContainerRunResult:
     """Result of one Docker-backed sandbox execution attempt."""
 
@@ -100,6 +194,46 @@ class DockerApiRunnerClient(DockerApiProbeClient, Protocol):
 
     def run_container(self, spec: DockerContainerRunSpec) -> DockerContainerRunResult:
         """Create, start, wait, collect logs, and remove a sandbox container."""
+        ...
+
+
+class DockerApiSessionClient(Protocol):
+    """Shape used by the session manager to drive long-lived containers."""
+
+    def create_session_container(
+        self, spec: DockerSessionCreateSpec
+    ) -> DockerSessionCreateResult:
+        """Create and start one hardened session container."""
+        ...
+
+    def exec_in_container(
+        self,
+        container_id: str,
+        command: tuple[str, ...],
+        *,
+        workdir: str,
+        timeout_seconds: int,
+        max_output_bytes: int = 65536,
+    ) -> DockerExecResult:
+        """Run one command in a running session container."""
+        ...
+
+    def get_archive(self, container_id: str, path: str) -> DockerArchiveResult:
+        """Fetch a tar archive of a path inside the container."""
+        ...
+
+    def put_archive(
+        self, container_id: str, path: str, tar_bytes: bytes
+    ) -> DockerArchiveResult:
+        """Extract a tar archive into a directory inside the container."""
+        ...
+
+    def list_session_containers(self) -> tuple[DockerSessionContainer, ...]:
+        """List containers labeled as Kortny sandbox sessions."""
+        ...
+
+    def remove_session_container(self, container_id: str) -> str | None:
+        """Force-remove one session container; return an error string if any."""
         ...
 
 
@@ -266,6 +400,407 @@ class DockerApiClient:
                 container_id=container_id,
             )
             cleanup_error = cleanup_error or remove_error
+
+
+    def create_session_container(
+        self, spec: DockerSessionCreateSpec
+    ) -> DockerSessionCreateResult:
+        """Create and start one hardened long-lived session container."""
+
+        if not self.docker_host.strip():
+            return DockerSessionCreateResult(
+                ok=False,
+                status="docker_host_missing",
+                error_type="DockerHostMissing",
+                error="DOCKER_HOST is not configured.",
+            )
+
+        base_url = _docker_host_base_url(self.docker_host)
+        container_id: str | None = None
+        try:
+            create_response = httpx.post(
+                f"{base_url}/containers/create",
+                json=_session_create_payload(spec),
+                timeout=self.timeout_seconds,
+            )
+            create_payload = create_response.json() if create_response.content else {}
+            if not create_response.is_success:
+                return DockerSessionCreateResult(
+                    ok=False,
+                    status="session_create_failed",
+                    status_code=create_response.status_code,
+                    error=_docker_error_text(
+                        response=create_response, payload=create_payload
+                    ),
+                )
+            if not isinstance(create_payload, dict) or not isinstance(
+                create_payload.get("Id"), str
+            ):
+                return DockerSessionCreateResult(
+                    ok=False,
+                    status="session_create_failed",
+                    status_code=create_response.status_code,
+                    error_type="DockerResponseInvalid",
+                    error="Docker create response did not include a container id.",
+                )
+            container_id = create_payload["Id"]
+
+            start_response = httpx.post(
+                f"{base_url}/containers/{container_id}/start",
+                timeout=self.timeout_seconds,
+            )
+            if not start_response.is_success:
+                self.remove_session_container(container_id)
+                return DockerSessionCreateResult(
+                    ok=False,
+                    status="session_start_failed",
+                    container_id=container_id,
+                    status_code=start_response.status_code,
+                    error=_docker_error_text(response=start_response, payload=None),
+                )
+            return DockerSessionCreateResult(
+                ok=True,
+                status="running",
+                container_id=container_id,
+                status_code=start_response.status_code,
+            )
+        except Exception as exc:
+            if container_id:
+                self.remove_session_container(container_id)
+            return DockerSessionCreateResult(
+                ok=False,
+                status="docker_api_error",
+                container_id=container_id,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+
+    def exec_in_container(
+        self,
+        container_id: str,
+        command: tuple[str, ...],
+        *,
+        workdir: str,
+        timeout_seconds: int,
+        max_output_bytes: int = 65536,
+    ) -> DockerExecResult:
+        """Run one command in a running session container via the exec API."""
+
+        if not self.docker_host.strip():
+            return DockerExecResult(
+                ok=False,
+                status="docker_host_missing",
+                error_type="DockerHostMissing",
+                error="DOCKER_HOST is not configured.",
+            )
+
+        base_url = _docker_host_base_url(self.docker_host)
+        started_at = monotonic()
+        try:
+            exec_create = httpx.post(
+                f"{base_url}/containers/{container_id}/exec",
+                json={
+                    "AttachStdout": True,
+                    "AttachStderr": True,
+                    "Tty": False,
+                    "Cmd": list(command),
+                    "WorkingDir": workdir,
+                },
+                timeout=self.timeout_seconds,
+            )
+            exec_payload = exec_create.json() if exec_create.content else {}
+            if not exec_create.is_success or not isinstance(
+                exec_payload.get("Id"), str
+            ):
+                return DockerExecResult(
+                    ok=False,
+                    status="exec_create_failed",
+                    duration_ms=_elapsed_ms(started_at),
+                    status_code=exec_create.status_code,
+                    error=_docker_error_text(
+                        response=exec_create, payload=exec_payload
+                    ),
+                )
+            exec_id = exec_payload["Id"]
+
+            raw, truncated = _exec_start_stream(
+                base_url=base_url,
+                exec_id=exec_id,
+                timeout_seconds=timeout_seconds + 10,
+                max_output_bytes=max_output_bytes,
+            )
+            stdout, stderr = _demux_docker_stream(raw)
+
+            inspect_response = httpx.get(
+                f"{base_url}/exec/{exec_id}/json",
+                timeout=self.timeout_seconds,
+            )
+            inspect_payload = (
+                inspect_response.json() if inspect_response.content else {}
+            )
+            exit_code = (
+                inspect_payload.get("ExitCode")
+                if isinstance(inspect_payload, dict)
+                else None
+            )
+            if not isinstance(exit_code, int):
+                exit_code = None
+            timed_out = exit_code == 124
+            return DockerExecResult(
+                ok=exit_code == 0,
+                status=_exec_status(exit_code),
+                exit_code=exit_code,
+                stdout=stdout,
+                stderr=stderr,
+                duration_ms=_elapsed_ms(started_at),
+                timed_out=timed_out,
+                truncated=truncated,
+                status_code=inspect_response.status_code,
+            )
+        except httpx.TimeoutException as exc:
+            return DockerExecResult(
+                ok=False,
+                status="timed_out",
+                duration_ms=_elapsed_ms(started_at),
+                timed_out=True,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+        except Exception as exc:
+            return DockerExecResult(
+                ok=False,
+                status="docker_api_error",
+                duration_ms=_elapsed_ms(started_at),
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+
+    def get_archive(self, container_id: str, path: str) -> DockerArchiveResult:
+        """Fetch a tar archive of one path inside a session container."""
+
+        base_url = _docker_host_base_url(self.docker_host)
+        try:
+            response = httpx.get(
+                f"{base_url}/containers/{container_id}/archive",
+                params={"path": path},
+                timeout=30.0,
+            )
+            if not response.is_success:
+                return DockerArchiveResult(
+                    ok=False,
+                    status="archive_read_failed",
+                    status_code=response.status_code,
+                    error=response.text[:500],
+                )
+            return DockerArchiveResult(
+                ok=True,
+                status="succeeded",
+                content=response.content,
+                status_code=response.status_code,
+            )
+        except Exception as exc:
+            return DockerArchiveResult(
+                ok=False,
+                status="docker_api_error",
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+
+    def put_archive(
+        self, container_id: str, path: str, tar_bytes: bytes
+    ) -> DockerArchiveResult:
+        """Extract one tar archive into a directory inside a session container."""
+
+        base_url = _docker_host_base_url(self.docker_host)
+        try:
+            response = httpx.put(
+                f"{base_url}/containers/{container_id}/archive",
+                params={"path": path},
+                content=tar_bytes,
+                headers={"Content-Type": "application/x-tar"},
+                timeout=30.0,
+            )
+            if not response.is_success:
+                return DockerArchiveResult(
+                    ok=False,
+                    status="archive_write_failed",
+                    status_code=response.status_code,
+                    error=response.text[:500],
+                )
+            return DockerArchiveResult(
+                ok=True,
+                status="succeeded",
+                status_code=response.status_code,
+            )
+        except Exception as exc:
+            return DockerArchiveResult(
+                ok=False,
+                status="docker_api_error",
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+
+    def list_session_containers(self) -> tuple[DockerSessionContainer, ...]:
+        """List containers labeled as Kortny sandbox sessions."""
+
+        base_url = _docker_host_base_url(self.docker_host)
+        response = httpx.get(
+            f"{base_url}/containers/json",
+            params={
+                "all": "1",
+                "filters": json.dumps({"label": ["kortny.sandbox.kind=session"]}),
+            },
+            timeout=self.timeout_seconds,
+        )
+        if not response.is_success:
+            return ()
+        payload = response.json()
+        if not isinstance(payload, list):
+            return ()
+        containers: list[DockerSessionContainer] = []
+        for entry in payload:
+            if not isinstance(entry, dict):
+                continue
+            labels = entry.get("Labels") or {}
+            container_id = entry.get("Id")
+            if not isinstance(container_id, str) or not isinstance(labels, dict):
+                continue
+            containers.append(
+                DockerSessionContainer(
+                    container_id=container_id,
+                    session_id=str(labels.get("kortny.sandbox.session", "")),
+                    task_id=str(labels.get("kortny.sandbox.task", "")),
+                    created_at_epoch=int(entry.get("Created") or 0),
+                    running=entry.get("State") == "running",
+                )
+            )
+        return tuple(containers)
+
+    def remove_session_container(self, container_id: str) -> str | None:
+        """Force-remove one session container; return an error string if any."""
+
+        base_url = _docker_host_base_url(self.docker_host)
+        return _remove_container(base_url=base_url, container_id=container_id)
+
+
+def _exec_start_stream(
+    *,
+    base_url: str,
+    exec_id: str,
+    timeout_seconds: float,
+    max_output_bytes: int,
+) -> tuple[bytes, bool]:
+    """Start an exec and collect its multiplexed output, bounded."""
+
+    chunks: list[bytes] = []
+    collected = 0
+    truncated = False
+    with httpx.stream(
+        "POST",
+        f"{base_url}/exec/{exec_id}/start",
+        json={"Detach": False, "Tty": False},
+        timeout=timeout_seconds,
+    ) as response:
+        response.raise_for_status()
+        for chunk in response.iter_bytes():
+            if collected >= max_output_bytes:
+                truncated = True
+                break
+            if collected + len(chunk) > max_output_bytes:
+                chunk = chunk[: max_output_bytes - collected]
+                truncated = True
+            chunks.append(chunk)
+            collected += len(chunk)
+            if truncated:
+                break
+    return b"".join(chunks), truncated
+
+
+def _demux_docker_stream(raw: bytes) -> tuple[str, str]:
+    """Split a multiplexed Docker attach stream into stdout and stderr text."""
+
+    stdout = bytearray()
+    stderr = bytearray()
+    offset = 0
+    total = len(raw)
+    while offset + 8 <= total:
+        stream_type = raw[offset]
+        padding = raw[offset + 1 : offset + 4]
+        if stream_type not in (0, 1, 2) or padding != b"\x00\x00\x00":
+            # Not a multiplexed stream (TTY mode); treat the rest as stdout.
+            stdout.extend(raw[offset:])
+            offset = total
+            break
+        size = int.from_bytes(raw[offset + 4 : offset + 8], "big")
+        frame_end = min(offset + 8 + size, total)
+        frame = raw[offset + 8 : frame_end]
+        if stream_type == 2:
+            stderr.extend(frame)
+        else:
+            stdout.extend(frame)
+        offset += 8 + size
+    if offset < total:
+        stdout.extend(raw[offset:])
+    return (
+        stdout.decode("utf-8", errors="replace"),
+        stderr.decode("utf-8", errors="replace"),
+    )
+
+
+def _exec_status(exit_code: int | None) -> str:
+    if exit_code == 0:
+        return "succeeded"
+    if exit_code == 124:
+        return "timed_out"
+    return "failed"
+
+
+def _session_create_payload(spec: DockerSessionCreateSpec) -> JsonObject:
+    workspace_mb = max(spec.workspace_mb, 1)
+    workspace_tmpfs = (
+        f"rw,nosuid,nodev,size={workspace_mb * 1024 * 1024},mode=1777"
+    )
+    tmp_tmpfs = "rw,nosuid,nodev,size=268435456,mode=1777"
+    memory_bytes = spec.memory_mb * 1024 * 1024
+    return {
+        "Image": spec.image,
+        "Cmd": ["sleep", "infinity"],
+        "Env": [
+            f"{key}={value}"
+            for key, value in sorted(
+                {**spec.env, "HOME": f"{spec.workspace_path}/home"}.items()
+            )
+        ],
+        "WorkingDir": spec.workspace_path,
+        "Tty": False,
+        "OpenStdin": False,
+        "Labels": {
+            "kortny.sandbox": "true",
+            "kortny.sandbox.kind": "session",
+            "kortny.sandbox.session": spec.session_id,
+            "kortny.sandbox.task": spec.task_id,
+            "kortny.sandbox.profile": spec.profile,
+        },
+        "HostConfig": {
+            "AutoRemove": False,
+            "Binds": [],
+            "CapDrop": ["ALL"],
+            "Init": True,
+            "IpcMode": "private",
+            "Memory": memory_bytes,
+            "MemorySwap": memory_bytes,
+            "NanoCpus": _nano_cpus(spec.cpus),
+            "NetworkMode": "none",
+            "PidsLimit": spec.pids_limit,
+            "Privileged": False,
+            "ReadonlyRootfs": True,
+            "SecurityOpt": ["no-new-privileges"],
+            "Tmpfs": {
+                spec.workspace_path: workspace_tmpfs,
+                "/tmp": tmp_tmpfs,
+            },
+        },
+    }
 
 
 def _docker_host_base_url(docker_host: str) -> str:

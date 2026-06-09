@@ -19,6 +19,8 @@ from kortny.agent.runtime import CustomAgentRuntime
 from kortny.agent.thread_context import ThreadTranscriptProvider
 from kortny.approvals import (
     TOOL_APPROVAL_PROMPT_PURPOSE,
+    TOOL_APPROVAL_REACTION_INSTRUCTION,
+    ToolApprovalRequest,
     ToolApprovalRequired,
     approval_prompt_text,
 )
@@ -131,6 +133,8 @@ MEMORY_CONFIRMATION_PURPOSE = "memory_confirmation"
 PLANNED_WORKFLOW_PROGRESS_PURPOSE = "planned_progress_start"
 PLANNED_WORKFLOW_PROGRESS_TEXT = "Hang on, I'll check."
 PLANNED_WORKFLOW_PROGRESS_PROMPT_NAME = "kortny.planned_progress_status"
+TOOL_APPROVAL_PROMPT_SYNTHESIS_PROMPT_NAME = "kortny.tool_approval_prompt"
+TOOL_APPROVAL_PROMPT_RESPONSE_FORMAT: dict[str, str] = {"type": "json_object"}
 ADK_QUICK_FINAL_AUTHORS = frozenset(
     {
         "quick_response_agent",
@@ -1807,10 +1811,126 @@ class AgentTaskExecutor:
                 task_service=task_service,
             ).post_message(
                 SlackThread.from_task(task),
-                approval_prompt_text(approval.request),
+                self._approval_prompt_text(
+                    settings=settings,
+                    session=session,
+                    task=task,
+                    task_service=task_service,
+                    approval=approval,
+                ),
                 purpose=TOOL_APPROVAL_PROMPT_PURPOSE,
             ),
         )
+
+    def _approval_prompt_text(
+        self,
+        *,
+        settings: Settings,
+        session: Session,
+        task: Task,
+        task_service: TaskService,
+        approval: ToolApprovalRequired,
+    ) -> str:
+        fallback = approval_prompt_text(approval.request)
+        model_route = ModelRouter(settings).route_for_tier(
+            ModelRouteTier.cheap_fast,
+            reason="tool_approval_prompt",
+        )
+        try:
+            provider: LLMProvider
+            if self.llm_provider is None:
+                selection = self._select_runtime_model(
+                    settings=settings,
+                    session=session,
+                    task=task,
+                    model_route=model_route,
+                )
+                model_route = selection.model_route
+                provider = create_provider_for_selection(
+                    settings=settings,
+                    selection=selection,
+                )
+                provider_name: DbLLMProvider | str = selection.provider_name
+            else:
+                provider = self.llm_provider
+                provider_name = self.provider_name or DbLLMProvider(
+                    settings.llm_provider.value
+                )
+
+            completion = LLMService(
+                session=session,
+                provider=provider,
+                provider_name=provider_name,
+                task_service=task_service,
+                model_route=model_route,
+            ).complete(
+                task_id=task.id,
+                messages=(
+                    ChatMessage(
+                        role="system",
+                        content=_tool_approval_prompt_system_prompt(),
+                    ),
+                    ChatMessage(
+                        role="user",
+                        content=json.dumps(
+                            _tool_approval_prompt_payload(
+                                task=task,
+                                request=approval.request,
+                                fallback=fallback,
+                            ),
+                            default=str,
+                            separators=(",", ":"),
+                            sort_keys=True,
+                        ),
+                    ),
+                ),
+                response_format=TOOL_APPROVAL_PROMPT_RESPONSE_FORMAT,
+                prompt_name=TOOL_APPROVAL_PROMPT_SYNTHESIS_PROMPT_NAME,
+            )
+            text = _tool_approval_prompt_from_completion(
+                completion.content,
+                fallback=fallback,
+            )
+            if text is None:
+                return fallback
+            task_service.append_event(
+                task,
+                TaskEventType.log,
+                {
+                    "message": "tool_approval_prompt_synthesized",
+                    "prompt_name": TOOL_APPROVAL_PROMPT_SYNTHESIS_PROMPT_NAME,
+                    "tool": approval.request.tool_name,
+                    "risk": approval.request.risk,
+                    "model_tier": ModelRouteTier.cheap_fast.value,
+                    "text_source": "llm",
+                },
+            )
+            return text
+        except Exception as exc:
+            task_service.append_event(
+                task,
+                TaskEventType.error,
+                {
+                    "message": "tool_approval_prompt_synthesis_failed",
+                    "prompt_name": TOOL_APPROVAL_PROMPT_SYNTHESIS_PROMPT_NAME,
+                    "tool": approval.request.tool_name,
+                    "risk": approval.request.risk,
+                    "model_tier": ModelRouteTier.cheap_fast.value,
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                },
+            )
+            log_observation(
+                logger,
+                "tool_approval_prompt_synthesis_failed",
+                task=task,
+                tool=approval.request.tool_name,
+                risk=approval.request.risk,
+                model_tier=ModelRouteTier.cheap_fast.value,
+                error_type=type(exc).__name__,
+                error_summary=str(exc)[:500],
+            )
+            return fallback
 
     def _record_planned_task_started(
         self,
@@ -3177,6 +3297,164 @@ def _planned_progress_text_from_completion(content: str | None) -> str | None:
     if any(term in lowered for term in blocked_terms):
         return None
     return text
+
+
+def _tool_approval_prompt_system_prompt() -> str:
+    return (
+        "You write Kortny's Slack approval request before a gated action. "
+        "Return JSON only with a `text` string. Write as Kortny in first person. "
+        "Use the user's request to make the approval note specific and natural. "
+        "Keep it under 450 characters before the reaction instruction. "
+        "Do not say the action is already done. Do not mention backend, model, "
+        "runtime, agent, tool ids, internal tool names, approval keys, account ids, "
+        "or raw implementation details. Do not quote full code or secrets. "
+        "For sandboxed_code_execution, mention a locked-down Python sandbox and "
+        "that it has no network or host filesystem access. No emoji. No markdown "
+        "headings. No em dash characters. End naturally, but do not include the "
+        "final reaction instruction because the system appends it."
+    )
+
+
+def _tool_approval_prompt_payload(
+    *,
+    task: Task,
+    request: ToolApprovalRequest,
+    fallback: str,
+) -> dict[str, Any]:
+    return {
+        "user_request": _compact_prompt_context(task.input, max_chars=1000),
+        "approval_scope": request.scope.value,
+        "risk": request.risk,
+        "reason": request.reason,
+        "argument_keys": list(request.argument_keys),
+        "argument_summary": _tool_approval_argument_summary(request),
+        "fallback_prompt": fallback,
+        "required_final_line": TOOL_APPROVAL_REACTION_INSTRUCTION,
+    }
+
+
+def _tool_approval_argument_summary(
+    request: ToolApprovalRequest,
+) -> dict[str, str]:
+    summary: dict[str, str] = {}
+    for key in request.argument_keys:
+        value = request.arguments.get(key)
+        normalized_key = key.casefold()
+        if normalized_key == "code" and isinstance(value, str):
+            summary[key] = f"Python snippet, {len(value)} chars"
+        elif _sensitive_argument_key(normalized_key):
+            summary[key] = "redacted"
+        elif isinstance(value, str) and len(value) <= 80:
+            summary[key] = value
+        elif isinstance(value, (bool, int, float)):
+            summary[key] = str(value)
+        else:
+            summary[key] = "present"
+    return summary
+
+
+def _sensitive_argument_key(key: str) -> bool:
+    return any(
+        marker in key
+        for marker in (
+            "api",
+            "auth",
+            "credential",
+            "key",
+            "password",
+            "secret",
+            "token",
+        )
+    )
+
+
+def _compact_prompt_context(value: str, *, max_chars: int) -> str:
+    text = " ".join(value.split())
+    if len(text) <= max_chars:
+        return text
+    return f"{text[: max_chars - 3].rstrip()}..."
+
+
+def _tool_approval_prompt_from_completion(
+    content: str | None,
+    *,
+    fallback: str,
+) -> str | None:
+    del fallback
+    if not content:
+        return None
+    try:
+        payload = json.loads(_extract_json_object(content))
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    raw_text = payload.get("text")
+    if not isinstance(raw_text, str):
+        return None
+    body = _sanitize_tool_approval_prompt_body(raw_text)
+    if body is None:
+        return None
+    return f"{body}\n\n{TOOL_APPROVAL_REACTION_INSTRUCTION}"
+
+
+def _sanitize_tool_approval_prompt_body(text: str) -> str | None:
+    text = normalize_slack_mrkdwn(text)
+    text = text.replace("\u2014", ", ").replace("\u2013", "-")
+    lines = []
+    for raw_line in text.splitlines():
+        line = " ".join(raw_line.strip().strip('"').split())
+        if not line:
+            continue
+        if line.startswith("#"):
+            return None
+        if "React with :white_check_mark:" in line:
+            continue
+        if ":no_entry_sign:" in line and "skip" in line.casefold():
+            continue
+        lines.append(line)
+    body = "\n".join(lines).strip()
+    if len(body) < 20 or len(body) > 600:
+        return None
+    lowered = body.casefold()
+    blocked_terms = (
+        "actual tool",
+        "agent",
+        "approval key",
+        "backend",
+        "cheap_fast",
+        "code_exec",
+        "guidelines",
+        "i should",
+        "llm",
+        "model",
+        "runtime",
+        "the user",
+        "tool id",
+        "tool name",
+        "tool_approval",
+    )
+    if any(term in lowered for term in blocked_terms):
+        return None
+    return body
+
+
+def _extract_json_object(content: str) -> str:
+    stripped = content.strip()
+    if stripped.startswith("```"):
+        lines = stripped.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]
+        stripped = "\n".join(lines).strip()
+    if stripped.startswith("{") and stripped.endswith("}"):
+        return stripped
+    start = stripped.find("{")
+    end = stripped.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        raise ValueError("No JSON object found")
+    return stripped[start : end + 1]
 
 
 def _intent_needs_no_external_tools(decision: dict[str, Any]) -> bool:

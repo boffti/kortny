@@ -1197,7 +1197,10 @@ def test_worker_registry_exposes_integration_inventory_for_capability_lookup(
         },
     )
     db_session.commit()
-    settings = build_settings(composio_api_key="composio-key")
+    settings = build_settings(
+        composio_api_key="composio-key",
+        sandbox_runner_url="http://sandbox-runner:8090",
+    )
     composio_client = FakeComposioClient()
 
     registry = AgentTaskExecutor(
@@ -1226,6 +1229,7 @@ def test_worker_registry_exposes_integration_inventory_for_capability_lookup(
         "Slack actions",
         "Scheduled work",
         "Workspace knowledge",
+        "Sandboxed code checks",
     }
     assert "Runtime" not in {
         group["label"] for group in user_summary["capability_groups"]
@@ -1249,8 +1253,15 @@ def test_worker_registry_exposes_integration_inventory_for_capability_lookup(
         "slack_lookup_canvas_sections",
         "slack_edit_canvas",
         "slack_file_read",
+        "code_exec",
         "describe_tools",
     }
+    code_exec = next(tool for tool in native_tools if tool["name"] == "code_exec")
+    assert code_exec["category"] == "Execution"
+    assert code_exec["approval"] == "user_approval"
+    assert code_exec["sandbox"]["requires_sandbox"] is True
+    assert code_exec["sandbox"]["network"] == "none"
+    assert code_exec["required_env_vars"] == ["KORTNY_SANDBOX_RUNNER_URL"]
     web_search = next(tool for tool in native_tools if tool["name"] == "web_search")
     assert web_search["category"] == "Research"
     assert web_search["side_effect"] == "read"
@@ -1266,6 +1277,71 @@ def test_worker_registry_exposes_integration_inventory_for_capability_lookup(
         event.payload.get("message") == "external_tool_selection_skipped"
         and event.payload.get("reason") == "intent_no_external_tools"
         and event.payload.get("classification") == "task_request"
+        for event in task_events(db_session, task)
+    )
+    assert not any(
+        event.payload.get("message") == "native_tool_unavailable"
+        and event.payload.get("tool") == "code_exec"
+        for event in task_events(db_session, task)
+    )
+
+
+def test_worker_registry_omits_code_exec_when_sandbox_runner_is_unconfigured(
+    db_session: Session,
+    tmp_path: Path,
+) -> None:
+    task = create_task(db_session, slack_channel_id="CAlpha", slack_user_id="UAneesh")
+    task.input = "What tools do you have?"
+    task_service = TaskService(db_session)
+    task_service.append_event(
+        task,
+        TaskEventType.log,
+        {
+            "message": "intent_classification_completed",
+            "source": "app_mention",
+            "decision": {
+                "addressed_to_kortny": True,
+                "classification": "task_request",
+                "confidence": 0.95,
+                "should_create_task": True,
+                "should_ack_with_reaction": False,
+                "needs_channel_context": False,
+                "needs_thread_context": False,
+                "needs_file_context": False,
+                "likely_tools": ["describe_tools"],
+                "model_tier": "cheap",
+                "reason": "Capability lookup.",
+            },
+        },
+    )
+    db_session.commit()
+    settings = build_settings(composio_api_key="composio-key")
+
+    registry = AgentTaskExecutor(
+        settings=settings,
+        web_search_tool=StaticWebSearchTool(),
+        composio_client=FakeComposioClient(),
+    )._build_registry(
+        settings=settings,
+        session=db_session,
+        task=task,
+        task_service=task_service,
+        working_dir=tmp_path,
+    )
+
+    result = registry.invoke("describe_tools", {})
+    native_tools = result.output["native_tools"]
+
+    assert "code_exec" not in registry.names()
+    assert "code_exec" not in {tool["name"] for tool in native_tools}
+    assert "Sandboxed code checks" not in {
+        group["label"]
+        for group in result.output["user_facing_summary"]["capability_groups"]
+    }
+    assert any(
+        event.payload.get("message") == "native_tool_unavailable"
+        and event.payload.get("tool") == "code_exec"
+        and event.payload.get("reason") == "missing_sandbox_runner_url"
         for event in task_events(db_session, task)
     )
 
@@ -1393,22 +1469,27 @@ def build_settings(
     *,
     composio_api_key: str = "composio-key",
     brave_search_api_key: str | None = "test-brave-key",
+    sandbox_runner_url: str | None = None,
     tool_selector_max_external_candidates: int | None = None,
 ) -> Settings:
     assert TEST_POSTGRES_URL is not None
-    return Settings(
-        SLACK_BOT_TOKEN="xoxb-test-token",
-        SLACK_APP_TOKEN="xapp-test-token",
-        SLACK_SIGNING_SECRET="test-signing-secret",
-        LLM_PROVIDER=SettingsLLMProvider.openrouter,
-        LLM_API_KEY="test-llm-key",
-        LLM_MODEL="openai/gpt-5.4-mini",
-        COMPOSIO_API_KEY=composio_api_key,
-        TOOL_SELECTOR_MAX_EXTERNAL_CANDIDATES=tool_selector_max_external_candidates
-        or 24,
-        BRAVE_SEARCH_API_KEY=brave_search_api_key,
-        POSTGRES_URL=TEST_POSTGRES_URL,
-    )
+    kwargs: dict[str, Any] = {
+        "SLACK_BOT_TOKEN": "xoxb-test-token",
+        "SLACK_APP_TOKEN": "xapp-test-token",
+        "SLACK_SIGNING_SECRET": "test-signing-secret",
+        "LLM_PROVIDER": SettingsLLMProvider.openrouter,
+        "LLM_API_KEY": "test-llm-key",
+        "LLM_MODEL": "openai/gpt-5.4-mini",
+        "COMPOSIO_API_KEY": composio_api_key,
+        "TOOL_SELECTOR_MAX_EXTERNAL_CANDIDATES": (
+            tool_selector_max_external_candidates or 24
+        ),
+        "BRAVE_SEARCH_API_KEY": brave_search_api_key,
+        "POSTGRES_URL": TEST_POSTGRES_URL,
+    }
+    if sandbox_runner_url is not None:
+        kwargs["KORTNY_SANDBOX_RUNNER_URL"] = sandbox_runner_url
+    return Settings(**kwargs)
 
 
 class FakeComposioClient:

@@ -27,6 +27,9 @@ TOOL_APPROVAL_WAITING_MESSAGE = "tool_approval_waiting"
 TOOL_APPROVAL_DECISION_MESSAGE = "tool_approval_decision"
 TOOL_APPROVAL_PROMPT_PURPOSE = "tool_approval_request"
 TOOL_APPROVAL_REJECTED_PURPOSE = "tool_approval_rejected"
+TOOL_APPROVAL_REACTION_INSTRUCTION = (
+    "React with :white_check_mark: to approve, or :no_entry_sign: to skip it."
+)
 
 
 class ApprovalScope(StrEnum):
@@ -187,11 +190,23 @@ def approval_prompt_text(request: ToolApprovalRequest) -> str:
     """Render a Slack-native approval prompt."""
 
     args = ", ".join(request.argument_keys) or "none"
+    if (
+        request.tool_name == "code_exec"
+        and request.risk == "sandboxed_code_execution"
+    ):
+        return (
+            "I can check this in a locked-down Python sandbox. Please approve "
+            "before I run it.\n"
+            "*Safety:* no network, no package installs, and no access to the "
+            "host filesystem.\n"
+            f"*Inputs:* {args}\n\n"
+            f"{TOOL_APPROVAL_REACTION_INSTRUCTION}"
+        )
     return (
         f"I need your approval before I run *{request.tool_name}*.\n"
         f"*Why:* {request.reason}\n"
         f"*Arguments:* {args}\n\n"
-        "React with :white_check_mark: to approve, or :no_entry_sign: to skip it."
+        f"{TOOL_APPROVAL_REACTION_INSTRUCTION}"
     )
 
 

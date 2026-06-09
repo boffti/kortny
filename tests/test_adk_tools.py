@@ -7,9 +7,14 @@ from typing import Any, cast
 import pytest
 
 from kortny.agent.adk_tools import KortnyAdkTool, KortnyRegistryToolset
-from kortny.approvals import TOOL_APPROVAL_REQUIRED_MESSAGE, ToolApprovalRequired
+from kortny.approvals import (
+    TOOL_APPROVAL_REQUIRED_MESSAGE,
+    ToolApprovalRequired,
+    approval_prompt_text,
+)
 from kortny.db.models import TaskEventType
 from kortny.tools import ToolRegistry
+from kortny.tools.code_exec import CodeExecTool
 from kortny.tools.types import JsonObject, ToolResult
 
 
@@ -61,6 +66,136 @@ def test_adk_tool_enforces_existing_approval_policy() -> None:
             },
         )
     ]
+
+
+def test_adk_code_exec_requires_user_approval_before_running() -> None:
+    task_service = _RecordingTaskService()
+    adapter = KortnyAdkTool(
+        tool=CodeExecTool(
+            runner=_FailingSandboxRunner(),
+            image="python:3.11-slim",
+        ),
+        task=cast(Any, SimpleNamespace(id=uuid.uuid4())),
+        session=cast(Any, _NoApprovalSession()),
+        task_service=cast(Any, task_service),
+    )
+
+    with pytest.raises(ToolApprovalRequired) as exc:
+        asyncio.run(
+            adapter.run_async(
+                args={
+                    "code": "print(6 * 7)",
+                    "language": "python",
+                    "timeout_seconds": 5,
+                },
+                tool_context=cast(
+                    Any,
+                    SimpleNamespace(function_call_id="call-code-exec"),
+                ),
+            )
+        )
+
+    assert exc.value.request.tool_name == "code_exec"
+    assert exc.value.request.scope == "user"
+    assert exc.value.request.risk == "sandboxed_code_execution"
+    assert exc.value.request.argument_keys == (
+        "code",
+        "language",
+        "timeout_seconds",
+    )
+    assert task_service.events == [
+        (
+            TaskEventType.log,
+            {
+                "message": TOOL_APPROVAL_REQUIRED_MESSAGE,
+                "runtime": "adk",
+                "turn": 1,
+                "step_id": "adk_tool_call",
+                "request": exc.value.request.to_payload(),
+            },
+        )
+    ]
+
+
+def test_code_exec_approval_prompt_is_human_readable_and_sandbox_specific() -> None:
+    task_service = _RecordingTaskService()
+    adapter = KortnyAdkTool(
+        tool=CodeExecTool(
+            runner=_FailingSandboxRunner(),
+            image="python:3.11-slim",
+        ),
+        task=cast(Any, SimpleNamespace(id=uuid.uuid4())),
+        session=cast(Any, _NoApprovalSession()),
+        task_service=cast(Any, task_service),
+    )
+
+    with pytest.raises(ToolApprovalRequired) as exc:
+        asyncio.run(
+            adapter.run_async(
+                args={"code": "print('hello')"},
+                tool_context=cast(
+                    Any,
+                    SimpleNamespace(function_call_id="call-code-prompt"),
+                ),
+            )
+        )
+
+    prompt = approval_prompt_text(exc.value.request)
+
+    assert "locked-down Python sandbox" in prompt
+    assert "Please approve before I run it." in prompt
+    assert "no network" in prompt
+    assert "no access to the host filesystem" in prompt
+    assert "*code_exec*" not in prompt
+    assert "React with :white_check_mark:" in prompt
+
+
+def test_adk_code_exec_runs_after_user_approval_is_recorded() -> None:
+    task_service = _RecordingTaskService()
+    runner = _SuccessfulSandboxRunner(stdout="42\n")
+    adapter = KortnyAdkTool(
+        tool=CodeExecTool(
+            runner=runner,
+            image="python:3.11-slim",
+        ),
+        task=cast(Any, _fake_task()),
+        session=cast(Any, _ApprovalGrantedSession()),
+        task_service=cast(Any, task_service),
+    )
+
+    result = asyncio.run(
+        adapter.run_async(
+            args={
+                "code": "print(6 * 7)",
+                "language": "python",
+                "timeout_seconds": 5,
+            },
+            tool_context=cast(
+                Any,
+                SimpleNamespace(function_call_id="call-code-approved"),
+            ),
+        )
+    )
+
+    assert runner.spec is not None
+    assert runner.spec.command == ("python", "-c", "print(6 * 7)")
+    assert runner.spec.network == "none"
+    assert result["output"]["successful"] is True
+    assert result["output"]["stdout"] == "42\n"
+    assert [event_type for event_type, _payload in task_service.events] == [
+        TaskEventType.log,
+        TaskEventType.tool_call,
+        TaskEventType.tool_result,
+    ]
+    assert task_service.events[0][1]["message"] == "tool_approval_previously_granted"
+    assert task_service.events[1][1]["tool"] == "code_exec"
+    assert task_service.events[1][1]["argument_keys"] == [
+        "code",
+        "language",
+        "timeout_seconds",
+    ]
+    assert task_service.events[2][1]["tool"] == "code_exec"
+    assert task_service.events[2][1]["output"]["stdout"] == "42\n"
 
 
 def test_adk_tool_returns_recoverable_result_for_tool_exception() -> None:
@@ -170,6 +305,29 @@ class _TimeoutTool:
         raise RuntimeError("The read operation timed out")
 
 
+class _FailingSandboxRunner:
+    def run(self, spec: object) -> object:
+        del spec
+        raise AssertionError("code_exec should pause for approval before running")
+
+
+class _SuccessfulSandboxRunner:
+    def __init__(self, *, stdout: str) -> None:
+        self.stdout = stdout
+        self.spec: Any | None = None
+
+    def run(self, spec: object) -> SimpleNamespace:
+        self.spec = spec
+        return SimpleNamespace(
+            exit_code=0,
+            stdout=self.stdout,
+            stderr="",
+            artifacts=(),
+            usage={"duration_ms": 1},
+            events=(),
+        )
+
+
 def _fake_task() -> SimpleNamespace:
     return SimpleNamespace(
         id=uuid.uuid4(),
@@ -184,6 +342,12 @@ class _NoApprovalSession:
     def scalar(self, statement: object) -> None:
         del statement
         return None
+
+
+class _ApprovalGrantedSession:
+    def scalar(self, statement: object) -> SimpleNamespace:
+        del statement
+        return SimpleNamespace(payload={"decision": "approved"})
 
 
 class _RecordingTaskService:

@@ -21,6 +21,9 @@ from kortny.approvals import (
     TOOL_APPROVAL_PROMPT_PURPOSE,
     TOOL_APPROVAL_REQUIRED_MESSAGE,
     TOOL_APPROVAL_WAITING_MESSAGE,
+    ApprovalScope,
+    ToolApprovalRequest,
+    ToolApprovalRequired,
 )
 from kortny.config.settings import LLMProvider as SettingsLLMProvider
 from kortny.config.settings import Settings
@@ -546,6 +549,83 @@ def test_worker_posts_approval_prompt_for_sensitive_tool(
         "running",
         "waiting_approval",
     ]
+
+
+def test_worker_synthesizes_approval_prompt_with_cheap_fast_model(
+    db_session: Session,
+) -> None:
+    task = create_task(db_session, event_id="EvApprovalPromptSynthesis")
+    task.input = "Can you verify the gross margin percentage with a quick code check?"
+    task_service = TaskService(db_session)
+    settings = make_settings()
+    slack_client = FakeSlackClient()
+    provider = FakeAgentProvider(
+        [
+            Completion(
+                content=json.dumps(
+                    {
+                        "text": (
+                            "I can verify that in a locked-down Python sandbox before "
+                            "I run it.\n*Safety:* no network or host filesystem access."
+                        )
+                    }
+                ),
+                tool_calls=(),
+                usage=TokenUsage(input_tokens=120, output_tokens=40),
+                cost_usd=Decimal("0.0001"),
+                model="openai/gpt-4o-mini",
+            )
+        ]
+    )
+    request = ToolApprovalRequest(
+        approval_key="code_exec:abc123",
+        tool_name="code_exec",
+        tool_call_id="call-code",
+        normalized_args_hash="abc123",
+        argument_keys=("code", "language", "timeout_seconds"),
+        scope=ApprovalScope.user,
+        reason="code_exec can execute code in Kortny's isolated sandbox.",
+        risk="sandboxed_code_execution",
+        arguments={
+            "code": "print((128.4 - 91.7) / 128.4 * 100)",
+            "language": "python",
+            "timeout_seconds": 5,
+        },
+    )
+
+    AgentTaskExecutor(
+        settings=settings,
+        llm_provider=provider,
+        provider_name=LLMProvider.openrouter,
+        slack_client=slack_client,
+    )._post_approval_request(
+        settings=settings,
+        session=db_session,
+        task=task,
+        task_service=task_service,
+        approval=ToolApprovalRequired(request),
+    )
+
+    assert len(slack_client.messages) == 1
+    posted_text = slack_client.messages[0]["text"]
+    assert "locked-down Python sandbox" in posted_text
+    assert "no network or host filesystem access" in posted_text
+    assert "React with :white_check_mark:" in posted_text
+    assert "code_exec" not in posted_text
+    assert "print((128.4 - 91.7)" not in provider.calls[0][0][1].content
+    assert provider.calls[0][2] == {"type": "json_object"}
+    events = task_events(db_session, task)
+    assert any(
+        event.payload.get("message") == "tool_approval_prompt_synthesized"
+        and event.payload.get("model_tier") == "cheap_fast"
+        and event.payload.get("tool") == "code_exec"
+        for event in events
+    )
+    assert any(
+        event.type is TaskEventType.llm_call
+        and event.payload.get("prompt_name") == "kortny.tool_approval_prompt"
+        for event in events
+    )
 
 
 def test_agent_executor_falls_back_when_artifact_comment_generation_fails(

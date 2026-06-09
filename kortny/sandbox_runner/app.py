@@ -1,4 +1,4 @@
-"""Internal FastAPI app for sandbox-runner health and smoke checks."""
+"""Internal FastAPI app for sandbox-runner health checks and execution."""
 
 from __future__ import annotations
 
@@ -54,7 +54,7 @@ class SandboxRunnerSettings:
                 pids_limit=self.default_pids_limit,
                 timeout_seconds=self.default_timeout_seconds,
             ),
-            reason="Sandbox-runner profile smoke check; execution is disabled in this slice.",
+            reason="Default sandbox-runner policy for isolated code execution.",
         )
 
 
@@ -82,11 +82,7 @@ class SandboxResourceLimitsRequest(BaseModel):
 
 
 class SandboxRunRequest(BaseModel):
-    """Validated worker-facing sandbox run request.
-
-    This contract is intentionally non-executing until a later slice enables
-    container creation behind `KORTNY_SANDBOX_EXECUTION_ENABLED`.
-    """
+    """Validated worker-facing sandbox run request."""
 
     image: str = Field(min_length=1, max_length=256)
     command: list[str] = Field(min_length=1, max_length=64)
@@ -247,10 +243,7 @@ def create_app(
                 "execution_enabled": False,
                 "execution_attempted": False,
                 "status": "execution_disabled",
-                "reason": (
-                    "Sandbox execution is not enabled. This endpoint currently "
-                    "validates the request contract only."
-                ),
+                "reason": ("Sandbox execution is not enabled for this runner."),
                 "request": request.redacted_payload(),
             }
         if request.image != resolved_settings.default_image:

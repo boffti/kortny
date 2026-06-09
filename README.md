@@ -270,6 +270,45 @@ Scheduled work is still owned by Kortny/Postgres in this local stack. The
 `scheduler` service materializes due `schedules` rows into normal `tasks` rows;
 Temporal Schedules are deferred until Temporal runs with production persistence.
 
+### Sandboxed code execution
+
+Kortny starts an internal `sandbox-runner` service by default. The worker never
+mounts the Docker socket directly; it calls the runner over the Compose network,
+and the runner talks to Docker through `sandbox-docker-proxy`.
+
+The first sandboxed tool is `code_exec`, a short Python execution tool for
+calculations and tiny script checks. It is available to regular employees when
+the runner is healthy, but every run requires requester approval in Slack before
+execution.
+
+Default sandbox policy:
+
+- Runtime: hardened Docker container launched by `sandbox-runner`.
+- Image: `ghcr.io/astral-sh/uv:python3.11-bookworm-slim`.
+- Network: disabled with `NetworkMode=none`.
+- Filesystem: no host bind mount for user code; the container gets tmpfs
+  workspace paths.
+- Privileges: no privileged mode, `no-new-privileges`, all capabilities dropped,
+  readonly root filesystem.
+- Limits: 1 CPU, 512 MB memory, 128 PID cap, 60 second runner default timeout.
+- Audit: sandbox lifecycle and bounded stdout/stderr result previews are written
+  to the task timeline.
+
+This replaces the earlier "temp dir plus process" direction for untrusted code.
+There was no previous production `code_exec` subprocess baseline in Kortny:
+fixed tools like PDF generation used trusted in-process library calls. The
+current benchmark baseline is therefore operational, not feature parity against
+an old code tool: the normal Compose path starts the runner, the worker-to-runner
+HTTP bridge executes a small Python smoke check in a sibling sandbox container,
+and the runner cleans up containers after execution.
+
+To disable sandbox execution while leaving the service visible for health
+checks:
+
+```
+KORTNY_SANDBOX_EXECUTION_ENABLED=false
+```
+
 ### 5. Invite your bot to a channel
 
 Once the Slack ingress service is running:

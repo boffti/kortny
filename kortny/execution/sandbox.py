@@ -1,7 +1,8 @@
-"""Sandbox execution contracts.
+"""Sandbox execution contracts and task-event helpers.
 
-This module intentionally defines contracts only. The Docker-backed runner lands
-in a later slice so current tools keep their in-process behavior.
+The worker uses these contracts to call the internal sandbox-runner service for
+tools that execute untrusted code. Fixed in-process tools can still stay outside
+the sandbox when their metadata does not require sandboxing.
 """
 
 from __future__ import annotations

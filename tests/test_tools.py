@@ -128,7 +128,16 @@ def test_native_tool_surfaces_are_derived_from_metadata() -> None:
     )
     assert native_tool_names_by_approval("self_gated") == frozenset({"remember_fact"})
     assert native_tool_names_by_approval("user_approval") == frozenset(
-        {"code_exec", "forget_fact"}
+        {
+            "code_exec",
+            "forget_fact",
+            "sandbox_bash",
+            "sandbox_write_file",
+            "sandbox_read_file",
+            "sandbox_export_artifact",
+            "sandbox_publish_preview",
+            "deploy_site",
+        }
     )
     assert native_tool_names_by_approval("admin_approval") == frozenset()
     assert integration_map == _TOOL_TO_INTEGRATION

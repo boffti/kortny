@@ -111,6 +111,30 @@ class Settings(BaseSettings):
         validation_alias="KORTNY_SANDBOX_DEFAULT_IMAGE",
         min_length=1,
     )
+    artifacts_dir: str | None = Field(
+        default=None,
+        validation_alias="KORTNY_ARTIFACTS_DIR",
+    )
+    public_base_url: str | None = Field(
+        default=None,
+        validation_alias="KORTNY_PUBLIC_BASE_URL",
+    )
+    preview_signing_secret: str | None = Field(
+        default=None,
+        validation_alias="KORTNY_PREVIEW_SIGNING_SECRET",
+    )
+    netlify_auth_token: str | None = Field(
+        default=None,
+        validation_alias="NETLIFY_AUTH_TOKEN",
+    )
+    vercel_token: str | None = Field(
+        default=None,
+        validation_alias="VERCEL_TOKEN",
+    )
+    vercel_team_id: str | None = Field(
+        default=None,
+        validation_alias="VERCEL_TEAM_ID",
+    )
     temporal_address: str = Field(
         default="temporal:7233",
         validation_alias="TEMPORAL_ADDRESS",
@@ -258,6 +282,12 @@ class Settings(BaseSettings):
         "kortny_release",
         "kortny_version",
         "sandbox_runner_url",
+        "artifacts_dir",
+        "public_base_url",
+        "preview_signing_secret",
+        "netlify_auth_token",
+        "vercel_token",
+        "vercel_team_id",
         mode="before",
     )
     @classmethod

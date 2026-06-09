@@ -109,6 +109,24 @@ class ToolApprovalPolicy:
         ):
             return NO_APPROVAL_REQUIRED
         if tool_name in USER_APPROVAL_NATIVE_TOOLS:
+            if tool_name in SANDBOX_WORKBENCH_TOOLS:
+                return ToolApprovalRequirement(
+                    scope=ApprovalScope.user,
+                    risk="sandboxed_code_execution",
+                    reason=(
+                        f"{tool.name} works inside Kortny's isolated sandbox "
+                        "workspace for this task."
+                    ),
+                )
+            if tool_name == "deploy_site":
+                return ToolApprovalRequirement(
+                    scope=ApprovalScope.user,
+                    risk="external_deployment",
+                    reason=(
+                        f"{tool.name} publishes files to an external hosting "
+                        "provider."
+                    ),
+                )
             if tool_name in SANDBOXED_CODE_NATIVE_TOOLS:
                 return ToolApprovalRequirement(
                     scope=ApprovalScope.user,
@@ -156,6 +174,16 @@ LOW_RISK_NATIVE_WRITE_TOOLS = low_risk_native_write_tool_names()
 USER_APPROVAL_NATIVE_TOOLS = native_tool_names_by_approval("user_approval")
 ADMIN_APPROVAL_NATIVE_TOOLS = native_tool_names_by_approval("admin_approval")
 SANDBOXED_CODE_NATIVE_TOOLS = frozenset({"code_exec"})
+SANDBOX_WORKBENCH_TOOLS = frozenset(
+    {
+        "sandbox_bash",
+        "sandbox_write_file",
+        "sandbox_read_file",
+        "sandbox_export_artifact",
+        "sandbox_publish_preview",
+    }
+)
+SANDBOX_WORKBENCH_APPROVAL_KEY = "sandbox_workbench:session"
 WRITE_VERBS = frozenset(
     {
         "add",
@@ -186,10 +214,39 @@ def approval_key(tool_name: str, normalized_args_hash: str) -> str:
     return f"{tool_name}:{normalized_args_hash}"
 
 
+def approval_key_for(tool_name: str, normalized_args_hash: str) -> str:
+    """Return the approval key, collapsing workbench tools to one session key.
+
+    All sandbox workbench tools share one approval per task: a single user
+    confirmation unlocks the whole sandbox workspace instead of prompting on
+    every command.
+    """
+
+    if tool_name.casefold() in SANDBOX_WORKBENCH_TOOLS:
+        return SANDBOX_WORKBENCH_APPROVAL_KEY
+    return approval_key(tool_name, normalized_args_hash)
+
+
 def approval_prompt_text(request: ToolApprovalRequest) -> str:
     """Render a Slack-native approval prompt."""
 
     args = ", ".join(request.argument_keys) or "none"
+    if request.tool_name in SANDBOX_WORKBENCH_TOOLS:
+        return (
+            "I need a sandboxed workspace to build and verify this. One "
+            "approval covers all sandbox commands for this task.\n"
+            "*Safety:* isolated container, no network, no host filesystem "
+            "access, CPU/memory capped, auto-removed when the task is done.\n"
+            f"*First step:* {request.tool_name} ({args})\n\n"
+            f"{TOOL_APPROVAL_REACTION_INSTRUCTION}"
+        )
+    if request.tool_name == "deploy_site" and request.risk == "external_deployment":
+        return (
+            "I'm ready to deploy this site to an external hosting provider. "
+            "Please approve before I publish.\n"
+            f"*Inputs:* {args}\n\n"
+            f"{TOOL_APPROVAL_REACTION_INSTRUCTION}"
+        )
     if (
         request.tool_name == "code_exec"
         and request.risk == "sandboxed_code_execution"

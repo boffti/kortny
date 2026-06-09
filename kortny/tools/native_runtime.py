@@ -11,14 +11,26 @@ from sqlalchemy.orm import Session
 
 from kortny.config import Settings
 from kortny.db.models import Task
-from kortny.execution import create_sandbox_runner_from_settings
+from kortny.execution import (
+    create_sandbox_runner_from_settings,
+    create_sandbox_session_client_from_settings,
+)
 from kortny.memory import WorkspaceStateService
 from kortny.tasks import TaskService
 from kortny.tools.catalog import dashboard_native_tool_names, runtime_native_tool_names
 from kortny.tools.code_exec import CodeExecTool
+from kortny.tools.deploy_site import DeploySiteTool
 from kortny.tools.list_integrations import DescribeToolsTool, ListIntegrationsTool
 from kortny.tools.pdf_generator import PdfGeneratorTool
 from kortny.tools.resolve_slack_identity import ResolveSlackIdentityTool
+from kortny.tools.sandbox_workbench import (
+    SandboxBashTool,
+    SandboxExportArtifactTool,
+    SandboxPublishPreviewTool,
+    SandboxReadFileTool,
+    SandboxWriteFileTool,
+    WorkbenchSession,
+)
 from kortny.tools.schedules import (
     CancelScheduleTool,
     CreateScheduleTool,
@@ -217,12 +229,134 @@ def _build_code_exec_tool(context: NativeToolBuildContext) -> Tool | None:
     )
 
 
+def _workbench_session(context: NativeToolBuildContext) -> WorkbenchSession | None:
+    client = create_sandbox_session_client_from_settings(context.settings)
+    if client is None:
+        return None
+    return WorkbenchSession(
+        client=client,
+        task=context.task,
+        task_service=context.task_service,
+    )
+
+
+def _log_workbench_unavailable(
+    context: NativeToolBuildContext, tool_name: str, reason: str
+) -> None:
+    context.task_service.append_event(
+        context.task,
+        "log",
+        {
+            "message": "native_tool_unavailable",
+            "tool": tool_name,
+            "reason": reason,
+            "env_var": "KORTNY_SANDBOX_RUNNER_URL",
+        },
+    )
+
+
+def _build_sandbox_bash_tool(context: NativeToolBuildContext) -> Tool | None:
+    workbench = _workbench_session(context)
+    if workbench is None:
+        _log_workbench_unavailable(
+            context, "sandbox_bash", "missing_sandbox_runner_url"
+        )
+        return None
+    return SandboxBashTool(workbench=workbench)
+
+
+def _build_sandbox_write_file_tool(context: NativeToolBuildContext) -> Tool | None:
+    workbench = _workbench_session(context)
+    if workbench is None:
+        return None
+    return SandboxWriteFileTool(workbench=workbench)
+
+
+def _build_sandbox_read_file_tool(context: NativeToolBuildContext) -> Tool | None:
+    workbench = _workbench_session(context)
+    if workbench is None:
+        return None
+    return SandboxReadFileTool(workbench=workbench)
+
+
+def _build_sandbox_export_artifact_tool(
+    context: NativeToolBuildContext,
+) -> Tool | None:
+    workbench = _workbench_session(context)
+    if workbench is None:
+        return None
+    return SandboxExportArtifactTool(
+        workbench=workbench,
+        working_dir=context.working_dir,
+        session=context.session,
+        task_id=context.task.id,
+        task_service=context.task_service,
+    )
+
+
+def _build_sandbox_publish_preview_tool(
+    context: NativeToolBuildContext,
+) -> Tool | None:
+    workbench = _workbench_session(context)
+    if workbench is None:
+        return None
+    settings = context.settings
+    if (
+        not settings.artifacts_dir
+        or not settings.public_base_url
+        or not settings.preview_signing_secret
+    ):
+        _log_workbench_unavailable(
+            context, "sandbox_publish_preview", "missing_preview_configuration"
+        )
+        return None
+    return SandboxPublishPreviewTool(
+        workbench=workbench,
+        artifacts_dir=Path(settings.artifacts_dir),
+        public_base_url=settings.public_base_url,
+        signing_secret=settings.preview_signing_secret,
+    )
+
+
+def _build_deploy_site_tool(context: NativeToolBuildContext) -> Tool | None:
+    settings = context.settings
+    if not settings.netlify_auth_token and not settings.vercel_token:
+        return None
+    workbench = _workbench_session(context)
+    if workbench is None:
+        return None
+    return DeploySiteTool(
+        workbench=workbench,
+        netlify_token=settings.netlify_auth_token,
+        vercel_token=settings.vercel_token,
+        vercel_team_id=settings.vercel_team_id,
+    )
+
+
 NATIVE_TOOL_REGISTRATIONS: tuple[NativeToolRegistration, ...] = (
     NativeToolRegistration("web_search", WebSearchTool, _build_web_search_tool),
     NativeToolRegistration(
         "pdf_generator", PdfGeneratorTool, _build_pdf_generator_tool
     ),
     NativeToolRegistration("code_exec", CodeExecTool, _build_code_exec_tool),
+    NativeToolRegistration("sandbox_bash", SandboxBashTool, _build_sandbox_bash_tool),
+    NativeToolRegistration(
+        "sandbox_write_file", SandboxWriteFileTool, _build_sandbox_write_file_tool
+    ),
+    NativeToolRegistration(
+        "sandbox_read_file", SandboxReadFileTool, _build_sandbox_read_file_tool
+    ),
+    NativeToolRegistration(
+        "sandbox_export_artifact",
+        SandboxExportArtifactTool,
+        _build_sandbox_export_artifact_tool,
+    ),
+    NativeToolRegistration(
+        "sandbox_publish_preview",
+        SandboxPublishPreviewTool,
+        _build_sandbox_publish_preview_tool,
+    ),
+    NativeToolRegistration("deploy_site", DeploySiteTool, _build_deploy_site_tool),
     NativeToolRegistration(
         "slack_channel_history",
         SlackChannelHistoryTool,

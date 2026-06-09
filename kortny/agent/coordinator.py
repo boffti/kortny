@@ -61,7 +61,7 @@ from kortny.approvals import (
     ToolApprovalPolicy,
     ToolApprovalRequest,
     ToolApprovalRequired,
-    approval_key,
+    approval_key_for,
 )
 from kortny.db.models import Task, TaskEvent, TaskEventType
 from kortny.llm import ChatMessage, Completion, ToolCall
@@ -1142,7 +1142,7 @@ class AgentCoordinator:
         if not requirement.required:
             return
 
-        key = approval_key(tool_call.name, attempt.normalized_args_hash)
+        key = approval_key_for(tool_call.name, attempt.normalized_args_hash)
         if self._approval_is_granted(task_obj, key):
             self._append_log(
                 task_obj,

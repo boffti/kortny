@@ -232,14 +232,33 @@ _USER_CAPABILITY_GROUPS: tuple[tuple[str, JsonObject], ...] = (
     (
         "Execution",
         {
-            "label": "Sandboxed code checks",
+            "label": "Sandboxed coding workbench",
             "summary": (
-                "When enabled and approved, I can run short Python snippets in "
-                "an isolated sandbox with no network or host filesystem access."
+                "When enabled and approved, I can write and run code in an "
+                "isolated sandbox workspace: build dashboards and small apps, "
+                "run data analysis, verify results by executing them, and "
+                "deliver files or shareable preview links. No network or host "
+                "filesystem access."
             ),
             "examples": [
-                "verify a small calculation",
-                "run a tiny self-contained Python script",
+                "build a dashboard or report from data",
+                "run an analysis and verify the numbers by executing code",
+                "generate a chart, CSV, or small static site",
+            ],
+        },
+    ),
+    (
+        "Deployment",
+        {
+            "label": "Site deployment",
+            "summary": (
+                "With a connected Netlify or Vercel token and your approval, "
+                "I can deploy a sandbox-built static site and share the live "
+                "URL."
+            ),
+            "examples": [
+                "deploy the dashboard we just built",
+                "publish this site to Netlify or Vercel",
             ],
         },
     ),

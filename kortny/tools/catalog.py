@@ -92,6 +92,19 @@ class ToolDescriptor:
         }
 
 
+_WORKBENCH_SANDBOX_POLICY = ToolSandboxPolicy(
+    requires_sandbox=True,
+    profile="workbench",
+    network="none",
+    resource_limits=SandboxResourceLimits(
+        cpus=2.0,
+        memory_mb=2048,
+        pids_limit=512,
+        timeout_seconds=300,
+    ),
+    reason="Workbench commands run in the task's persistent sandbox session.",
+)
+
 NATIVE_TOOL_METADATA: dict[str, ToolMetadata] = {
     "web_search": ToolMetadata(
         name="web_search",
@@ -393,6 +406,122 @@ NATIVE_TOOL_METADATA: dict[str, ToolMetadata] = {
                 timeout_seconds=30,
             ),
             reason="Untrusted code must run outside the worker process.",
+        ),
+    ),
+    "sandbox_bash": ToolMetadata(
+        name="sandbox_bash",
+        namespace="native.execution",
+        category="Execution",
+        display_name="Sandbox shell",
+        capabilities=(
+            "sandboxed_code_execution",
+            "shell_execution",
+            "build_and_test",
+        ),
+        side_effect="destructive",
+        approval="user_approval",
+        required_env_vars=("KORTNY_SANDBOX_RUNNER_URL",),
+        plan_gates=(
+            "requester_approval_required",
+            "sandbox_required",
+            "network_disabled",
+        ),
+        result_budget="bounded_stdout",
+        notes=(
+            "Runs shell commands in the task's persistent sandbox workspace.",
+            "One approval covers the whole sandbox workbench for the task.",
+        ),
+        sandbox=_WORKBENCH_SANDBOX_POLICY,
+    ),
+    "sandbox_write_file": ToolMetadata(
+        name="sandbox_write_file",
+        namespace="native.execution",
+        category="Execution",
+        display_name="Sandbox file writer",
+        capabilities=("sandboxed_code_execution", "file_generation"),
+        side_effect="write",
+        approval="user_approval",
+        required_env_vars=("KORTNY_SANDBOX_RUNNER_URL",),
+        plan_gates=("requester_approval_required", "sandbox_required"),
+        result_budget="normal",
+        notes=("Writes files into the task's sandbox workspace.",),
+        sandbox=_WORKBENCH_SANDBOX_POLICY,
+    ),
+    "sandbox_read_file": ToolMetadata(
+        name="sandbox_read_file",
+        namespace="native.execution",
+        category="Execution",
+        display_name="Sandbox file reader",
+        capabilities=("sandboxed_code_execution", "file_inspection"),
+        side_effect="read",
+        approval="user_approval",
+        required_env_vars=("KORTNY_SANDBOX_RUNNER_URL",),
+        plan_gates=("requester_approval_required", "sandbox_required"),
+        result_budget="large_text_compaction",
+        notes=("Reads files from the task's sandbox workspace.",),
+        sandbox=_WORKBENCH_SANDBOX_POLICY,
+    ),
+    "sandbox_export_artifact": ToolMetadata(
+        name="sandbox_export_artifact",
+        namespace="native.execution",
+        category="Execution",
+        display_name="Sandbox artifact export",
+        capabilities=(
+            "sandboxed_code_execution",
+            "artifact_generation",
+        ),
+        side_effect="write",
+        approval="user_approval",
+        required_env_vars=("KORTNY_SANDBOX_RUNNER_URL",),
+        plan_gates=("requester_approval_required", "sandbox_required"),
+        result_budget="artifact",
+        notes=(
+            "Exports sandbox files or zipped directories as task artifacts.",
+        ),
+        sandbox=_WORKBENCH_SANDBOX_POLICY,
+    ),
+    "sandbox_publish_preview": ToolMetadata(
+        name="sandbox_publish_preview",
+        namespace="native.execution",
+        category="Execution",
+        display_name="Sandbox preview publisher",
+        capabilities=(
+            "sandboxed_code_execution",
+            "artifact_generation",
+            "web_preview",
+        ),
+        side_effect="write",
+        approval="user_approval",
+        required_env_vars=(
+            "KORTNY_SANDBOX_RUNNER_URL",
+            "KORTNY_ARTIFACTS_DIR",
+            "KORTNY_PUBLIC_BASE_URL",
+            "KORTNY_PREVIEW_SIGNING_SECRET",
+        ),
+        plan_gates=("requester_approval_required", "sandbox_required"),
+        result_budget="normal",
+        notes=(
+            "Publishes static sites from the sandbox at signed preview URLs.",
+        ),
+        sandbox=_WORKBENCH_SANDBOX_POLICY,
+    ),
+    "deploy_site": ToolMetadata(
+        name="deploy_site",
+        namespace="native.deploy",
+        category="Deployment",
+        display_name="Site deployer",
+        capabilities=("site_deployment", "external_publishing"),
+        side_effect="destructive",
+        approval="user_approval",
+        plan_gates=(
+            "explicit_user_request_required",
+            "requester_approval_required",
+            "external_network",
+        ),
+        result_budget="normal",
+        notes=(
+            "Deploys sandbox-built static sites to Netlify or Vercel from "
+            "the trusted host; integration tokens never enter the sandbox.",
         ),
     ),
     "remember_fact": ToolMetadata(

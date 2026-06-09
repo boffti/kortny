@@ -31,7 +31,7 @@ from kortny.approvals import (
     ToolApprovalPolicy,
     ToolApprovalRequest,
     ToolApprovalRequired,
-    approval_key,
+    approval_key_for,
 )
 from kortny.db.models import Task, TaskEvent, TaskEventType
 from kortny.observability import log_observation
@@ -270,7 +270,7 @@ class KortnyAdkTool(BaseTool):
         if not requirement.required:
             return
 
-        key = approval_key(self.name, normalized_args_hash)
+        key = approval_key_for(self.name, normalized_args_hash)
         if self._approval_is_granted(key):
             self.task_service.append_event(
                 self.task,

@@ -107,7 +107,7 @@ class Settings(BaseSettings):
         validation_alias="KORTNY_SANDBOX_RUNNER_TIMEOUT_SECONDS",
     )
     sandbox_default_image: str = Field(
-        default="kortny/sandbox-python:latest",
+        default="ghcr.io/astral-sh/uv:python3.11-bookworm-slim",
         validation_alias="KORTNY_SANDBOX_DEFAULT_IMAGE",
         min_length=1,
     )

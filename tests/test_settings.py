@@ -28,6 +28,7 @@ SETTINGS_ENV_VARS = {
     "KORTNY_PLANNED_WORKFLOW_PROGRESS_UPDATES_ENABLED",
     "KORTNY_SANDBOX_RUNNER_URL",
     "KORTNY_SANDBOX_RUNNER_TIMEOUT_SECONDS",
+    "KORTNY_SANDBOX_DEFAULT_IMAGE",
     "KORTNY_WORKFLOW_BACKEND",
     "TEMPORAL_ADDRESS",
     "TEMPORAL_NAMESPACE",
@@ -105,7 +106,10 @@ def test_settings_loads_required_environment(monkeypatch: pytest.MonkeyPatch) ->
     assert settings.planned_workflow_max_total_tool_calls == 12
     assert settings.sandbox_runner_url is None
     assert settings.sandbox_runner_timeout_seconds == 70.0
-    assert settings.sandbox_default_image == "kortny/sandbox-python:latest"
+    assert (
+        settings.sandbox_default_image
+        == "ghcr.io/astral-sh/uv:python3.11-bookworm-slim"
+    )
     assert settings.workflow_backend == "inline"
     assert settings.temporal_address == "temporal:7233"
     assert settings.temporal_namespace == "default"

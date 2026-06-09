@@ -104,8 +104,9 @@ class CodeExecTool:
                 code="sandbox_service_unavailable",
                 message="The code execution sandbox is not configured for this worker.",
                 hint=(
-                    "Start the sandbox profile and set KORTNY_SANDBOX_RUNNER_URL "
-                    "before asking Kortny to run code."
+                    "Ensure the sandbox-runner service is healthy and "
+                    "KORTNY_SANDBOX_RUNNER_URL is configured before asking "
+                    "Kortny to run code."
                 ),
                 details={"execution_attempted": False},
             )

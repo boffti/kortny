@@ -36,7 +36,7 @@ def test_code_exec_runs_python_through_sandbox_runner_and_records_events() -> No
     task_service = RecordingTaskService()
     tool = CodeExecTool(
         runner=runner,
-        image="kortny/sandbox-python:latest",
+        image="ghcr.io/astral-sh/uv:python3.11-bookworm-slim",
         task=task,
         task_service=task_service,
     )
@@ -47,7 +47,7 @@ def test_code_exec_runs_python_through_sandbox_runner_and_records_events() -> No
     assert result.output["stdout"] == "3\n"
     assert result.output["stderr"] == ""
     assert result.output["exit_code"] == 0
-    assert runner.specs[0].image == "kortny/sandbox-python:latest"
+    assert runner.specs[0].image == "ghcr.io/astral-sh/uv:python3.11-bookworm-slim"
     assert runner.specs[0].command == ("python", "-c", "print(1 + 2)")
     assert runner.specs[0].network == "none"
     assert runner.specs[0].resource_limits.timeout_seconds == 7
@@ -66,7 +66,7 @@ def test_code_exec_runs_python_through_sandbox_runner_and_records_events() -> No
 def test_code_exec_returns_recoverable_unavailable_result_without_runner() -> None:
     tool = CodeExecTool(
         runner=None,
-        image="kortny/sandbox-python:latest",
+        image="ghcr.io/astral-sh/uv:python3.11-bookworm-slim",
     )
 
     result = tool.invoke({"code": "print('hello')"})
@@ -83,7 +83,7 @@ def test_code_exec_maps_runner_unavailable_to_recoverable_result() -> None:
     )
     tool = CodeExecTool(
         runner=runner,
-        image="kortny/sandbox-python:latest",
+        image="ghcr.io/astral-sh/uv:python3.11-bookworm-slim",
     )
 
     result = tool.invoke({"code": "print('hello')"})
@@ -97,7 +97,7 @@ def test_code_exec_returns_recoverable_failed_exit() -> None:
     runner = FakeSandboxRunner(SandboxResult(exit_code=2, stdout="", stderr="boom\n"))
     tool = CodeExecTool(
         runner=runner,
-        image="kortny/sandbox-python:latest",
+        image="ghcr.io/astral-sh/uv:python3.11-bookworm-slim",
     )
 
     result = tool.invoke({"code": "raise SystemExit(2)"})
@@ -112,7 +112,7 @@ def test_code_exec_returns_recoverable_failed_exit() -> None:
 def test_code_exec_validates_language_timeout_and_code_size() -> None:
     tool = CodeExecTool(
         runner=FakeSandboxRunner(SandboxResult(exit_code=0)),
-        image="kortny/sandbox-python:latest",
+        image="ghcr.io/astral-sh/uv:python3.11-bookworm-slim",
         max_code_chars=5,
     )
 

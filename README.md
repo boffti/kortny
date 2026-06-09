@@ -144,10 +144,10 @@ This starts Postgres on `localhost:5432`, runs the Alembic migration, starts
 the Slack Socket Mode ingress service, starts the task worker, starts the
 Postgres-native schedule materializer, starts the Witness proactive runner, and
 serves the operator dashboard at `http://localhost:8080`. It also starts the
-local Temporal dev server and Temporal worker so durable-workflow wiring is
-available during normal development.
+sandbox runner used for isolated code execution.
 
-This does not start optional observability services such as Phoenix.
+This does not start optional services such as Phoenix or the Temporal
+experiment profile.
 
 Witness is on by default: it creates proactive opportunity candidates, reviews
 due candidates, and can start low-risk read-only proactive tasks through the
@@ -243,18 +243,28 @@ printf 'pk-lf-...:sk-lf-...' | base64
 
 ### Temporal workflow backend
 
-Kortny runs a local Temporal dev server and Temporal worker as part of the
-default Compose stack:
+Kortny's default execution layer is the Postgres-backed task queue plus the
+`worker` service. Temporal is not part of the normal self-host/dev path because
+the current Temporal workflow is still a shadow/skeleton backend, not primary
+task execution.
+
+Normal local startup:
 
 ```
 docker compose up -d --force-recreate
 ```
 
-Temporal's local UI is available at `http://localhost:8233`.
+To inspect the Temporal experiment explicitly:
 
-`KORTNY_WORKFLOW_BACKEND` defaults to `temporal` in `.env.example`. HIG-97
-currently records durable-candidate handoff events and shadow-starts Temporal
-workflows before moving real Slack execution ownership into Temporal.
+```
+docker compose --profile temporal up -d --force-recreate
+```
+
+Temporal's local UI is then available at `http://localhost:8233`.
+
+`KORTNY_WORKFLOW_BACKEND` defaults to `inline`. HIG-97 records durable-candidate
+handoff events for future work, but real Slack execution remains owned by the
+main worker until we deliberately migrate the execution layer.
 
 Scheduled work is still owned by Kortny/Postgres in this local stack. The
 `scheduler` service materializes due `schedules` rows into normal `tasks` rows;
@@ -286,6 +296,9 @@ Your AI coworker is live.
   at once; each task runs independently.
 - **File editing and generation** — read, edit, and post files back
   in-thread without leaving Slack.
+- **Sandboxed code execution** — employees can ask Kortny to run small
+  Python snippets in an isolated no-network container with resource limits;
+  requester approval is required before execution.
 - **Workspace memory** — structured state and episodic recall across
   conversations and tasks.
 - **Per-channel and per-user profiles** — tone, verbosity, approval

@@ -44,7 +44,7 @@ def test_http_sandbox_runner_posts_spec_and_maps_success() -> None:
         http_client=httpx.Client(transport=httpx.MockTransport(handler)),
     )
     spec = SandboxSpec(
-        image="kortny/sandbox-python:latest",
+        image="ghcr.io/astral-sh/uv:python3.11-bookworm-slim",
         command=("python", "-c", "print('hello')"),
         workspace_path=Path("/workspace/task-123"),
         artifacts_path=Path("/workspace/task-123/artifacts"),
@@ -208,7 +208,7 @@ def test_create_sandbox_runner_from_settings_returns_none_without_url(
 
 def _sandbox_spec() -> SandboxSpec:
     return SandboxSpec(
-        image="kortny/sandbox-python:latest",
+        image="ghcr.io/astral-sh/uv:python3.11-bookworm-slim",
         command=("python", "-c", "print('hello')"),
         workspace_path=Path("/workspace/task-123"),
     )

@@ -42,10 +42,6 @@ services:
     env_file:
       - .env
     environment:
-      KORTNY_WORKFLOW_BACKEND: ${KORTNY_WORKFLOW_BACKEND:-temporal}
-      TEMPORAL_ADDRESS: ${TEMPORAL_ADDRESS:-temporal:7233}
-      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-default}
-      TEMPORAL_TASK_QUEUE: ${TEMPORAL_TASK_QUEUE:-kortny-workflows}
       OBSERVABILITY_ENABLED: ${OBSERVABILITY_ENABLED:-true}
       OBSERVABILITY_CAPTURE_CONTENT: ${OBSERVABILITY_CAPTURE_CONTENT:-metadata}
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
@@ -67,19 +63,20 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
+      sandbox-runner:
+        condition: service_healthy
     env_file:
       - .env
     environment:
-      KORTNY_WORKFLOW_BACKEND: ${KORTNY_WORKFLOW_BACKEND:-temporal}
-      TEMPORAL_ADDRESS: ${TEMPORAL_ADDRESS:-temporal:7233}
-      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-default}
-      TEMPORAL_TASK_QUEUE: ${TEMPORAL_TASK_QUEUE:-kortny-workflows}
       OBSERVABILITY_ENABLED: ${OBSERVABILITY_ENABLED:-true}
       OBSERVABILITY_CAPTURE_CONTENT: ${OBSERVABILITY_CAPTURE_CONTENT:-metadata}
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
       OTEL_EXPORTER_OTLP_HEADERS: ${OTEL_EXPORTER_OTLP_HEADERS:-}
       OTEL_SERVICE_NAME: ${OTEL_WORKER_SERVICE_NAME:-kortny-worker}
       OTEL_TRACE_SAMPLING_RATIO: ${OTEL_TRACE_SAMPLING_RATIO:-1.0}
+      KORTNY_SANDBOX_RUNNER_URL: ${KORTNY_SANDBOX_RUNNER_URL:-http://sandbox-runner:8090}
+      KORTNY_SANDBOX_RUNNER_TIMEOUT_SECONDS: ${KORTNY_SANDBOX_RUNNER_TIMEOUT_SECONDS:-70}
+      KORTNY_SANDBOX_DEFAULT_IMAGE: ${KORTNY_SANDBOX_DEFAULT_IMAGE:-ghcr.io/astral-sh/uv:python3.11-bookworm-slim}
       POSTGRES_URL: postgresql://${POSTGRES_USER:-kortny}:${POSTGRES_PASSWORD:-kortny}@postgres:5432/${POSTGRES_DB:-kortny}
       UV_CACHE_DIR: /tmp/uv-cache
       UV_LINK_MODE: copy
@@ -205,6 +202,8 @@ services:
 
   temporal:
     image: ${TEMPORAL_IMAGE:-temporalio/temporal:latest}
+    profiles:
+      - temporal
     command: ["server", "start-dev", "--ip", "0.0.0.0"]
     ports:
       - "${TEMPORAL_HOST_PORT:-7233}:7233"
@@ -212,6 +211,8 @@ services:
 
   temporal-worker:
     image: ghcr.io/astral-sh/uv:python3.11-bookworm-slim
+    profiles:
+      - temporal
     working_dir: /app
     command: ["uv", "run", "python", "-m", "kortny.workflow"]
     depends_on:
@@ -219,6 +220,8 @@ services:
         condition: service_completed_successfully
       temporal:
         condition: service_started
+      sandbox-runner:
+        condition: service_healthy
     env_file:
       - .env
     environment:
@@ -232,6 +235,9 @@ services:
       OTEL_EXPORTER_OTLP_HEADERS: ${OTEL_EXPORTER_OTLP_HEADERS:-}
       OTEL_SERVICE_NAME: ${OTEL_TEMPORAL_WORKER_SERVICE_NAME:-kortny-temporal-worker}
       OTEL_TRACE_SAMPLING_RATIO: ${OTEL_TRACE_SAMPLING_RATIO:-1.0}
+      KORTNY_SANDBOX_RUNNER_URL: ${KORTNY_SANDBOX_RUNNER_URL:-http://sandbox-runner:8090}
+      KORTNY_SANDBOX_RUNNER_TIMEOUT_SECONDS: ${KORTNY_SANDBOX_RUNNER_TIMEOUT_SECONDS:-70}
+      KORTNY_SANDBOX_DEFAULT_IMAGE: ${KORTNY_SANDBOX_DEFAULT_IMAGE:-ghcr.io/astral-sh/uv:python3.11-bookworm-slim}
       POSTGRES_URL: postgresql://${POSTGRES_USER:-kortny}:${POSTGRES_PASSWORD:-kortny}@postgres:5432/${POSTGRES_DB:-kortny}
       UV_CACHE_DIR: /tmp/uv-cache
       UV_LINK_MODE: copy
@@ -242,8 +248,6 @@ services:
 
   sandbox-docker-proxy:
     image: ${DOCKER_SOCKET_PROXY_IMAGE:-tecnativa/docker-socket-proxy:latest}
-    profiles:
-      - sandbox
     environment:
       CONTAINERS: 1
       IMAGES: 1
@@ -264,8 +268,6 @@ services:
 
   sandbox-runner:
     image: ghcr.io/astral-sh/uv:python3.11-bookworm-slim
-    profiles:
-      - sandbox
     working_dir: /app
     command: ["uv", "run", "python", "-m", "kortny.sandbox_runner"]
     depends_on:
@@ -273,9 +275,9 @@ services:
         condition: service_started
     environment:
       DOCKER_HOST: tcp://sandbox-docker-proxy:2375
-      KORTNY_SANDBOX_EXECUTION_ENABLED: ${KORTNY_SANDBOX_EXECUTION_ENABLED:-false}
+      KORTNY_SANDBOX_EXECUTION_ENABLED: ${KORTNY_SANDBOX_EXECUTION_ENABLED:-true}
       KORTNY_SANDBOX_RUNNER_NAME: ${KORTNY_SANDBOX_RUNNER_NAME:-kortny-sandbox-runner}
-      KORTNY_SANDBOX_DEFAULT_IMAGE: ${KORTNY_SANDBOX_DEFAULT_IMAGE:-kortny/sandbox-python:latest}
+      KORTNY_SANDBOX_DEFAULT_IMAGE: ${KORTNY_SANDBOX_DEFAULT_IMAGE:-ghcr.io/astral-sh/uv:python3.11-bookworm-slim}
       KORTNY_SANDBOX_DEFAULT_NETWORK: ${KORTNY_SANDBOX_DEFAULT_NETWORK:-none}
       KORTNY_SANDBOX_CPUS: ${KORTNY_SANDBOX_CPUS:-1.0}
       KORTNY_SANDBOX_MEMORY_MB: ${KORTNY_SANDBOX_MEMORY_MB:-512}

@@ -43,7 +43,7 @@ def test_allowlist_network_requires_explicit_hosts() -> None:
 
     with pytest.raises(ValueError, match="allowlist network requires egress hosts"):
         SandboxSpec(
-            image="kortny/sandbox-python:latest",
+            image="ghcr.io/astral-sh/uv:python3.11-bookworm-slim",
             command=("python", "-c", "print('ok')"),
             workspace_path=Path("/tmp/task"),
             network="allowlist",
@@ -63,7 +63,7 @@ def test_resource_limits_reject_non_positive_values() -> None:
 
 def test_sandbox_spec_payload_redacts_env_values() -> None:
     spec = SandboxSpec(
-        image="kortny/sandbox-python:latest",
+        image="ghcr.io/astral-sh/uv:python3.11-bookworm-slim",
         command=("python", "-c", "print('ok')"),
         workspace_path=Path("/tmp/task"),
         artifacts_path=Path("/tmp/task/artifacts"),
@@ -72,7 +72,7 @@ def test_sandbox_spec_payload_redacts_env_values() -> None:
 
     payload = spec.to_payload()
 
-    assert payload["image"] == "kortny/sandbox-python:latest"
+    assert payload["image"] == "ghcr.io/astral-sh/uv:python3.11-bookworm-slim"
     assert payload["command"] == ["python", "-c", "print('ok')"]
     assert payload["workspace_path"] == "/tmp/task"
     assert payload["artifacts_path"] == "/tmp/task/artifacts"
@@ -120,7 +120,7 @@ def test_sandbox_result_payload_preserves_artifact_and_lifecycle_summary() -> No
 
 def test_lifecycle_event_payload_includes_redacted_spec_and_tool_context() -> None:
     spec = SandboxSpec(
-        image="kortny/sandbox-python:latest",
+        image="ghcr.io/astral-sh/uv:python3.11-bookworm-slim",
         command=("python", "task.py"),
         workspace_path=Path("/tmp/task"),
         env={"SECRET_TOKEN": "do-not-log"},

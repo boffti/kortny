@@ -28,7 +28,7 @@ class SandboxRunnerSettings:
     runner_name: str = SERVICE_NAME
     docker_host: str = ""
     execution_enabled: bool = False
-    default_image: str = "kortny/sandbox-python:latest"
+    default_image: str = "ghcr.io/astral-sh/uv:python3.11-bookworm-slim"
     default_network: str = "none"
     default_cpus: float = 1.0
     default_memory_mb: int = 512
@@ -165,7 +165,7 @@ def load_sandbox_runner_settings(
         ),
         default_image=source.get(
             "KORTNY_SANDBOX_DEFAULT_IMAGE",
-            "kortny/sandbox-python:latest",
+            "ghcr.io/astral-sh/uv:python3.11-bookworm-slim",
         ),
         default_network=source.get("KORTNY_SANDBOX_DEFAULT_NETWORK", "none"),
         default_cpus=_env_float(source.get("KORTNY_SANDBOX_CPUS"), default=1.0),

@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import yaml
 from fastapi.testclient import TestClient
 
 from kortny.sandbox_runner import (
@@ -145,7 +146,7 @@ def test_sandbox_runner_run_contract_rejects_execution_while_disabled() -> None:
         response = client.post(
             "/run",
             json={
-                "image": "kortny/sandbox-python:latest",
+                "image": "ghcr.io/astral-sh/uv:python3.11-bookworm-slim",
                 "command": ["python", "-c", "print('hello')"],
                 "workspace_path": "/workspace/task-123",
                 "artifacts_path": "/workspace/task-123/artifacts",
@@ -167,7 +168,7 @@ def test_sandbox_runner_run_contract_rejects_execution_while_disabled() -> None:
     assert payload["execution_enabled"] is False
     assert payload["execution_attempted"] is False
     assert payload["request"] == {
-        "image": "kortny/sandbox-python:latest",
+        "image": "ghcr.io/astral-sh/uv:python3.11-bookworm-slim",
         "command": ["python", "-c", "print('hello')"],
         "workspace_path": "/workspace/task-123",
         "artifacts_path": "/workspace/task-123/artifacts",
@@ -187,7 +188,7 @@ def test_sandbox_runner_run_contract_rejects_execution_while_disabled() -> None:
 def test_sandbox_runner_run_contract_executes_when_enabled_and_guarded() -> None:
     settings = SandboxRunnerSettings(
         execution_enabled=True,
-        default_image="kortny/sandbox-python:latest",
+        default_image="ghcr.io/astral-sh/uv:python3.11-bookworm-slim",
     )
     docker_client = FakeDockerClient(
         DockerApiProbe(ok=True, configured=True),
@@ -208,7 +209,7 @@ def test_sandbox_runner_run_contract_executes_when_enabled_and_guarded() -> None
         response = client.post(
             "/run",
             json={
-                "image": "kortny/sandbox-python:latest",
+                "image": "ghcr.io/astral-sh/uv:python3.11-bookworm-slim",
                 "command": ["python", "-c", "print('hello')"],
                 "workspace_path": "/workspace/task-123",
                 "env": {"SAFE_FLAG": "1", "SECRET_TOKEN": "do-not-leak"},
@@ -226,7 +227,7 @@ def test_sandbox_runner_run_contract_executes_when_enabled_and_guarded() -> None
     assert "do-not-leak" not in str(payload)
     assert docker_client.run_calls == 1
     assert docker_client.run_specs[0] == DockerContainerRunSpec(
-        image="kortny/sandbox-python:latest",
+        image="ghcr.io/astral-sh/uv:python3.11-bookworm-slim",
         command=("python", "-c", "print('hello')"),
         workspace_path="/workspace/task-123",
         env={"SAFE_FLAG": "1", "SECRET_TOKEN": "do-not-leak"},
@@ -237,7 +238,7 @@ def test_sandbox_runner_run_contract_executes_when_enabled_and_guarded() -> None
 def test_sandbox_runner_run_rejects_non_default_image_when_enabled() -> None:
     settings = SandboxRunnerSettings(
         execution_enabled=True,
-        default_image="kortny/sandbox-python:latest",
+        default_image="ghcr.io/astral-sh/uv:python3.11-bookworm-slim",
     )
     docker_client = FakeDockerClient(DockerApiProbe(ok=True, configured=True))
 
@@ -264,7 +265,7 @@ def test_sandbox_runner_run_rejects_non_default_image_when_enabled() -> None:
 def test_sandbox_runner_run_rejects_allowlist_network_when_enabled() -> None:
     settings = SandboxRunnerSettings(
         execution_enabled=True,
-        default_image="kortny/sandbox-python:latest",
+        default_image="ghcr.io/astral-sh/uv:python3.11-bookworm-slim",
     )
     docker_client = FakeDockerClient(DockerApiProbe(ok=True, configured=True))
 
@@ -274,7 +275,7 @@ def test_sandbox_runner_run_rejects_allowlist_network_when_enabled() -> None:
         response = client.post(
             "/run",
             json={
-                "image": "kortny/sandbox-python:latest",
+                "image": "ghcr.io/astral-sh/uv:python3.11-bookworm-slim",
                 "command": ["python", "-c", "print('hello')"],
                 "workspace_path": "/workspace/task-123",
                 "network": "allowlist",
@@ -295,7 +296,7 @@ def test_sandbox_runner_run_contract_accepts_allowlist_network_shape() -> None:
         response = client.post(
             "/run",
             json={
-                "image": "kortny/sandbox-python:latest",
+                "image": "ghcr.io/astral-sh/uv:python3.11-bookworm-slim",
                 "command": ["python", "-c", "print('hello')"],
                 "workspace_path": "/workspace/task-123",
                 "network": "allowlist",
@@ -318,7 +319,7 @@ def test_sandbox_runner_run_contract_rejects_allowlist_without_hosts() -> None:
         response = client.post(
             "/run",
             json={
-                "image": "kortny/sandbox-python:latest",
+                "image": "ghcr.io/astral-sh/uv:python3.11-bookworm-slim",
                 "command": ["python", "-c", "print('hello')"],
                 "workspace_path": "/workspace/task-123",
                 "network": "allowlist",
@@ -333,7 +334,7 @@ def test_sandbox_runner_run_contract_rejects_allowlist_hosts_on_no_network() -> 
         response = client.post(
             "/run",
             json={
-                "image": "kortny/sandbox-python:latest",
+                "image": "ghcr.io/astral-sh/uv:python3.11-bookworm-slim",
                 "command": ["python", "-c", "print('hello')"],
                 "workspace_path": "/workspace/task-123",
                 "network": "none",
@@ -349,7 +350,7 @@ def test_sandbox_runner_run_contract_rejects_empty_command() -> None:
         response = client.post(
             "/run",
             json={
-                "image": "kortny/sandbox-python:latest",
+                "image": "ghcr.io/astral-sh/uv:python3.11-bookworm-slim",
                 "command": [],
                 "workspace_path": "/workspace/task-123",
             },
@@ -363,7 +364,7 @@ def test_sandbox_runner_run_contract_rejects_empty_command_part() -> None:
         response = client.post(
             "/run",
             json={
-                "image": "kortny/sandbox-python:latest",
+                "image": "ghcr.io/astral-sh/uv:python3.11-bookworm-slim",
                 "command": ["python", ""],
                 "workspace_path": "/workspace/task-123",
             },
@@ -377,7 +378,7 @@ def test_sandbox_runner_run_contract_rejects_empty_env_key() -> None:
         response = client.post(
             "/run",
             json={
-                "image": "kortny/sandbox-python:latest",
+                "image": "ghcr.io/astral-sh/uv:python3.11-bookworm-slim",
                 "command": ["python", "-c", "print('hello')"],
                 "workspace_path": "/workspace/task-123",
                 "env": {"": "nope"},
@@ -392,7 +393,7 @@ def test_sandbox_runner_run_contract_rejects_bad_resource_limits() -> None:
         response = client.post(
             "/run",
             json={
-                "image": "kortny/sandbox-python:latest",
+                "image": "ghcr.io/astral-sh/uv:python3.11-bookworm-slim",
                 "command": ["python", "-c", "print('hello')"],
                 "workspace_path": "/workspace/task-123",
                 "resource_limits": {"cpus": 0},
@@ -407,7 +408,7 @@ def test_sandbox_runner_run_contract_rejects_workspace_path_outside_workspace() 
         response = client.post(
             "/run",
             json={
-                "image": "kortny/sandbox-python:latest",
+                "image": "ghcr.io/astral-sh/uv:python3.11-bookworm-slim",
                 "command": ["python", "-c", "print('hello')"],
                 "workspace_path": "/tmp/kortny-task-123",
             },
@@ -421,7 +422,7 @@ def test_sandbox_runner_run_contract_rejects_artifacts_outside_workspace() -> No
         response = client.post(
             "/run",
             json={
-                "image": "kortny/sandbox-python:latest",
+                "image": "ghcr.io/astral-sh/uv:python3.11-bookworm-slim",
                 "command": ["python", "-c", "print('hello')"],
                 "workspace_path": "/workspace/task-123",
                 "artifacts_path": "/workspace/other/artifacts",
@@ -433,7 +434,7 @@ def test_sandbox_runner_run_contract_rejects_artifacts_outside_workspace() -> No
 
 def test_container_create_payload_applies_hardening_defaults() -> None:
     spec = DockerContainerRunSpec(
-        image="kortny/sandbox-python:latest",
+        image="ghcr.io/astral-sh/uv:python3.11-bookworm-slim",
         command=("python", "-c", "print('hello')"),
         workspace_path="/workspace/task-123",
         env={"SAFE_FLAG": "1"},
@@ -442,7 +443,7 @@ def test_container_create_payload_applies_hardening_defaults() -> None:
 
     payload = _container_create_payload(spec)
 
-    assert payload["Image"] == "kortny/sandbox-python:latest"
+    assert payload["Image"] == "ghcr.io/astral-sh/uv:python3.11-bookworm-slim"
     assert payload["Cmd"] == ["python", "-c", "print('hello')"]
     assert payload["Env"] == ["SAFE_FLAG=1"]
     assert payload["WorkingDir"] == "/workspace/task-123"
@@ -497,26 +498,44 @@ def test_docker_host_base_url_supports_proxy_tcp_urls() -> None:
     assert _docker_host_base_url("http://localhost:2375") == "http://localhost:2375"
 
 
-def test_compose_sandbox_services_are_profiled_and_do_not_use_env_file() -> None:
-    compose = Path("compose.yaml").read_text()
-    sandbox_runner_block = compose.split("  sandbox-runner:", maxsplit=1)[1].split(
-        "\n\nvolumes:",
-        maxsplit=1,
-    )[0]
-    socket_proxy_block = compose.split(
-        "  sandbox-docker-proxy:",
-        maxsplit=1,
-    )[1].split("  sandbox-runner:", maxsplit=1)[0]
+def test_compose_sandbox_services_start_by_default_and_do_not_use_env_file() -> None:
+    compose = yaml.safe_load(Path("compose.yaml").read_text())
+    services = compose["services"]
+    sandbox_runner = services["sandbox-runner"]
+    socket_proxy = services["sandbox-docker-proxy"]
+    app = services["app"]
+    temporal = services["temporal"]
+    worker = services["worker"]
+    temporal_worker = services["temporal-worker"]
 
-    assert "profiles:\n      - sandbox" in sandbox_runner_block
-    assert "profiles:\n      - sandbox" in socket_proxy_block
-    assert "env_file:" not in sandbox_runner_block
-    assert "env_file:" not in socket_proxy_block
-    assert "ports:" not in sandbox_runner_block
-    assert "ports:" not in socket_proxy_block
-    assert "DOCKER_HOST: tcp://sandbox-docker-proxy:2375" in sandbox_runner_block
-    assert "/var/run/docker.sock:/var/run/docker.sock:ro" in socket_proxy_block
-    assert "networks:\n  sandbox-control:\n    internal: true" in compose
+    assert "profiles" not in sandbox_runner
+    assert "profiles" not in socket_proxy
+    assert temporal["profiles"] == ["temporal"]
+    assert temporal_worker["profiles"] == ["temporal"]
+    assert "env_file" not in sandbox_runner
+    assert "env_file" not in socket_proxy
+    assert "ports" not in sandbox_runner
+    assert "ports" not in socket_proxy
+    assert sandbox_runner["environment"]["DOCKER_HOST"] == (
+        "tcp://sandbox-docker-proxy:2375"
+    )
+    assert sandbox_runner["environment"]["KORTNY_SANDBOX_EXECUTION_ENABLED"] == (
+        "${KORTNY_SANDBOX_EXECUTION_ENABLED:-true}"
+    )
+    assert worker["environment"]["KORTNY_SANDBOX_RUNNER_URL"] == (
+        "${KORTNY_SANDBOX_RUNNER_URL:-http://sandbox-runner:8090}"
+    )
+    assert "KORTNY_WORKFLOW_BACKEND" not in app["environment"]
+    assert "KORTNY_WORKFLOW_BACKEND" not in worker["environment"]
+    assert "TEMPORAL_ADDRESS" not in app["environment"]
+    assert "TEMPORAL_ADDRESS" not in worker["environment"]
+    assert "sandbox-runner" not in app["depends_on"]
+    assert worker["depends_on"]["sandbox-runner"]["condition"] == "service_healthy"
+    assert temporal_worker["depends_on"]["sandbox-runner"]["condition"] == (
+        "service_healthy"
+    )
+    assert "/var/run/docker.sock:/var/run/docker.sock:ro" in socket_proxy["volumes"]
+    assert compose["networks"]["sandbox-control"]["internal"] is True
 
 
 class FakeDockerClient:

@@ -72,35 +72,27 @@
       {% for row in schedule_page.rows %}
         <article class="schedule-row" role="listitem">
           <div class="schedule-main">
-            <div class="schedule-title">
-              <span class="badge badge-{{ row.tone }}">{{ row.schedule.status }}</span>
-              <strong>{{ row.schedule.title }}</strong>
+            <div class="schedule-row-header">
+              <div class="schedule-title">
+                <span class="badge badge-{{ row.tone }}">{{ row.schedule.status }}</span>
+                <strong>{{ row.schedule.title }}</strong>
+              </div>
+              <span class="schedule-next-run-badge" title="Next scheduled run">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                {{ row.next_run }}
+              </span>
             </div>
-            <dl class="schedule-meta">
-              <div>
-                <dt>Cadence</dt>
-                <dd>{{ row.cadence }}</dd>
-              </div>
-              <div>
-                <dt>Owner</dt>
-                <dd>{{ row.owner }}</dd>
-              </div>
-              <div>
-                <dt>Delivery</dt>
-                <dd>{{ row.delivery }}</dd>
-              </div>
-              <div>
-                <dt>Budget</dt>
-                <dd>{{ row.budget }}</dd>
-              </div>
-            </dl>
+            <div class="schedule-chip-row">
+              <span class="badge badge-neutral" title="Cadence">{{ row.cadence }}</span>
+              <span class="badge badge-neutral" title="Owner">{{ row.owner }}</span>
+              <span class="badge badge-neutral" title="Delivery">{{ row.delivery }}</span>
+              {% if row.budget and row.budget != '-' %}
+                <span class="badge badge-neutral" title="Budget">{{ row.budget }}</span>
+              {% endif %}
+            </div>
           </div>
           <aside class="schedule-side">
             <dl class="schedule-run-times">
-              <div>
-                <dt>Next run</dt>
-                <dd>{{ row.next_run }}</dd>
-              </div>
               <div>
                 <dt>Last run</dt>
                 <dd>{{ row.last_run }}</dd>

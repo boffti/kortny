@@ -21,51 +21,26 @@
     <div class="notice notice-{{ notice_tone }}" role="status">{{ notice }}</div>
   {% endif %}
 
-  <section class="summary-grid graph-summary" aria-label="Knowledge graph overview">
+  <section class="summary-grid graph-summary-compact" aria-label="Knowledge graph overview">
     <div class="card metric-card metric-success">
       <span>Entities</span>
       <strong>{{ graph.entity_count|number }}</strong>
-      <small>{{ graph.current_entity_count|number }} current rows</small>
-    </div>
-    <div class="card metric-card metric-warning">
-      <span>Candidates</span>
-      <strong>{{ graph.candidate_entity_count|number }}</strong>
-      <small>Visible to operators, withheld from runtime context</small>
+      <small>{{ graph.current_entity_count|number }} current · {{ graph.candidate_entity_count|number }} candidates</small>
     </div>
     <div class="card metric-card">
-      <span>Known Channels</span>
+      <span>Channels</span>
       <strong>{{ graph.known_channel_count|number }}</strong>
-      <small>Active Slack memberships Kortny has recorded</small>
-    </div>
-    <div class="card metric-card metric-success">
-      <span>Profiled Channels</span>
-      <strong>{{ graph.profiled_channel_count|number }}</strong>
-      <small>Channel profiles projected into the graph</small>
+      <small>{{ graph.profiled_channel_count|number }} profiled · {{ graph.known_channel_count|number }} known</small>
     </div>
     <div class="card metric-card">
       <span>Relationships</span>
       <strong>{{ graph.edge_count|number }}</strong>
-      <small>Scoped links between graph entities</small>
+      <small>{{ graph.evidence_count|number }} evidence rows</small>
     </div>
-    <div class="card metric-card">
-      <span>Evidence</span>
-      <strong>{{ graph.evidence_count|number }}</strong>
-      <small>Traceable source rows backing the graph</small>
-    </div>
-    <div class="card metric-card metric-success">
-      <span>Runtime Eligible</span>
+    <div class="card metric-card {% if graph.stale_entity_count + graph.stale_edge_count > 0 or graph.unbacked_current_entity_count + graph.unbacked_current_edge_count > 0 %}metric-warning{% else %}metric-success{% endif %}">
+      <span>Health</span>
       <strong>{{ (graph.runtime_eligible_entity_count + graph.runtime_eligible_edge_count)|number }}</strong>
-      <small>Confirmed or active rows with evidence</small>
-    </div>
-    <div class="card metric-card metric-warning">
-      <span>Stale Rows</span>
-      <strong>{{ (graph.stale_entity_count + graph.stale_edge_count)|number }}</strong>
-      <small>{{ graph.stale_entity_count|number }} entities, {{ graph.stale_edge_count|number }} relationships</small>
-    </div>
-    <div class="card metric-card metric-danger">
-      <span>Evidence Gaps</span>
-      <strong>{{ (graph.unbacked_current_entity_count + graph.unbacked_current_edge_count)|number }}</strong>
-      <small>Current rows withheld from runtime context</small>
+      <small>runtime eligible · {{ (graph.stale_entity_count + graph.stale_edge_count)|number }} stale · {{ (graph.unbacked_current_entity_count + graph.unbacked_current_edge_count)|number }} gaps</small>
     </div>
   </section>
 
@@ -86,6 +61,11 @@
       <div class="graph-map-layout">
         <div class="graph-map-canvas" style="position: relative;">
           <div id="kg-network-canvas" style="height: 420px; width: 100%;"></div>
+          <div class="graph-canvas-controls">
+            <button class="graph-canvas-control-btn" id="kg-zoom-in" title="Zoom in" type="button">+</button>
+            <button class="graph-canvas-control-btn" id="kg-zoom-out" title="Zoom out" type="button">−</button>
+            <button class="graph-canvas-control-btn" id="kg-fit" title="Fit to view" type="button">⟲</button>
+          </div>
 
           <div hidden>
             {% for node in graph.map.nodes %}
@@ -550,6 +530,29 @@
       if (nodes.length > 0) {
         selectNode(nodes[0].id);
         network.selectNodes([nodes[0].id]);
+      }
+
+      // Zoom controls
+      const zoomIn = document.getElementById('kg-zoom-in');
+      const zoomOut = document.getElementById('kg-zoom-out');
+      const fitBtn = document.getElementById('kg-fit');
+
+      if (zoomIn) {
+        zoomIn.addEventListener('click', () => {
+          const scale = network.getScale();
+          network.moveTo({ scale: scale * 1.3 });
+        });
+      }
+      if (zoomOut) {
+        zoomOut.addEventListener('click', () => {
+          const scale = network.getScale();
+          network.moveTo({ scale: scale / 1.3 });
+        });
+      }
+      if (fitBtn) {
+        fitBtn.addEventListener('click', () => {
+          network.fit({ animation: { duration: 400, easingFunction: 'easeInOutQuad' } });
+        });
       }
 
       // Adjust network styling when theme changes dynamically

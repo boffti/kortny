@@ -6,7 +6,7 @@
   <section class="page-heading">
     <div>
       <h1>Task Detail</h1>
-      <p>{{ detail.task.id }}</p>
+      <span class="task-id-badge">{{ detail.task.id }}</span>
     </div>
     <div class="heading-actions">
       <span class="badge status-{{ detail.task.status.value }}">{{ detail.task.status.value }}</span>
@@ -61,6 +61,11 @@
 
   {% if detail.planned_trace.present %}
     {% set trace = detail.planned_trace %}
+    <details open>
+    <summary style="cursor:pointer; padding: 10px 0; font-weight: 700; font-size: 14px; color: var(--muted-foreground); list-style: none; display: flex; align-items: center; gap: 6px; margin-bottom: 4px;">
+      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex-shrink:0"><rect width="16" height="16" x="4" y="4" rx="2"/><rect width="6" height="6" x="9" y="9" rx="1"/></svg>
+      ADK Planned Trace
+    </summary>
     <section class="planned-trace-panel" aria-labelledby="planned-trace-heading">
       <header class="planned-trace-header">
         <div>
@@ -230,12 +235,13 @@
         </div>
       {% endif %}
     </section>
+    </details>
   {% endif %}
 
   <nav class="segmented-nav task-detail-tabs" role="tablist">
-    <button class="segmented-item tab-btn active" data-tab="overview" role="tab" aria-selected="true">Overview</button>
+    <button class="segmented-item tab-btn active" data-tab="overview" role="tab" aria-selected="true">Request &amp; Response</button>
     <button class="segmented-item tab-btn" data-tab="timeline" role="tab" aria-selected="false">Timeline</button>
-    <button class="segmented-item tab-btn" data-tab="usage-artifacts" role="tab" aria-selected="false">Usage & Artifacts</button>
+    <button class="segmented-item tab-btn" data-tab="usage-artifacts" role="tab" aria-selected="false">Usage &amp; Artifacts</button>
   </nav>
 
   <div id="panel-overview" class="tab-panel active" role="tabpanel">
@@ -260,7 +266,13 @@
         <dt>Created</dt>
         <dd>{{ detail.task.created_at|datetime }}</dd>
       </dl>
-      <pre>{{ detail.task.input }}</pre>
+      <div class="pre-wrap">
+        <button class="pre-copy-btn" type="button" aria-label="Copy request text">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+          <span class="pre-copy-label">Copy</span>
+        </button>
+        <pre>{{ detail.task.input }}</pre>
+      </div>
     </section>
 
     <section class="card detail-section">
@@ -268,7 +280,13 @@
         <h2>Posted Slack Response</h2>
         <p>Actual message delivered to Slack after final synthesis and formatting.</p>
       </header>
-      <pre>{{ detail.posted_response_text or "-" }}</pre>
+      <div class="pre-wrap">
+        <button class="pre-copy-btn" type="button" aria-label="Copy Slack response">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+          <span class="pre-copy-label">Copy</span>
+        </button>
+        <pre>{{ detail.posted_response_text or "-" }}</pre>
+      </div>
     </section>
 
     <section class="card detail-section">
@@ -276,7 +294,13 @@
         <h2>Raw Agent Result</h2>
         <p>Pre-humanizer task summary saved by the worker.</p>
       </header>
-      <pre>{{ detail.task.result_summary or "-" }}</pre>
+      <div class="pre-wrap">
+        <button class="pre-copy-btn" type="button" aria-label="Copy raw agent result">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+          <span class="pre-copy-label">Copy</span>
+        </button>
+        <pre>{{ detail.task.result_summary or "-" }}</pre>
+      </div>
     </section>
   </div>
 
@@ -798,6 +822,23 @@
       
       // Initial run to set last visible item class
       updateTimeline();
+
+      // 8. Pre block copy buttons
+      document.querySelectorAll('.pre-copy-btn').forEach(btn => {
+        const labelEl = btn.querySelector('.pre-copy-label');
+        btn.addEventListener('click', () => {
+          const pre = btn.parentElement.querySelector('pre');
+          if (!pre) return;
+          navigator.clipboard.writeText(pre.textContent).then(() => {
+            btn.classList.add('copied');
+            if (labelEl) labelEl.textContent = 'Copied!';
+            setTimeout(() => {
+              btn.classList.remove('copied');
+              if (labelEl) labelEl.textContent = 'Copy';
+            }, 1800);
+          }).catch(() => {});
+        });
+      });
     })();
   </script>
 {% endblock %}

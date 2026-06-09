@@ -8,6 +8,13 @@
       <h1>Usage</h1>
       <p>Cost and token rollups from recorded LLM calls.</p>
     </div>
+    <div class="heading-actions">
+      <nav class="quick-filter-pills" aria-label="Quick date range">
+        <a class="quick-filter-pill {{ 'active' if usage_toolbar and usage_toolbar.fields and usage_toolbar.fields[0].value == '7' else '' }}" href="?days=7">7d</a>
+        <a class="quick-filter-pill {{ 'active' if usage_toolbar and usage_toolbar.fields and usage_toolbar.fields[0].value == '30' else '' }}" href="?days=30">30d</a>
+        <a class="quick-filter-pill {{ 'active' if usage_toolbar and usage_toolbar.fields and usage_toolbar.fields[0].value == '90' else '' }}" href="?days=90">90d</a>
+      </nav>
+    </div>
   </section>
 
   {% set toolbar = usage_toolbar %}
@@ -79,39 +86,38 @@
     </article>
   </section>
 
-  <section class="card detail-section">
-    <header>
-      <h2>Cost by Model</h2>
-      <p>Provider model mix and spend concentration.</p>
-    </header>
-    {% set rows = aggregate.by_model %}
-    {% include "_aggregate_table.html" with context %}
+  <section class="memory-toolbar" aria-label="Detailed breakdown header">
+    <h2>Detailed Breakdowns</h2>
+    <p>Per-model, per-user, per-channel, and per-day attribution tables.</p>
   </section>
 
-  <section class="card detail-section">
-    <header>
-      <h2>Cost by User</h2>
-      <p>Slack user-level usage and cost attribution.</p>
-    </header>
-    {% set rows = aggregate.by_user %}
-    {% include "_aggregate_table.html" with context %}
-  </section>
+  <details class="card detail-section" open>
+    <summary class="usage-breakdown-summary usage-breakdown-summary--bordered">Cost by Model</summary>
+    <div class="usage-breakdown-body">
+      {% set rows = aggregate.by_model %}
+      {% include "_aggregate_table.html" with context %}
+    </div>
+  </details>
 
-  <section class="card detail-section">
-    <header>
-      <h2>Cost by Channel</h2>
-      <p>Slack channel-level usage and cost attribution. DMs are attributed under users.</p>
-    </header>
-    {% set rows = aggregate.by_channel %}
-    {% include "_aggregate_table.html" with context %}
-  </section>
+  <details class="card detail-section">
+    <summary class="usage-breakdown-summary">Cost by User</summary>
+    <div class="usage-breakdown-body">
+      {% set rows = aggregate.by_user %}
+      {% include "_aggregate_table.html" with context %}
+    </div>
+  </details>
 
-  <section class="card detail-section">
-    <header>
-      <h2>Cost by Day</h2>
-      <p>Daily call volume, token totals, and spend.</p>
-    </header>
-    <div class="overflow-x-auto">
+  <details class="card detail-section">
+    <summary class="usage-breakdown-summary">Cost by Channel</summary>
+    <div class="usage-breakdown-body">
+      {% set rows = aggregate.by_channel %}
+      {% include "_aggregate_table.html" with context %}
+    </div>
+  </details>
+
+  <details class="card detail-section">
+    <summary class="usage-breakdown-summary">Cost by Day</summary>
+    <div class="overflow-x-auto usage-breakdown-body">
       <table class="table">
         <caption>Daily LLM usage costs.</caption>
         <thead>
@@ -138,5 +144,5 @@
         </tbody>
       </table>
     </div>
-  </section>
+  </details>
 {% endblock %}

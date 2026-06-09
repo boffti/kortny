@@ -27,35 +27,36 @@
             ></textarea>
           </div>
           <div class="form-actions">
+            <span class="pg-run-hint"><kbd>⌘ Enter</kbd> to run</span>
             <button type="submit" id="run-btn" class="btn">
               <span>Run Agent</span>
             </button>
-            <button type="button" id="clear-console-btn" class="btn-ghost">Clear Console</button>
+            <button type="button" id="clear-console-btn" class="btn-ghost">Clear</button>
           </div>
         </form>
       </article>
 
-      <!-- Active Stats Bar -->
-      <section class="playground-stats-bar card" id="stats-bar" style="display: none;">
+      <!-- Active Stats Bar (always visible) -->
+      <section class="playground-stats-bar card" id="stats-bar">
         <div class="stat-item">
           <span>Status</span>
-          <strong id="stat-status" class="status-pill status-idle">Idle</strong>
+          <strong id="stat-status" class="status-pill status-idle">Ready</strong>
         </div>
         <div class="stat-item">
           <span>Run Cost</span>
-          <strong id="stat-cost">$0.000000</strong>
+          <strong id="stat-cost">—</strong>
         </div>
         <div class="stat-item">
           <span>Input Tokens</span>
-          <strong id="stat-input-tokens">0</strong>
+          <strong id="stat-input-tokens">—</strong>
         </div>
         <div class="stat-item">
           <span>Output Tokens</span>
-          <strong id="stat-output-tokens">0</strong>
+          <strong id="stat-output-tokens">—</strong>
         </div>
         <div class="stat-item">
           <span>Elapsed Time</span>
-          <strong id="stat-timer">0.0s</strong>
+          <strong id="stat-timer">—</strong>
         </div>
       </section>
 
@@ -68,7 +69,10 @@
             <span class="dot green"></span>
           </div>
           <span class="console-title">Interactive Log Stream</span>
-          <div class="console-meta" id="active-task-id">No active session</div>
+          <div class="pg-console-actions">
+            <div class="console-meta" id="active-task-id">No active session</div>
+            <button type="button" id="copy-console-btn" class="pg-copy-console-btn">Copy</button>
+          </div>
         </header>
         <div class="console-body" id="console-output">
           <div class="console-line system-line">[SYSTEM] Ready. Enter a prompt above to start a live agent execution.</div>
@@ -507,7 +511,6 @@
         closeEventStream();
         consoleOutput.innerHTML = '';
         activeTaskIdSpan.textContent = `Task: ${taskId}`;
-        statsBar.style.display = 'grid';
         runBtn.disabled = true;
         runBtn.querySelector('span').textContent = 'Running...';
         
@@ -516,6 +519,7 @@
         statCost.textContent = '$0.000000';
         statInputTokens.textContent = '0';
         statOutputTokens.textContent = '0';
+        statTimer.textContent = '0.0s';
         
         startTimer();
         appendConsoleLine(`[SYSTEM] Connecting to event stream for Task ID: ${taskId}...`, 'system-line');
@@ -642,10 +646,32 @@
         });
       });
 
+      // Cmd+Enter / Ctrl+Enter to run
+      promptInput.addEventListener('keydown', (e) => {
+        if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+          e.preventDefault();
+          form.dispatchEvent(new Event('submit'));
+        }
+      });
+
       // Clear Console
       clearBtn.addEventListener('click', () => {
         consoleOutput.innerHTML = '<div class="console-line system-line">[SYSTEM] Console cleared.</div>';
       });
+
+      // Copy console
+      const copyConsoleBtn = document.getElementById('copy-console-btn');
+      if (copyConsoleBtn) {
+        copyConsoleBtn.addEventListener('click', () => {
+          const lines = Array.from(consoleOutput.querySelectorAll('.console-line'))
+            .map(el => el.textContent)
+            .join('\n');
+          navigator.clipboard.writeText(lines).then(() => {
+            copyConsoleBtn.textContent = 'Copied!';
+            setTimeout(() => { copyConsoleBtn.textContent = 'Copy'; }, 1800);
+          }).catch(() => {});
+        });
+      }
 
       // History items listener setup
       function attachHistoryCardListeners(card) {

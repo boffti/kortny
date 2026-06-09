@@ -40,9 +40,9 @@
     Secrets are never displayed. Missing optional providers are setup gaps, not outages.
   </p>
 
-  <nav class="integration-tabs" aria-label="Integration sections">
-    <a href="#providers">Providers</a>
-    <a href="#native-tools">Native tools</a>
+  <nav class="integration-tabs" role="tablist" aria-label="Integration sections">
+    <a class="active" href="#providers" role="tab">Providers</a>
+    <a href="#native-tools" role="tab">Native tools</a>
   </nav>
 
   <section id="providers" class="integration-stack" aria-label="Configured integrations">
@@ -63,7 +63,7 @@
               <span class="badge badge-{{ integration.tone }}">{{ integration.status }}</span>
             </div>
             <details class="row-details provider-details">
-              <summary>Details</summary>
+              <summary style="font-size:12px; font-weight:700; color:var(--muted-foreground); cursor:pointer; list-style:none;">Runtime details</summary>
               <div class="details-panel provider-details-panel">
                 <div>
                   <span class="detail-label">Runtime notes</span>
@@ -150,7 +150,7 @@
                     </div>
                   </div>
                   <details class="row-details tool-details">
-                    <summary>Inputs and notes</summary>
+                    <summary style="font-size:12px; font-weight:700; color:var(--muted-foreground); cursor:pointer; list-style:none;">All inputs &amp; notes</summary>
                     <div class="details-panel tool-details-panel">
                       <div>
                         <span class="detail-label">Optional inputs</span>

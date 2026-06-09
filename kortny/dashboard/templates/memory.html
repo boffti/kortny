@@ -50,6 +50,14 @@
   </section>
 
   {% if memory.active_view == "facts" %}
+    {% if memory.proposed_fact_count > 0 and memory.status_filter != "proposed" %}
+      <div class="notice notice-warning memory-review-banner" role="alert">
+        <span>
+          <strong>{{ memory.proposed_fact_count }} proposed fact{{ "" if memory.proposed_fact_count == 1 else "s" }} need review</strong> — waiting for confirmation before Kortny uses them.
+        </span>
+        <a class="btn-ghost" href="{{ memory_base_path }}?view=facts&status=proposed">Review proposed</a>
+      </div>
+    {% endif %}
     <section class="card detail-section">
       <header>
         <h2>Workspace State</h2>

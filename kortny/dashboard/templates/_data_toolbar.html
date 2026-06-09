@@ -1,34 +1,60 @@
 <section class="data-toolbar" aria-label="{{ toolbar.label }}">
-  <div class="data-toolbar-meta">
-    <strong>{{ toolbar.title }}</strong>
-    {% if toolbar.count %}<span>{{ toolbar.count }}</span>{% endif %}
+  <div class="data-toolbar-head">
+    <div class="data-toolbar-meta">
+      <strong>{{ toolbar.title }}</strong>
+      {% if toolbar.count %}<span>{{ toolbar.count }}</span>{% endif %}
+    </div>
   </div>
   {% if toolbar.fields %}
-    <form class="filters data-toolbar-form" method="get" action="{{ toolbar.action }}">
+    <form class="data-toolbar-form" method="get" action="{{ toolbar.action }}">
       {% for field in toolbar.fields %}
-        <label>
-          {{ field.label }}
-          {% if field.type == "select" %}
-            <select class="input" name="{{ field.name }}">
-              {% for option in field.options %}
-                <option value="{{ option.value }}" {{ "selected" if option.value == field.value else "" }}>{{ option.label }}</option>
-              {% endfor %}
-            </select>
-          {% else %}
+        {% if field.name == "q" %}
+          <div class="data-toolbar-search">
+            <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <circle cx="11" cy="11" r="8"></circle>
+              <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+            </svg>
             <input
-              class="input"
-              type="{{ field.type }}"
+              class="input data-toolbar-search-input"
+              type="search"
               name="{{ field.name }}"
               value="{{ field.value }}"
+              aria-label="{{ field.label }}"
               {% if field.placeholder %}placeholder="{{ field.placeholder }}"{% endif %}
             >
-          {% endif %}
-        </label>
+          </div>
+        {% endif %}
       {% endfor %}
-      <button class="btn" type="submit">{{ toolbar.submit_label|default("Apply") }}</button>
-      {% if toolbar.reset_url %}
-        <a class="btn-ghost" href="{{ toolbar.reset_url }}">Reset</a>
-      {% endif %}
+      <div class="data-toolbar-filters">
+        {% for field in toolbar.fields %}
+          {% if field.name != "q" %}
+            <label class="data-toolbar-field">
+              <span>{{ field.label }}</span>
+              {% if field.type == "select" %}
+                <select class="input" name="{{ field.name }}">
+                  {% for option in field.options %}
+                    <option value="{{ option.value }}" {{ "selected" if option.value == field.value else "" }}>{{ option.label }}</option>
+                  {% endfor %}
+                </select>
+              {% else %}
+                <input
+                  class="input"
+                  type="{{ field.type }}"
+                  name="{{ field.name }}"
+                  value="{{ field.value }}"
+                  {% if field.placeholder %}placeholder="{{ field.placeholder }}"{% endif %}
+                >
+              {% endif %}
+            </label>
+          {% endif %}
+        {% endfor %}
+        <div class="data-toolbar-actions">
+          <button class="btn" type="submit">{{ toolbar.submit_label|default("Apply") }}</button>
+          {% if toolbar.reset_url %}
+            <a class="btn-ghost" href="{{ toolbar.reset_url }}">Reset</a>
+          {% endif %}
+        </div>
+      </div>
     </form>
   {% endif %}
 </section>

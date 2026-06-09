@@ -228,10 +228,11 @@ caption {
 
 .nav-group-label {
   color: var(--muted-foreground);
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 800;
-  letter-spacing: 0;
-  padding: 0 10px 2px;
+  letter-spacing: 0.07em;
+  opacity: 0.65;
+  padding: 0 10px 4px;
   text-transform: uppercase;
 }
 
@@ -357,10 +358,12 @@ caption {
 
 .page-heading {
   align-items: end;
+  border-bottom: 1px solid var(--border);
   display: flex;
   gap: 18px;
   justify-content: space-between;
-  margin-bottom: 18px;
+  margin-bottom: 24px;
+  padding-bottom: 18px;
 }
 
 .heading-actions {
@@ -388,13 +391,15 @@ h2 {
 }
 
 h1 {
-  font-size: 28px;
-  letter-spacing: 0;
+  font-size: 24px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
 }
 
 h2 {
-  font-size: 16px;
-  letter-spacing: 0;
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
 }
 
 p {
@@ -475,27 +480,33 @@ p {
 }
 
 .data-toolbar {
-  align-items: start;
   background: var(--card);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   box-shadow: var(--shadow);
   display: grid;
   gap: 14px;
-  grid-template-columns: minmax(180px, 0.28fr) minmax(0, 1fr);
   margin-bottom: 20px;
-  padding: 14px 16px;
+  padding: 16px;
+}
+
+.data-toolbar-head {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
 }
 
 .data-toolbar-meta {
   display: grid;
-  gap: 3px;
+  gap: 2px;
   min-width: 0;
 }
 
 .data-toolbar-meta strong {
   color: var(--foreground);
-  font-size: 14px;
+  font-size: 15px;
+  font-weight: 700;
 }
 
 .data-toolbar-meta span {
@@ -505,17 +516,64 @@ p {
 }
 
 .data-toolbar-form {
+  display: grid;
+  gap: 12px;
+}
+
+/* Prominent primary search box with leading icon */
+.data-toolbar-search {
+  position: relative;
+}
+
+.data-toolbar-search .search-icon {
+  color: var(--muted-foreground);
+  height: 17px;
+  left: 13px;
+  pointer-events: none;
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 17px;
+}
+
+.data-toolbar-search-input {
+  min-height: 42px;
+  padding-left: 40px !important;
+  width: 100%;
+}
+
+/* Secondary filters laid out in a clean auto-fit grid */
+.data-toolbar-filters {
   align-items: end;
-  flex-wrap: wrap;
-  justify-content: flex-end;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
 }
 
-.data-toolbar-form label {
-  min-width: 136px;
+.data-toolbar-field {
+  color: var(--muted-foreground);
+  display: grid;
+  font-size: 11px;
+  font-weight: 700;
+  gap: 5px;
+  letter-spacing: 0.03em;
+  min-width: 0;
+  text-transform: uppercase;
 }
 
-.data-toolbar-form label:first-child {
-  flex: 1 1 240px;
+.data-toolbar-field .input {
+  width: 100%;
+}
+
+.data-toolbar-actions {
+  align-items: end;
+  display: flex;
+  gap: 8px;
+}
+
+.data-toolbar-actions .btn,
+.data-toolbar-actions .btn-ghost {
+  flex: 1 1 auto;
 }
 
 .card > header,
@@ -546,9 +604,9 @@ p {
 .table th {
   background: var(--muted);
   color: var(--muted-foreground);
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 700;
-  letter-spacing: 0;
+  letter-spacing: 0.04em;
   text-transform: uppercase;
 }
 
@@ -999,22 +1057,29 @@ p {
 }
 
 .metric-card {
-  padding: 14px;
+  border-left: 3px solid transparent;
+  padding: 16px 14px 16px 13px;
+  transition: box-shadow 0.2s ease, border-color 0.2s ease, background 0.2s ease;
 }
 
 .metric-card span {
   color: var(--muted-foreground);
   display: block;
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 700;
-  margin-bottom: 4px;
+  letter-spacing: 0.04em;
+  margin-bottom: 6px;
   text-transform: uppercase;
 }
 
 .metric-card strong {
   color: var(--foreground);
-  font-size: 20px;
+  display: block;
+  font-size: 26px;
   font-variant-numeric: tabular-nums;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  line-height: 1.1;
 }
 
 .metric-card small {
@@ -1022,7 +1087,7 @@ p {
   display: block;
   font-size: 12px;
   line-height: 1.35;
-  margin-top: 4px;
+  margin-top: 6px;
   overflow-wrap: anywhere;
 }
 
@@ -1295,15 +1360,21 @@ p {
 }
 
 .metric-danger {
+  background: color-mix(in srgb, var(--destructive-bg) 35%, var(--card));
   border-color: color-mix(in srgb, var(--destructive) 22%, var(--border));
+  border-left-color: var(--destructive);
 }
 
 .metric-warning {
+  background: color-mix(in srgb, var(--warning-bg) 35%, var(--card));
   border-color: color-mix(in srgb, var(--warning) 24%, var(--border));
+  border-left-color: var(--warning);
 }
 
 .metric-success {
+  background: color-mix(in srgb, var(--success-bg) 35%, var(--card));
   border-color: color-mix(in srgb, var(--success) 22%, var(--border));
+  border-left-color: var(--success);
 }
 
 .charts-grid {
@@ -3988,32 +4059,6 @@ pre {
   padding: 10px 12px;
 }
 
-.integration-tabs {
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow);
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-bottom: 20px;
-  padding: 8px;
-}
-
-.integration-tabs a {
-  border-radius: 6px;
-  color: var(--muted-foreground);
-  font-weight: 700;
-  min-height: 32px;
-  padding: 6px 10px;
-}
-
-.integration-tabs a:hover {
-  background: var(--muted);
-  color: var(--foreground);
-  text-decoration: none;
-}
-
 .integration-stack {
   display: grid;
   gap: 20px;
@@ -5734,7 +5779,9 @@ pre {
 }
 
 .panel-filters {
-  padding: 14px 16px 16px;
+  background: color-mix(in srgb, var(--muted) 60%, var(--card));
+  border-bottom: 1px solid var(--border);
+  padding: 12px 16px 14px;
 }
 
 .filters label {
@@ -5992,7 +6039,6 @@ pre {
     grid-template-columns: 1fr;
   }
 
-  .data-toolbar,
   .task-detail-hero,
   .planned-trace-header {
     grid-template-columns: 1fr;
@@ -6007,8 +6053,8 @@ pre {
     justify-content: flex-start;
   }
 
-  .data-toolbar-form {
-    justify-content: flex-start;
+  .data-toolbar-filters {
+    grid-template-columns: 1fr;
   }
 
   .task-detail-facts {
@@ -6492,43 +6538,33 @@ pre {
 }
 
 /* Page detail tabs - Modern Underline Layout */
+/* Task-detail content tabs use the canonical boxed segmented pills.
+   Markup carries both .segmented-item and .tab-btn; the base
+   .segmented-nav / .segmented-item rules already provide the boxed look,
+   so we only reset button chrome here. */
 .task-detail-tabs.segmented-nav {
-  background: transparent;
-  border: none;
-  border-bottom: 1px solid var(--border);
-  border-radius: 0;
-  display: flex;
-  gap: 24px;
+  flex-wrap: wrap;
   margin-bottom: 24px;
-  padding: 0;
-  width: 100%;
+  max-width: 100%;
 }
 
 .segmented-item.tab-btn {
   background: transparent;
   border: none;
-  border-bottom: 2px solid transparent;
-  border-radius: 0;
   cursor: pointer;
   font: inherit;
-  min-height: unset;
-  padding: 8px 4px 12px;
-  color: var(--muted-foreground);
-  transition: color 150ms ease, border-color 150ms ease;
+  font-weight: 700;
 }
 
 .segmented-item.tab-btn:hover {
-  background: transparent;
-  border-bottom-color: color-mix(in srgb, var(--accent) 30%, transparent);
+  background: color-mix(in srgb, var(--card) 60%, transparent);
   color: var(--foreground);
 }
 
 .segmented-item.tab-btn.active {
-  background: transparent;
-  border-bottom-color: var(--accent);
-  box-shadow: none;
+  background: var(--card);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
   color: var(--foreground);
-  font-weight: 700;
 }
 
 /* Reddit-style nested timeline tracing */
@@ -6771,36 +6807,46 @@ pre {
    ========================================================================== */
 
 /* Tab Navigation */
+/* Canonical content-section tabs — boxed segmented pills (harmonized
+   with .segmented-nav used across schedules, memory, graph, composio) */
 .tab-navigation {
-  display: flex;
-  gap: 8px;
-  border-bottom: 1px solid var(--border);
+  background: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 2px;
   margin-bottom: 24px;
-  padding-bottom: 0;
-  overflow-x: auto;
+  max-width: 100%;
+  padding: 3px;
 }
 
 .tab-btn {
-  background: none;
+  align-items: center;
+  background: transparent;
   border: none;
-  border-bottom: 2px solid transparent;
+  border-radius: 4px;
   color: var(--muted-foreground);
   cursor: pointer;
-  font-size: 14px;
+  display: inline-flex;
+  font: inherit;
+  font-size: 13px;
   font-weight: 700;
-  padding: 12px 16px;
-  transition: all 0.2s ease;
+  min-height: 30px;
+  padding: 5px 12px;
+  transition: background 150ms ease, color 150ms ease, box-shadow 150ms ease;
   white-space: nowrap;
 }
 
 .tab-btn:hover {
+  background: color-mix(in srgb, var(--card) 60%, transparent);
   color: var(--foreground);
-  border-bottom-color: color-mix(in srgb, var(--border) 80%, var(--foreground));
 }
 
 .tab-btn.active {
-  color: var(--accent);
-  border-bottom-color: var(--accent);
+  background: var(--card);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+  color: var(--foreground);
 }
 
 .tab-content {
@@ -7850,4 +7896,490 @@ dialog::backdrop {
   border-color: color-mix(in srgb, var(--destructive) 25%, transparent);
 }
 
+
+
+/* ============================================================
+   DESIGN REFRESH — global polish additions
+   ============================================================ */
+
+/* Pre block copy-button wrapper */
+.pre-wrap {
+  position: relative;
+}
+
+.pre-copy-btn {
+  align-items: center;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
+  color: rgba(255, 255, 255, 0.6);
+  cursor: pointer;
+  display: inline-flex;
+  font-size: 11px;
+  font-weight: 600;
+  gap: 5px;
+  justify-content: center;
+  min-height: 26px;
+  padding: 3px 8px;
+  position: absolute;
+  right: 10px;
+  top: 10px;
+  transition: background 150ms ease, color 150ms ease, border-color 150ms ease;
+}
+
+.pre-copy-btn:hover {
+  background: rgba(255, 255, 255, 0.14);
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.pre-copy-btn.copied {
+  background: rgba(57, 185, 139, 0.18);
+  border-color: rgba(57, 185, 139, 0.3);
+  color: #78d9aa;
+}
+
+/* Empty state — centered with optional icon */
+.empty-state {
+  align-items: center;
+  color: var(--muted-foreground);
+  display: flex;
+  flex-direction: column;
+  font-size: 14px;
+  gap: 10px;
+  justify-content: center;
+  padding: 40px 20px;
+  text-align: center;
+}
+
+.empty-state svg,
+.empty-state-icon {
+  color: var(--muted-foreground);
+  height: 32px;
+  opacity: 0.4;
+  width: 32px;
+}
+
+/* Pager improvement */
+.pager {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+  margin-top: 20px;
+  padding: 16px 0;
+}
+
+.pager strong {
+  color: var(--muted-foreground);
+  font-size: 13px;
+  font-weight: 600;
+  padding: 0 4px;
+}
+
+/* Details/summary chevron */
+details > summary {
+  cursor: pointer;
+  list-style: none;
+  position: relative;
+}
+
+details > summary::-webkit-details-marker {
+  display: none;
+}
+
+details > summary::after {
+  content: "›";
+  display: inline-block;
+  font-size: 14px;
+  font-weight: 700;
+  margin-left: 6px;
+  opacity: 0.5;
+  rotate: 90deg;
+  transition: rotate 180ms ease;
+}
+
+details[open] > summary::after {
+  rotate: 270deg;
+}
+
+/* Badge — slightly sharper corners for operator aesthetic */
+.badge {
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  min-height: 20px;
+  padding: 2px 7px;
+}
+
+/* Segmented nav active item gets subtle shadow */
+.segmented-item.active {
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+/* Filter label letter-spacing improvement */
+.filters label {
+  letter-spacing: 0.03em;
+}
+
+/* Status chips — add leading dot */
+.status-chip::before {
+  background: currentColor;
+  border-radius: 50%;
+  content: "";
+  display: inline-block;
+  height: 6px;
+  margin-right: 6px;
+  opacity: 0.7;
+  width: 6px;
+  vertical-align: 1px;
+}
+
+/* Card shadow improvement */
+.card {
+  box-shadow: 0 0 0 1px var(--card-border), 0 2px 4px rgba(0, 0, 0, 0.03), 0 8px 16px rgba(0, 0, 0, 0.02);
+}
+
+[data-theme="dark"] .card {
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.06), 0 2px 8px rgba(0, 0, 0, 0.2);
+}
+
+/* Card > header alignment — ensure section-header-row works inside cards */
+.card > .section-header-row {
+  border-bottom: 1px solid var(--border);
+  padding: 14px 16px;
+}
+
+/* Overview proposed facts highlight */
+.proposed-facts-section {
+  background: color-mix(in srgb, var(--warning-bg) 30%, var(--card));
+  border-color: color-mix(in srgb, var(--warning) 20%, var(--border));
+  border-left: 3px solid var(--warning);
+}
+
+/* Witness draft DM highlight */
+.witness-message-preview {
+  background: color-mix(in srgb, var(--accent-bg) 60%, var(--card));
+  border-color: var(--accent-border);
+}
+
+/* Integrations in-page anchor nav */
+.integration-tabs {
+  align-items: center;
+  background: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  display: inline-flex;
+  gap: 2px;
+  margin-bottom: 20px;
+  padding: 3px;
+}
+
+.integration-tabs a {
+  align-items: center;
+  border-radius: 4px;
+  color: var(--muted-foreground);
+  display: inline-flex;
+  font-size: 13px;
+  font-weight: 700;
+  min-height: 30px;
+  padding: 5px 11px;
+  text-decoration: none;
+  transition: background 150ms ease, color 150ms ease;
+}
+
+.integration-tabs a:hover,
+.integration-tabs a.active {
+  background: var(--card);
+  color: var(--foreground);
+}
+
+.integration-tabs a.active {
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+/* Segmented control container alias (composio catalog view switch) —
+   shares the canonical boxed segmented-pill look */
+.segmented-control {
+  background: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+}
+
+/* Usage quick-filter pills */
+.quick-filter-pills {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.quick-filter-pill {
+  align-items: center;
+  background: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  display: inline-flex;
+  font-size: 12px;
+  font-weight: 700;
+  min-height: 30px;
+  padding: 4px 10px;
+  text-decoration: none;
+  transition: background 150ms ease, color 150ms ease, border-color 150ms ease;
+}
+
+.quick-filter-pill:hover {
+  background: var(--secondary);
+  border-color: var(--input);
+  color: var(--foreground);
+  text-decoration: none;
+}
+
+.quick-filter-pill.active {
+  background: var(--accent-bg);
+  border-color: var(--accent-border);
+  color: var(--accent-strong);
+}
+
+/* Task ID badge in page headings */
+.task-id-badge {
+  background: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--muted-foreground);
+  display: inline-block;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  margin-top: 4px;
+  max-width: 100%;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  padding: 2px 6px;
+}
+
+/* Schedule next-run prominence */
+.schedule-next-run-badge {
+  align-items: center;
+  background: var(--accent-bg);
+  border: 1px solid var(--accent-border);
+  border-radius: 6px;
+  color: var(--accent-strong);
+  display: inline-flex;
+  font-size: 12px;
+  font-weight: 700;
+  gap: 5px;
+  padding: 3px 8px;
+}
+
+.schedule-next-run-badge.overdue {
+  background: var(--destructive-bg);
+  border-color: color-mix(in srgb, var(--destructive) 28%, transparent);
+  color: var(--destructive);
+}
+
+.schedule-next-run-badge.due-soon {
+  background: var(--warning-bg);
+  border-color: color-mix(in srgb, var(--warning) 28%, transparent);
+  color: var(--warning);
+}
+
+/* Knowledge graph compact summary (4 cards) */
+.graph-summary-compact {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin-bottom: 20px;
+}
+
+/* Graph canvas controls */
+.graph-canvas-controls {
+  bottom: 12px;
+  display: flex;
+  gap: 6px;
+  position: absolute;
+  right: 12px;
+  z-index: 5;
+}
+
+.graph-canvas-control-btn {
+  align-items: center;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.1);
+  color: var(--foreground);
+  cursor: pointer;
+  display: inline-flex;
+  font-size: 13px;
+  font-weight: 700;
+  justify-content: center;
+  min-height: 30px;
+  min-width: 30px;
+  padding: 4px 8px;
+  transition: background 150ms ease;
+}
+
+.graph-canvas-control-btn:hover {
+  background: var(--muted);
+}
+
+/* Playground stats bar always visible */
+.playground-stats-bar {
+  display: grid !important;
+}
+
+/* Witness action condensed toolbar */
+.witness-actions-toolbar {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.witness-actions-toolbar form {
+  margin: 0;
+}
+
+.witness-actions-toolbar .btn,
+.witness-actions-toolbar .btn-ghost {
+  font-size: 12px;
+  min-height: 28px;
+  padding: 4px 10px;
+}
+
+/* Section collapse toggles */
+.section-collapse-toggle {
+  background: none;
+  border: none;
+  color: var(--accent);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 0;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.section-collapse-toggle:hover {
+  color: var(--accent-strong);
+}
+
+/* Improved notice */
+.notice {
+  border-radius: var(--radius);
+  font-size: 13px;
+  line-height: 1.45;
+  padding: 10px 14px;
+}
+
+/* Table cells — reduce padding slightly for density */
+.table th,
+.table td {
+  padding: 9px 12px;
+}
+
+
+/* Overview restructure helpers (replacing inline styles) */
+.overview-block-gap {
+  margin-bottom: 20px;
+}
+
+.overview-insight-stack {
+  align-content: start;
+  display: grid;
+  gap: 12px;
+}
+
+/* Usage detailed-breakdown collapsibles */
+.usage-breakdown-summary {
+  color: var(--foreground);
+  font-size: 15px;
+  font-weight: 700;
+  padding: 14px 16px;
+}
+
+.usage-breakdown-summary--bordered {
+  border-bottom: 1px solid var(--border);
+}
+
+.usage-breakdown-body {
+  padding-top: 4px;
+}
+
+/* Schedule row header (next-run prominence) */
+.schedule-row-header {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+
+.schedule-chip-row {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+/* Memory proposed-facts review banner */
+.memory-review-banner {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.memory-review-banner .btn-ghost {
+  flex-shrink: 0;
+  font-size: 12px;
+  min-height: 28px;
+  padding: 4px 10px;
+}
+
+/* Playground run hint */
+.pg-run-hint {
+  color: var(--muted-foreground);
+  font-size: 12px;
+  margin-right: auto;
+}
+
+.pg-run-hint kbd {
+  background: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 11px;
+  padding: 1px 5px;
+}
+
+.pg-console-actions {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+}
+
+.pg-copy-console-btn {
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 5px;
+  color: rgba(255, 255, 255, 0.5);
+  cursor: pointer;
+  font-family: monospace;
+  font-size: 11px;
+  padding: 2px 8px;
+  transition: background 150ms ease, color 150ms ease;
+}
+
+.pg-copy-console-btn:hover {
+  background: rgba(255, 255, 255, 0.14);
+  color: rgba(255, 255, 255, 0.85);
+}
 

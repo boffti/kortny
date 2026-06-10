@@ -80,6 +80,15 @@ from kortny.dashboard.knowledge_graph_actions import (
     confirm_edge,
     confirm_entity,
 )
+from kortny.dashboard.mcp_actions import (
+    McpServerError,
+    add_mcp_server,
+    parse_kv_textarea,
+    remove_mcp_server,
+    toggle_mcp_server,
+    toggle_mcp_tool,
+)
+from kortny.dashboard.mcp_data import get_mcp_dashboard
 from kortny.dashboard.memory_actions import (
     dashboard_actor,
     forget_fact,
@@ -1084,6 +1093,208 @@ def register_routes(app: FastAPI) -> None:
         return _redirect_with_notice(
             next_path,
             f"Trust level set to {skill.trust_level}.",
+        )
+
+    @app.get("/mcp", response_class=HTMLResponse)
+    def mcp_servers(
+        request: Request,
+        principal: Annotated[DashboardPrincipal, Depends(require_admin)],
+        session: Annotated[Session, Depends(get_session)],
+        notice: Annotated[str | None, Query()] = None,
+        notice_tone: Annotated[str, Query()] = "success",
+    ) -> Response:
+        installation_id = _dashboard_installation_id(session, principal)
+        mcp = get_mcp_dashboard(session, installation_id)
+        return templates.TemplateResponse(
+            request=request,
+            name="mcp_servers.html",
+            context={
+                **_dashboard_context(principal, active_page="mcp"),
+                "mcp": mcp,
+                "mcp_return_path": _request_path(request),
+                "notice": notice,
+                "notice_tone": _notice_tone(notice_tone),
+            },
+        )
+
+    @app.post("/mcp/add")
+    async def mcp_add(
+        request: Request,
+        principal: Annotated[DashboardPrincipal, Depends(require_admin)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> RedirectResponse:
+        form = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
+        next_path = _safe_next_path(form.get("next", ["/mcp"])[0])
+        installation_id = _dashboard_installation_id(session, principal)
+        if installation_id is None:
+            return _redirect_with_notice(
+                next_path,
+                "Registering an MCP server requires a selected workspace.",
+                tone="danger",
+            )
+        actor = principal.slack_user_id or dashboard_actor(principal.display_name)
+        runtime_settings, runtime_error = _load_runtime_settings()
+        encryption_key = (
+            runtime_settings.encryption_key if runtime_settings is not None else None
+        )
+        transport = _form_value(form, "transport") or "stdio"
+        args_raw = _form_value(form, "args") or ""
+        args_list = [line.strip() for line in args_raw.splitlines() if line.strip()]
+        env_pairs = parse_kv_textarea(_form_value(form, "env") or "")
+        header_pairs = parse_kv_textarea(_form_value(form, "headers") or "")
+        secret_pairs = parse_kv_textarea(_form_value(form, "secrets") or "")
+        try:
+            server = add_mcp_server(
+                session,
+                installation_id=installation_id,
+                name=_form_value(form, "name") or "",
+                transport=transport,
+                command=_form_value(form, "command"),
+                args=args_list,
+                url=_form_value(form, "url"),
+                env_pairs=env_pairs,
+                header_pairs=header_pairs,
+                secret_pairs=secret_pairs,
+                created_by=actor,
+                encryption_key=encryption_key,
+            )
+            session.commit()
+        except McpServerError as exc:
+            session.rollback()
+            return _redirect_with_notice(next_path, str(exc), tone="danger")
+        # Attempt immediate discovery; keep server on failure.
+        discovery_notice = _mcp_attempt_discovery(
+            session,
+            server_id=server.id,
+            installation_id=installation_id,
+            runtime_settings=runtime_settings,
+        )
+        session.commit()
+        return _redirect_with_notice(
+            next_path,
+            f"MCP server '{server.name}' registered. {discovery_notice}".strip(),
+            tone="success" if "Error" not in discovery_notice else "warning",
+        )
+
+    @app.post("/mcp/{server_id}/remove")
+    async def mcp_remove(
+        request: Request,
+        server_id: UUID,
+        principal: Annotated[DashboardPrincipal, Depends(require_admin)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> RedirectResponse:
+        form = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
+        next_path = _safe_next_path(form.get("next", ["/mcp"])[0])
+        installation_id = _dashboard_installation_id(session, principal)
+        if installation_id is None:
+            return _redirect_with_notice(
+                next_path,
+                "No workspace scope available.",
+                tone="danger",
+            )
+        try:
+            server = remove_mcp_server(
+                session,
+                installation_id=installation_id,
+                server_id=server_id,
+            )
+            session.commit()
+        except McpServerError as exc:
+            session.rollback()
+            return _redirect_with_notice(next_path, str(exc), tone="danger")
+        return _redirect_with_notice(
+            next_path,
+            f"MCP server '{server.name}' removed.",
+            tone="warning",
+        )
+
+    @app.post("/mcp/{server_id}/toggle")
+    async def mcp_toggle(
+        request: Request,
+        server_id: UUID,
+        principal: Annotated[DashboardPrincipal, Depends(require_admin)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> RedirectResponse:
+        form = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
+        next_path = _safe_next_path(form.get("next", ["/mcp"])[0])
+        installation_id = _dashboard_installation_id(session, principal)
+        if installation_id is None:
+            return _redirect_with_notice(
+                next_path, "No workspace scope available.", tone="danger"
+            )
+        try:
+            server = toggle_mcp_server(
+                session,
+                installation_id=installation_id,
+                server_id=server_id,
+            )
+            session.commit()
+        except McpServerError as exc:
+            session.rollback()
+            return _redirect_with_notice(next_path, str(exc), tone="danger")
+        label = "enabled" if server.status == "enabled" else "disabled"
+        return _redirect_with_notice(
+            next_path,
+            f"MCP server '{server.name}' {label}.",
+            tone="success" if server.status == "enabled" else "warning",
+        )
+
+    @app.post("/mcp/{server_id}/discover")
+    async def mcp_discover(
+        request: Request,
+        server_id: UUID,
+        principal: Annotated[DashboardPrincipal, Depends(require_admin)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> RedirectResponse:
+        form = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
+        next_path = _safe_next_path(form.get("next", ["/mcp"])[0])
+        installation_id = _dashboard_installation_id(session, principal)
+        if installation_id is None:
+            return _redirect_with_notice(
+                next_path, "No workspace scope available.", tone="danger"
+            )
+        runtime_settings, _runtime_error = _load_runtime_settings()
+        notice = _mcp_attempt_discovery(
+            session,
+            server_id=server_id,
+            installation_id=installation_id,
+            runtime_settings=runtime_settings,
+        )
+        session.commit()
+        tone = "danger" if "Error" in notice else "success"
+        return _redirect_with_notice(next_path, notice, tone=tone)
+
+    @app.post("/mcp/{server_id}/tools/{tool_id}/toggle")
+    async def mcp_tool_toggle(
+        request: Request,
+        server_id: UUID,
+        tool_id: UUID,
+        principal: Annotated[DashboardPrincipal, Depends(require_admin)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> RedirectResponse:
+        form = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
+        next_path = _safe_next_path(form.get("next", ["/mcp"])[0])
+        installation_id = _dashboard_installation_id(session, principal)
+        if installation_id is None:
+            return _redirect_with_notice(
+                next_path, "No workspace scope available.", tone="danger"
+            )
+        try:
+            tool = toggle_mcp_tool(
+                session,
+                installation_id=installation_id,
+                server_id=server_id,
+                tool_id=tool_id,
+            )
+            session.commit()
+        except McpServerError as exc:
+            session.rollback()
+            return _redirect_with_notice(next_path, str(exc), tone="danger")
+        label = "enabled" if tool.enabled else "disabled"
+        return _redirect_with_notice(
+            next_path,
+            f"Tool '{tool.name}' {label}.",
+            tone="success" if tool.enabled else "warning",
         )
 
     @app.post("/knowledge-graph/refresh")
@@ -4556,3 +4767,48 @@ def _json(value: object) -> str:
     if value is None:
         return "{}"
     return json.dumps(value, indent=2, sort_keys=True, default=str)
+
+
+def _mcp_attempt_discovery(
+    session: Session,
+    *,
+    server_id: uuid.UUID,
+    installation_id: uuid.UUID,
+    runtime_settings: Settings | None,
+) -> str:
+    """Run discover_server_tools against a registered MCP server.
+
+    Returns a human-readable notice string (success or error).
+    Does NOT commit — caller must commit after.
+    """
+    from kortny.dashboard.mcp_actions import upsert_discovered_tools as _upsert
+    from kortny.db.models import McpServer as _McpServerORM
+
+    server = session.get(_McpServerORM, server_id)
+    if server is None or server.installation_id != installation_id:
+        return "MCP server not found."
+
+    encryption_key = (
+        runtime_settings.encryption_key if runtime_settings is not None else None
+    )
+    if encryption_key is None:
+        _upsert(
+            session,
+            server=server,
+            discovered=[],
+            error="ENCRYPTION_KEY is required for discovery.",
+        )
+        return "Discovery skipped: ENCRYPTION_KEY is not configured."
+
+    try:
+        from kortny.mcp.client import discover_server_tools
+
+        tools = discover_server_tools(
+            server, encryption_key=encryption_key, timeout_seconds=30
+        )
+        count = _upsert(session, server=server, discovered=tools, error=None)
+        return f"Discovered {count} tool{'s' if count != 1 else ''}."
+    except Exception as exc:
+        error_str = f"{type(exc).__name__}: {exc}"
+        _upsert(session, server=server, discovered=[], error=error_str)
+        return f"Discovery error: {error_str}"

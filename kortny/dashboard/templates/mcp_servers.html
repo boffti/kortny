@@ -1,0 +1,311 @@
+{% extends "base.html" %}
+
+{% block title %}MCP Servers - Kortny Dashboard{% endblock %}
+
+{% macro transport_badge(transport) %}
+  <span class="badge badge-neutral">{{ transport }}</span>
+{% endmacro %}
+
+{% macro status_badge(status) %}
+  <span class="badge badge-{{ 'success' if status == 'enabled' else 'warning' }}">{{ status }}</span>
+{% endmacro %}
+
+{% macro hint_chip(read_only, destructive) %}
+  {% if read_only %}
+    <span class="mcp-hint-chip mcp-hint-read" title="readOnlyHint=true">read-only</span>
+  {% elif destructive %}
+    <span class="mcp-hint-chip mcp-hint-destructive" title="destructiveHint=true">destructive</span>
+  {% else %}
+    <span class="mcp-hint-chip mcp-hint-unknown" title="No annotation">write</span>
+  {% endif %}
+{% endmacro %}
+
+{% block content %}
+  <section class="page-heading">
+    <div>
+      <h1>MCP Servers</h1>
+      <p>Register Model Context Protocol servers — their tools appear in the agent's catalog automatically.</p>
+    </div>
+  </section>
+
+  {% if notice %}
+    <div class="notice notice-{{ notice_tone }}" role="status">{{ notice }}</div>
+  {% endif %}
+
+  <div class="mcp-trust-callout" role="note">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+    <span><strong>stdio servers run as subprocesses on the Kortny worker.</strong> Only register servers you trust — this is the admin install boundary. The agent can never register servers itself.</span>
+  </div>
+
+  {# ── Registered servers ─────────────────────────────────────── #}
+  <section class="mcp-section" aria-label="Registered MCP servers">
+    <div class="section-header-row">
+      <div>
+        <h2>Registered servers</h2>
+        <p>{{ mcp.enabled_count }} of {{ mcp.servers | length }} server{{ '' if mcp.servers | length == 1 else 's' }} enabled.</p>
+      </div>
+      <span class="mcp-section-count">{{ mcp.servers | length }} server{{ '' if mcp.servers | length == 1 else 's' }}</span>
+    </div>
+
+    {% if mcp.servers %}
+      <div class="mcp-server-list">
+        {% for server in mcp.servers %}
+          <article class="mcp-server-card {{ 'mcp-server-card-enabled' if server.status == 'enabled' else '' }}">
+            <div class="mcp-server-header">
+              <div class="mcp-server-title-row">
+                <code class="mcp-server-name">{{ server.name }}</code>
+                <div class="mcp-server-badges">
+                  {{ transport_badge(server.transport) }}
+                  {{ status_badge(server.status) }}
+                </div>
+              </div>
+              <div class="mcp-server-actions">
+                <form method="post" action="/mcp/{{ server.server_id }}/discover">
+                  <input type="hidden" name="next" value="{{ mcp_return_path }}" />
+                  <button class="btn-ghost" type="submit" title="Re-run tool discovery">Discover</button>
+                </form>
+                <form method="post" action="/mcp/{{ server.server_id }}/toggle">
+                  <input type="hidden" name="next" value="{{ mcp_return_path }}" />
+                  <button class="btn-ghost" type="submit">
+                    {{ 'Disable' if server.status == 'enabled' else 'Enable' }}
+                  </button>
+                </form>
+                <form method="post" action="/mcp/{{ server.server_id }}/remove"
+                      onsubmit="return confirm('Remove MCP server \'{{ server.name }}\'? This deletes all its tool records.');">
+                  <input type="hidden" name="next" value="{{ mcp_return_path }}" />
+                  <button class="btn-ghost btn-ghost-danger" type="submit">Remove</button>
+                </form>
+              </div>
+            </div>
+
+            <div class="mcp-server-meta">
+              {% if server.transport == 'stdio' %}
+                <span class="mcp-meta-chip" title="Command">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="4 17 10 11 4 5"/><line x1="12" x2="20" y1="19" y2="19"/></svg>
+                  <code>{{ server.command }}{% if server.args %} {{ server.args | join(' ') }}{% endif %}</code>
+                </span>
+              {% else %}
+                <span class="mcp-meta-chip" title="Endpoint">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="2" x2="22" y1="12" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+                  <code>{{ server.url }}</code>
+                </span>
+              {% endif %}
+              <span class="mcp-meta-chip" title="Tools">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
+                {{ server.enabled_tool_count }}/{{ server.tool_count }} tool{{ '' if server.tool_count == 1 else 's' }} enabled
+              </span>
+              {% if server.last_discovery_at %}
+                <span class="mcp-meta-chip" title="Last discovery">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                  {{ server.last_discovery_at | datetime }}
+                </span>
+              {% else %}
+                <span class="mcp-meta-chip mcp-meta-undiscovered">No discovery yet</span>
+              {% endif %}
+              <span class="mcp-meta-chip" title="Registered by">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+                {{ server.created_by }}
+              </span>
+            </div>
+
+            {% if server.last_discovery_error %}
+              <div class="mcp-discovery-error">
+                <strong>Discovery error:</strong> {{ server.last_discovery_error }}
+              </div>
+            {% endif %}
+
+            {# Tool list #}
+            {% if server.tools %}
+              <div class="mcp-tool-table-wrap">
+                <table class="mcp-tool-table">
+                  <thead>
+                    <tr>
+                      <th>Tool</th>
+                      <th>Description</th>
+                      <th>Side-effect</th>
+                      <th>Runtime name</th>
+                      <th>Enabled</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {% for tool in server.tools %}
+                      <tr class="{{ '' if tool.enabled else 'mcp-tool-disabled' }}">
+                        <td><code>{{ tool.name }}</code></td>
+                        <td class="mcp-tool-description">{{ tool.description or '—' }}</td>
+                        <td>{{ hint_chip(tool.read_only_hint, tool.destructive_hint) }}</td>
+                        <td><code class="mcp-runtime-name">mcp__{{ server.name }}__{{ tool.name }}</code></td>
+                        <td>
+                          <form method="post" action="/mcp/{{ server.server_id }}/tools/{{ tool.tool_id }}/toggle">
+                            <input type="hidden" name="next" value="{{ mcp_return_path }}" />
+                            <button class="btn-ghost btn-ghost-sm" type="submit">
+                              {{ 'Disable' if tool.enabled else 'Enable' }}
+                            </button>
+                          </form>
+                        </td>
+                      </tr>
+                    {% endfor %}
+                  </tbody>
+                </table>
+              </div>
+            {% else %}
+              <p class="mcp-no-tools">No tools discovered yet — run discovery to populate the catalog.</p>
+            {% endif %}
+          </article>
+        {% endfor %}
+      </div>
+    {% else %}
+      <p class="mcp-empty">No MCP servers registered yet. Use the form below to add one.</p>
+    {% endif %}
+  </section>
+
+  {# ── Add server form ────────────────────────────────────────── #}
+  <section class="mcp-section" aria-label="Register MCP server">
+    <div class="section-header-row">
+      <div>
+        <h2>Register a server</h2>
+        <p>Add a new MCP server. Tool discovery runs automatically on registration; you can re-run it at any time.</p>
+      </div>
+    </div>
+
+    <article class="card mcp-add-card">
+      <form class="mcp-add-form" method="post" action="/mcp/add" id="mcp-add-form">
+        <input type="hidden" name="next" value="{{ mcp_return_path }}" />
+
+        <div class="mcp-form-row">
+          <div class="mcp-form-row-label">
+            <h3>Identity</h3>
+            <p>The name becomes the tool namespace the agent sees: <code>mcp__name__tool</code>.</p>
+          </div>
+          <div class="mcp-form-row-fields">
+            <label class="form-field">
+              <span class="mcp-field-label">Name</span>
+              <input class="input" type="text" name="name" placeholder="github-tools" required
+                     pattern="[a-zA-Z0-9_\-]+"
+                     title="Kebab-case or underscored; letters, digits, - and _ only." />
+              <small class="form-hint">Unique per workspace. Letters, digits, <code>-</code> and <code>_</code>.</small>
+            </label>
+          </div>
+        </div>
+
+        <div class="mcp-form-row">
+          <div class="mcp-form-row-label">
+            <h3>Transport</h3>
+            <p>How Kortny connects to the server.</p>
+          </div>
+          <div class="mcp-form-row-fields">
+            <div class="mcp-transport-cards" role="radiogroup" aria-label="Transport">
+              <label class="mcp-transport-card">
+                <input type="radio" name="transport" value="stdio" checked onchange="mcpToggleTransport(this.value)" />
+                <span class="mcp-transport-card-body">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="4 17 10 11 4 5"/><line x1="12" x2="20" y1="19" y2="19"/></svg>
+                  <span class="mcp-transport-card-title">stdio</span>
+                  <span class="mcp-transport-card-desc">Subprocess on the worker. Everything stays inside your deployment.</span>
+                </span>
+              </label>
+              <label class="mcp-transport-card">
+                <input type="radio" name="transport" value="streamable_http" onchange="mcpToggleTransport(this.value)" />
+                <span class="mcp-transport-card-body">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="2" x2="22" y1="12" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+                  <span class="mcp-transport-card-title">Streamable HTTP</span>
+                  <span class="mcp-transport-card-desc">Remote MCP server over HTTP. Current spec transport.</span>
+                </span>
+              </label>
+              <label class="mcp-transport-card">
+                <input type="radio" name="transport" value="sse" onchange="mcpToggleTransport(this.value)" />
+                <span class="mcp-transport-card-body">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 11a9 9 0 0 1 9 9"/><path d="M4 4a16 16 0 0 1 16 16"/><circle cx="5" cy="19" r="1"/></svg>
+                  <span class="mcp-transport-card-title">SSE</span>
+                  <span class="mcp-transport-card-desc">Legacy remote transport. Prefer Streamable HTTP.</span>
+                </span>
+              </label>
+            </div>
+          </div>
+        </div>
+
+        {# stdio fields #}
+        <div class="mcp-form-row" id="mcp-stdio-fields">
+          <div class="mcp-form-row-label">
+            <h3>Process</h3>
+            <p>The command Kortny's worker launches. Node is required for <code>npx</code>-based servers.</p>
+          </div>
+          <div class="mcp-form-row-fields">
+            <label class="form-field">
+              <span class="mcp-field-label">Command</span>
+              <input class="input" type="text" name="command" placeholder="npx" />
+              <small class="form-hint">e.g. <code>npx</code>, <code>uvx</code>, or <code>/usr/bin/python3</code></small>
+            </label>
+            <label class="form-field">
+              <span class="mcp-field-label">Arguments</span>
+              <textarea class="input mcp-textarea-sm" name="args" rows="3"
+                        placeholder="-y&#10;@modelcontextprotocol/server-github"></textarea>
+              <small class="form-hint">One per line.</small>
+            </label>
+            <label class="form-field">
+              <span class="mcp-field-label">Environment variables <em class="mcp-optional">optional</em></span>
+              <textarea class="input mcp-textarea-sm" name="env" rows="2"
+                        placeholder="GITHUB_PAT_SCOPE=public_repo"></textarea>
+              <small class="form-hint"><code>KEY=value</code>, one per line. Non-secret values only — tokens go in Secrets.</small>
+            </label>
+          </div>
+        </div>
+
+        {# http/sse fields #}
+        <div class="mcp-form-row" id="mcp-http-fields" style="display:none">
+          <div class="mcp-form-row-label">
+            <h3>Endpoint</h3>
+            <p>Where the remote MCP server listens.</p>
+          </div>
+          <div class="mcp-form-row-fields">
+            <label class="form-field">
+              <span class="mcp-field-label">URL</span>
+              <input class="input" type="url" name="url" placeholder="https://mcp.example.com/mcp" />
+            </label>
+            <label class="form-field">
+              <span class="mcp-field-label">HTTP headers <em class="mcp-optional">optional</em></span>
+              <textarea class="input mcp-textarea-sm" name="headers" rows="2"
+                        placeholder="X-Workspace-Id=acme"></textarea>
+              <small class="form-hint"><code>Header-Name=value</code>, one per line. Auth headers go in Secrets.</small>
+            </label>
+          </div>
+        </div>
+
+        <div class="mcp-form-row">
+          <div class="mcp-form-row-label">
+            <h3>
+              <svg class="mcp-label-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+              Secrets
+            </h3>
+            <p>Stored encrypted with your <code>ENCRYPTION_KEY</code>, never shown again. Merged into env vars (stdio) or headers (HTTP) at connect time.</p>
+          </div>
+          <div class="mcp-form-row-fields">
+            <label class="form-field">
+              <span class="mcp-field-label">Encrypted values <em class="mcp-optional">optional</em></span>
+              <textarea class="input mcp-textarea-sm" name="secrets" rows="2"
+                        placeholder="GITHUB_TOKEN=ghp_…"></textarea>
+              <small class="form-hint"><code>KEY=value</code>, one per line.</small>
+            </label>
+          </div>
+        </div>
+
+        <div class="mcp-form-foot">
+          <span class="mcp-form-foot-note">Tool discovery runs automatically after registration.</span>
+          <button class="btn" type="submit">Register server</button>
+        </div>
+      </form>
+    </article>
+  </section>
+
+  <script>
+    function mcpToggleTransport(transport) {
+      var stdioFields = document.getElementById('mcp-stdio-fields');
+      var httpFields = document.getElementById('mcp-http-fields');
+      if (transport === 'stdio') {
+        stdioFields.style.display = '';
+        httpFields.style.display = 'none';
+      } else {
+        stdioFields.style.display = 'none';
+        httpFields.style.display = '';
+      }
+    }
+  </script>
+{% endblock %}

@@ -218,6 +218,10 @@ class Settings(BaseSettings):
     composio_request_timeout_seconds: float = Field(
         default=10.0, validation_alias="COMPOSIO_REQUEST_TIMEOUT_SECONDS"
     )
+    mcp_enabled: bool = Field(default=True, validation_alias="KORTNY_MCP_ENABLED")
+    mcp_tool_timeout_seconds: float = Field(
+        default=60.0, validation_alias="KORTNY_MCP_TOOL_TIMEOUT_SECONDS"
+    )
     brave_search_api_key: str | None = Field(
         default=None, validation_alias="BRAVE_SEARCH_API_KEY"
     )

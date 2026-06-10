@@ -2087,6 +2087,109 @@ class SkillEnablement(Base):
     )
 
 
+class McpServer(Base):
+    __tablename__ = "mcp_servers"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    installation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("installations.id", ondelete="CASCADE"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    transport: Mapped[str] = mapped_column(String, nullable=False)
+    command: Mapped[str | None] = mapped_column(String)
+    args: Mapped[list] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb")
+    )
+    url: Mapped[str | None] = mapped_column(String)
+    env_json: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    headers_json: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    secret_env: Mapped[bytes | None] = mapped_column(BYTEA)
+    status: Mapped[str] = mapped_column(
+        String, nullable=False, server_default="enabled"
+    )
+    last_discovery_at: Mapped[datetime | None] = mapped_column(TZ)
+    last_discovery_error: Mapped[str | None] = mapped_column(Text)
+    created_by: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "transport in ('stdio', 'streamable_http', 'sse')",
+            name="ck_mcp_servers_transport",
+        ),
+        CheckConstraint(
+            "status in ('enabled', 'disabled')",
+            name="ck_mcp_servers_status",
+        ),
+        CheckConstraint(
+            "(transport = 'stdio' and command is not null) or "
+            "(transport in ('streamable_http', 'sse') and url is not null)",
+            name="ck_mcp_servers_transport_target",
+        ),
+        UniqueConstraint(
+            "installation_id",
+            "name",
+            name="uq_mcp_servers_installation_name",
+        ),
+        Index(
+            "idx_mcp_servers_enabled_lookup",
+            "installation_id",
+            "status",
+        ),
+    )
+
+
+class McpServerTool(Base):
+    __tablename__ = "mcp_server_tools"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    server_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("mcp_servers.id", ondelete="CASCADE"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    input_schema: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    read_only_hint: Mapped[bool | None] = mapped_column(Boolean)
+    destructive_hint: Mapped[bool | None] = mapped_column(Boolean)
+    enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("true")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "server_id",
+            "name",
+            name="uq_mcp_server_tools_server_name",
+        ),
+        Index(
+            "idx_mcp_server_tools_enabled_lookup",
+            "server_id",
+            "enabled",
+        ),
+    )
+
+
 class Episode(Base):
     __tablename__ = "episodes"
 

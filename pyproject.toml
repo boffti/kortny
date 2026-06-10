@@ -16,6 +16,7 @@ dependencies = [
     "itsdangerous>=2.2",
     "jinja2>=3.1",
     "litellm>=1.83",
+    "mcp>=1.27.2",
     "opentelemetry-api>=1.28",
     "opentelemetry-exporter-otlp-proto-http>=1.28",
     "opentelemetry-sdk>=1.28",

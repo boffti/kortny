@@ -27,7 +27,14 @@ from kortny.approvals import (
 from kortny.composio import ComposioClient
 from kortny.composio.provider import ComposioExternalToolProvider
 from kortny.config import Settings, load_settings
-from kortny.db.models import Artifact, Task, TaskEvent, TaskEventType, TaskStatus
+from kortny.db.models import (
+    Artifact,
+    McpServer,
+    Task,
+    TaskEvent,
+    TaskEventType,
+    TaskStatus,
+)
 from kortny.db.models import LLMProvider as DbLLMProvider
 from kortny.execution import task_workspace
 from kortny.knowledge_graph import (
@@ -47,6 +54,7 @@ from kortny.llm.runtime_config import (
     create_provider_for_selection,
     select_runtime_model,
 )
+from kortny.mcp.provider import McpExternalToolProvider
 from kortny.memory import WorkspaceStateService
 from kortny.observability import log_observation
 from kortny.observe.assessment import (
@@ -1637,7 +1645,32 @@ class AgentTaskExecutor:
                     per_toolkit_limit=settings.composio_catalog_limit,
                 )
             )
+        if settings.mcp_enabled and self._installation_has_mcp_servers(session, task):
+            providers.append(
+                McpExternalToolProvider(
+                    session=session,
+                    task=task,
+                    encryption_key=settings.encryption_key,
+                    tool_timeout_seconds=settings.mcp_tool_timeout_seconds,
+                )
+            )
         return providers
+
+    def _installation_has_mcp_servers(
+        self,
+        session: Session,
+        task: Task,
+    ) -> bool:
+        return bool(
+            session.scalar(
+                select(McpServer.id)
+                .where(
+                    McpServer.installation_id == task.installation_id,
+                    McpServer.status == "enabled",
+                )
+                .limit(1)
+            )
+        )
 
     def _build_slack_history_client(self, settings: Settings) -> Any:
         if self.slack_client is not None and hasattr(

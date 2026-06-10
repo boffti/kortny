@@ -513,3 +513,104 @@ class TestSkillEnablement:
                 scope_id=None,
                 added_by="dashboard:tester",
             )
+
+
+class TestSkillsContextBlock:
+    def test_context_includes_l1_block_for_enabled_skills(
+        self, db_session: Session
+    ) -> None:
+        from kortny.agent.context import ContextAssembler
+
+        installation = create_installation(db_session)
+        registry = SkillRegistryService(db_session)
+        skill, _ = create_skill(db_session, slug="meeting-recap", owner_type="system")
+        registry.enable_skill(
+            installation_id=installation.id,
+            skill_id=skill.id,
+            scope_type="workspace",
+            scope_id=None,
+            added_by="dashboard:tester",
+        )
+        task = create_task(db_session, installation)
+
+        package = ContextAssembler(session=db_session).build_for_task(task)
+
+        skills_blocks = [
+            message.content
+            for message in package.messages
+            if message.role == "system"
+            and message.content
+            and "<available_skills>" in message.content
+        ]
+        assert len(skills_blocks) == 1
+        assert "- meeting-recap [workspace]:" in skills_blocks[0]
+        assert "load_skill" in skills_blocks[0]
+        assert [s.slug for s in package.selected_skills] == ["meeting-recap"]
+
+    def test_context_has_no_skills_block_when_none_enabled(
+        self, db_session: Session
+    ) -> None:
+        from kortny.agent.context import ContextAssembler
+
+        task = create_task(db_session)
+
+        package = ContextAssembler(session=db_session).build_for_task(task)
+
+        assert package.selected_skills == ()
+        assert not any(
+            message.content and "<available_skills>" in message.content
+            for message in package.messages
+        )
+
+    def test_skills_block_bounded_by_char_budget(self, db_session: Session) -> None:
+        from kortny.agent.context import (
+            DEFAULT_SKILLS_CONTEXT_MAX_CHARS,
+            ContextAssembler,
+        )
+
+        installation = create_installation(db_session)
+        registry = SkillRegistryService(db_session)
+        for index in range(40):
+            skill = ProceduralSkill(
+                slug=f"bulk-skill-{index:02d}",
+                owner_type="system",
+                owner_id=None,
+                status="active",
+                trust_level="trusted",
+                visibility="catalog",
+                provenance="kortny",
+            )
+            db_session.add(skill)
+            db_session.flush()
+            db_session.add(
+                ProceduralSkillVersion(
+                    skill_id=skill.id,
+                    version="1.0.0",
+                    status="active",
+                    name=f"Bulk {index}",
+                    description="Use when the task involves " + "x" * 200,
+                    instructions_md="## Steps",
+                    content_sha256="0" * 64,
+                    created_by="test",
+                )
+            )
+            db_session.flush()
+            registry.enable_skill(
+                installation_id=installation.id,
+                skill_id=skill.id,
+                scope_type="workspace",
+                scope_id=None,
+                added_by="dashboard:tester",
+            )
+        task = create_task(db_session, installation)
+
+        package = ContextAssembler(session=db_session).build_for_task(task)
+
+        block = next(
+            message.content
+            for message in package.messages
+            if message.content and "<available_skills>" in message.content
+        )
+        assert len(block) <= DEFAULT_SKILLS_CONTEXT_MAX_CHARS + 50
+        assert any(o.kind == "skills" for o in package.omissions)
+        assert 0 < len(package.selected_skills) < 40

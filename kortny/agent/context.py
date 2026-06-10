@@ -46,6 +46,8 @@ DEFAULT_EPISODE_CONTEXT_LIMIT = 5
 DEFAULT_GRAPH_CONTEXT_MAX_CHARS = 1_500
 DEFAULT_GRAPH_CONTEXT_MAX_ITEMS = 12
 DEFAULT_GRAPH_CONTEXT_MAX_HOPS = 2
+DEFAULT_SKILLS_CONTEXT_MAX_CHARS = 4_000
+DEFAULT_SKILLS_CONTEXT_MAX_SKILLS = 30
 DEFAULT_CONTEXT_ENGINE_ID = "kortny.context_assembler"
 DEFAULT_CONTEXT_ENGINE_NAME = "ContextAssembler"
 IMMEDIATE_PRIOR_INPUT_MAX_CHARS = 500
@@ -157,6 +159,19 @@ class ContextBudget:
 
 
 @dataclass(frozen=True, slots=True)
+class ContextSkill:
+    """An enabled procedural skill surfaced in the L1 skills block."""
+
+    skill_id: uuid.UUID
+    version_id: uuid.UUID
+    slug: str
+    name: str
+    description: str
+    trust_level: str
+    scope_type: str
+
+
+@dataclass(frozen=True, slots=True)
 class ContextOmission:
     """Context omitted or compacted while building the prompt."""
 
@@ -179,6 +194,7 @@ class ContextPackage:
     acknowledgement: ContextAcknowledgement | None
     budget: ContextBudget
     omissions: tuple[ContextOmission, ...]
+    selected_skills: tuple[ContextSkill, ...] = ()
     context_engine_id: str = DEFAULT_CONTEXT_ENGINE_ID
     context_engine_name: str = DEFAULT_CONTEXT_ENGINE_NAME
 
@@ -211,6 +227,13 @@ class _GraphContext:
     selected_entities: tuple[ContextGraphEntity, ...]
     selected_edges: tuple[ContextGraphEdge, ...]
     returned_scopes: tuple[VisibilityScope, ...]
+    omissions: tuple[ContextOmission, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _SkillsContext:
+    content: str | None
+    selected_skills: tuple[ContextSkill, ...]
     omissions: tuple[ContextOmission, ...]
 
 
@@ -322,6 +345,10 @@ class ContextAssembler:
         if graph_context.content:
             messages.append(ChatMessage(role="system", content=graph_context.content))
 
+        skills_context = self._skills_context(task)
+        if skills_context.content:
+            messages.append(ChatMessage(role="system", content=skills_context.content))
+
         messages.append(ChatMessage(role="user", content=task.input))
 
         package = ContextPackage(
@@ -354,7 +381,9 @@ class ContextAssembler:
                 + prior_context.omissions
                 + episode_context.omissions
                 + graph_context.omissions
+                + skills_context.omissions
             ),
+            selected_skills=skills_context.selected_skills,
             context_engine_id=self.context_engine_id,
             context_engine_name=self.context_engine_name,
         )
@@ -372,6 +401,7 @@ class ContextAssembler:
                     package.selected_graph_entities
                 ),
                 "context.selected_graph_edge_count": len(package.selected_graph_edges),
+                "context.selected_skill_count": len(package.selected_skills),
                 "context.acknowledgement_present": package.acknowledgement is not None,
                 "context.context_chars": _context_chars(package),
                 "context.omission_count": len(package.omissions),
@@ -417,6 +447,10 @@ class ContextAssembler:
             ],
             selected_graph_edge_ids=[
                 str(edge.edge_id) for edge in package.selected_graph_edges
+            ],
+            selected_skill_slugs=[skill.slug for skill in package.selected_skills],
+            selected_skill_ids=[
+                str(skill.skill_id) for skill in package.selected_skills
             ],
             acknowledgement_present=package.acknowledgement is not None,
             acknowledgement_message_ts=package.acknowledgement.message_ts
@@ -756,6 +790,77 @@ class ContextAssembler:
             omissions=tuple(
                 ContextOmission("knowledge_graph", reason, 1) for reason in omissions
             ),
+        )
+
+    def _skills_context(self, task: Task) -> _SkillsContext:
+        """Build the L1 name+description block for skills enabled in scope."""
+
+        from kortny.skills import SkillRegistryService
+
+        try:
+            enabled = SkillRegistryService(
+                self.session, task_service=self.task_service
+            ).enabled_skills_for_task(task)
+        except Exception:  # pragma: no cover - defensive: skills never block a task
+            logger.exception("skills context build failed for task %s", task.id)
+            return _SkillsContext(content=None, selected_skills=(), omissions=())
+        if not enabled:
+            return _SkillsContext(content=None, selected_skills=(), omissions=())
+
+        omissions: list[ContextOmission] = []
+        if len(enabled) > DEFAULT_SKILLS_CONTEXT_MAX_SKILLS:
+            omissions.append(
+                ContextOmission(
+                    kind="skills",
+                    reason="skills_context_max_skills",
+                    count=len(enabled) - DEFAULT_SKILLS_CONTEXT_MAX_SKILLS,
+                )
+            )
+            enabled = enabled[:DEFAULT_SKILLS_CONTEXT_MAX_SKILLS]
+
+        selected: list[ContextSkill] = []
+        lines = [
+            "<available_skills>",
+            "You have added skills available. If a skill's description matches "
+            "the task, call the load_skill tool with its slug to get the full "
+            "instructions BEFORE doing the work, then follow them. Use "
+            "load_skill_resource(slug, path) to read a skill's bundled "
+            "reference files.",
+        ]
+        used_chars = sum(len(line) + 1 for line in lines) + len("</available_skills>")
+        for item in enabled:
+            line = f"- {item.slug} [{item.scope_type}]: {item.description}"
+            if used_chars + len(line) + 1 > DEFAULT_SKILLS_CONTEXT_MAX_CHARS:
+                omissions.append(
+                    ContextOmission(
+                        kind="skills",
+                        reason="skills_context_max_chars",
+                        count=len(enabled) - len(selected),
+                    )
+                )
+                break
+            used_chars += len(line) + 1
+            lines.append(line)
+            selected.append(
+                ContextSkill(
+                    skill_id=item.skill_id,
+                    version_id=item.version_id,
+                    slug=item.slug,
+                    name=item.name,
+                    description=item.description,
+                    trust_level=item.trust_level,
+                    scope_type=item.scope_type,
+                )
+            )
+        if not selected:
+            return _SkillsContext(
+                content=None, selected_skills=(), omissions=tuple(omissions)
+            )
+        lines.append("</available_skills>")
+        return _SkillsContext(
+            content="\n".join(lines),
+            selected_skills=tuple(selected),
+            omissions=tuple(omissions),
         )
 
     def _fetch_thread_transcript(

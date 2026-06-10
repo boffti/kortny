@@ -29,6 +29,13 @@ def test_mvp_schema_declares_all_core_tables() -> None:
         "skill_enablements",
         "episodes",
         "llm_usage",
+        "llm_budget_policies",
+        "llm_config_audit",
+        "llm_model_catalog",
+        "llm_model_pricing",
+        "llm_provider_accounts",
+        "llm_tier_assignments",
+        "witness_opportunity_candidates",
         "artifacts",
         "model_pricing",
     }

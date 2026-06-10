@@ -295,6 +295,86 @@ def test_native_tool_cards_use_catalog_metadata() -> None:
     assert cards[0].required_fields == ("message",)
 
 
+def test_llm_selector_includes_intent_fields_in_payload_when_provided() -> None:
+    provider = FakeSelectorLLM(
+        content="""
+        {
+          "selected_tools": [
+            {"registry_name": "composio_firecrawl_search", "confidence": 0.88, "reason": "Matches web research intent"}
+          ],
+          "suppressed_native_tools": ["web_search"],
+          "rejected_tools": [],
+          "route_reason": "intent_web_research"
+        }
+        """
+    )
+
+    result = LLMToolSelector(provider).select(
+        task_id=uuid.uuid4(),
+        task_input="find recent AI research papers",
+        native_cards=(native_web_search_card(),),
+        external_cards=(firecrawl_card(),),
+        intent_classification="task_request",
+        likely_tools=["web_search", "current_research"],
+    )
+
+    assert [selection.registry_name for selection in result.selected_tools] == [
+        "composio_firecrawl_search"
+    ]
+    # Verify intent fields were sent to the LLM
+    user_content = provider.messages[0][1].content
+    assert user_content is not None
+    user_payload = json.loads(user_content)
+    assert "intent" in user_payload
+    assert user_payload["intent"]["classification"] == "task_request"
+    assert "web_search" in user_payload["intent"]["likely_tools"]
+    assert "current_research" in user_payload["intent"]["likely_tools"]
+    assert "note" in user_payload
+
+
+def test_llm_selector_omits_intent_fields_when_not_provided() -> None:
+    provider = FakeSelectorLLM(
+        content="""
+        {
+          "selected_tools": [],
+          "suppressed_native_tools": [],
+          "rejected_tools": [],
+          "route_reason": "no_external_needed"
+        }
+        """
+    )
+
+    LLMToolSelector(provider).select(
+        task_id=uuid.uuid4(),
+        task_input="summarize this channel",
+        native_cards=(native_web_search_card(),),
+        external_cards=(firecrawl_card(),),
+    )
+
+    user_content = provider.messages[0][1].content
+    assert user_content is not None
+    user_payload = json.loads(user_content)
+    assert "intent" not in user_payload
+    assert "note" in user_payload
+
+
+def test_heuristic_selector_accepts_intent_params_without_error() -> None:
+    result = HeuristicToolSelector().select(
+        task_id=uuid.uuid4(),
+        task_input="find recent AI observability tooling",
+        native_cards=(native_web_search_card(),),
+        external_cards=(firecrawl_card(),),
+        intent_classification="task_request",
+        likely_tools=["web_search"],
+    )
+
+    # Heuristic selector ignores intent params but must not raise
+    assert (
+        result.selected_tools == ()
+        or result.selected_tools[0].registry_name == "composio_firecrawl_search"
+    )
+
+
 def native_web_search_card() -> ToolCard:
     return ToolCard(
         registry_name="web_search",

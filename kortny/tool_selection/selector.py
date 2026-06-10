@@ -39,6 +39,7 @@ Return strict JSON with:
 If a selected external tool can replace an overlapping native tool for this task, include that native tool name in suppressed_native_tools.
 If the user explicitly names a connected server, toolkit, or integration, always select its matching tools — never substitute a native tool for an explicitly requested one.
 Keep selected_tools to 0-3 items.
+When the payload includes an "intent" block with "likely_tools", treat those as a strong prior from the upstream intent classifier. If you select nothing despite a non-empty likely_tools list that maps to available external candidates, you must explain why in route_reason.
 """
 
 
@@ -68,6 +69,8 @@ class ToolSelector(Protocol):
         task_input: str,
         native_cards: Sequence[ToolCard],
         external_cards: Sequence[ToolCard],
+        intent_classification: str | None = None,
+        likely_tools: Sequence[str] = (),
     ) -> ToolSelectionResult:
         """Return selected external tools and native suppressions."""
 
@@ -93,6 +96,8 @@ class LLMToolSelector:
         task_input: str,
         native_cards: Sequence[ToolCard],
         external_cards: Sequence[ToolCard],
+        intent_classification: str | None = None,
+        likely_tools: Sequence[str] = (),
     ) -> ToolSelectionResult:
         if not external_cards:
             return ToolSelectionResult(route_reason="no_external_candidates")
@@ -102,6 +107,8 @@ class LLMToolSelector:
             native_cards=native_cards,
             external_cards=external_cards,
             max_prompt_chars=self.max_prompt_chars,
+            intent_classification=intent_classification,
+            likely_tools=list(likely_tools),
         )
         completion = self.llm.complete(
             task_id=task_id,
@@ -153,8 +160,10 @@ class HeuristicToolSelector:
         task_input: str,
         native_cards: Sequence[ToolCard],
         external_cards: Sequence[ToolCard],
+        intent_classification: str | None = None,
+        likely_tools: Sequence[str] = (),
     ) -> ToolSelectionResult:
-        del task_id, native_cards
+        del task_id, native_cards, intent_classification, likely_tools
         if not external_cards:
             return ToolSelectionResult(route_reason="no_external_candidates")
 
@@ -297,6 +306,8 @@ def _fit_selector_payload(
     native_cards: Sequence[ToolCard],
     external_cards: Sequence[ToolCard],
     max_prompt_chars: int,
+    intent_classification: str | None = None,
+    likely_tools: list[str] | None = None,
 ) -> tuple[JsonObject, _SelectorPromptBudget]:
     candidates = list(external_cards)
     description_chars = DEFAULT_PROMPT_DESCRIPTION_CHARS
@@ -306,6 +317,8 @@ def _fit_selector_payload(
         native_cards=native_cards,
         external_cards=candidates,
         max_description_chars=description_chars,
+        intent_classification=intent_classification,
+        likely_tools=likely_tools,
     )
     prompt_chars = _selector_prompt_chars(payload)
     while prompt_chars > max_prompt_chars:
@@ -329,6 +342,8 @@ def _fit_selector_payload(
             native_cards=native_cards,
             external_cards=candidates,
             max_description_chars=description_chars,
+            intent_classification=intent_classification,
+            likely_tools=likely_tools,
         )
         prompt_chars = _selector_prompt_chars(payload)
 
@@ -353,8 +368,10 @@ def _selector_payload(
     native_cards: Sequence[ToolCard],
     external_cards: Sequence[ToolCard],
     max_description_chars: int,
+    intent_classification: str | None = None,
+    likely_tools: list[str] | None = None,
 ) -> JsonObject:
-    return {
+    payload: JsonObject = {
         "task_input": task_input,
         "native_tools": [
             card.prompt_payload(max_description_chars=max_description_chars)
@@ -364,12 +381,21 @@ def _selector_payload(
             card.prompt_payload(max_description_chars=max_description_chars)
             for card in external_cards
         ],
+        "note": "all external candidates listed are already connected and runnable",
         "rules": {
             "read_tools_can_run_automatically": True,
             "write_or_destructive_tools_require_approval": True,
             "max_selected_tools": 3,
         },
     }
+    intent: dict[str, object] = {}
+    if intent_classification is not None:
+        intent["classification"] = intent_classification
+    if likely_tools:
+        intent["likely_tools"] = likely_tools
+    if intent:
+        payload["intent"] = intent
+    return payload
 
 
 def _selector_prompt_chars(payload: JsonObject) -> int:

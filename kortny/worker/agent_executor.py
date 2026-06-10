@@ -139,12 +139,20 @@ GENERIC_FAILURE_TEXT = (
 MEMORY_CONFIRMATION_PURPOSE = "memory_confirmation"
 PLANNED_WORKFLOW_PROGRESS_PURPOSE = "planned_progress_start"
 PLANNED_WORKFLOW_PROGRESS_TEXT = "Hang on, I'll check."
-# The progress blurb runs in the critical path before any real work starts;
-# a slow provider must never stall the task, so cap it hard and fall back to
-# the canned text.
-PLANNED_PROGRESS_TIMEOUT_SECONDS = 10.0
-PLANNED_WORKFLOW_PROGRESS_PROMPT_NAME = "kortny.planned_progress_status"
 TOOL_APPROVAL_PROMPT_SYNTHESIS_PROMPT_NAME = "kortny.tool_approval_prompt"
+
+# Deterministic progress templates — picked by stable hash of task id so retries
+# always get the same line. One sentence, 25-100 chars, first person, no emoji,
+# no tool/agent/runtime jargon.
+_PLANNED_PROGRESS_TEMPLATES: tuple[str, ...] = (
+    "On it — give me a few minutes to dig in.",
+    "Looking into this now, back shortly with what I find.",
+    "Let me pull this together and I'll have something for you soon.",
+    "Working on it — this one will take a moment.",
+    "On it, I'll come back with a thorough answer.",
+    "Digging in now, give me a bit.",
+    "I'll gather what I need and get back to you shortly.",
+)
 TOOL_APPROVAL_PROMPT_RESPONSE_FORMAT: dict[str, str] = {"type": "json_object"}
 ADK_QUICK_FINAL_AUTHORS = frozenset(
     {
@@ -208,6 +216,10 @@ class AgentTaskExecutor:
         self.tool_selector = tool_selector
         self.composio_client = composio_client
         self.response_synthesizer = response_synthesizer
+        # External tool providers created for the in-flight task; closed in the
+        # ``execute`` finally so per-task resources (e.g. MCP sessions and their
+        # subprocesses) never leak. Reset at the start of every ``execute``.
+        self._active_external_providers: list[ExternalToolProvider] = []
 
     def execute(
         self,
@@ -217,6 +229,7 @@ class AgentTaskExecutor:
         task_service: TaskService,
     ) -> TaskExecutionResult:
         settings = self.settings or load_settings()
+        self._active_external_providers = []
         try:
             logger.info("agent executor started task_id=%s", task.id)
             with task_workspace(task.id, base_dir=self.workspace_base_dir) as workspace:
@@ -357,6 +370,30 @@ class AgentTaskExecutor:
                 succeeded=False,
             )
             raise
+        finally:
+            self._close_external_tool_providers()
+
+    def _close_external_tool_providers(self) -> None:
+        """Close any external tool providers created for the in-flight task.
+
+        Providers may hold per-task resources (MCP sessions / subprocesses).
+        Closing is duck-typed (optional ``close``) and best-effort so cleanup
+        never masks the task's real outcome.
+        """
+
+        providers = self._active_external_providers
+        self._active_external_providers = []
+        for provider in providers:
+            close = getattr(provider, "close", None)
+            if not callable(close):
+                continue
+            try:
+                close()
+            except Exception:
+                logger.exception(
+                    "failed to close external tool provider provider=%s",
+                    getattr(provider, "provider_name", type(provider).__name__),
+                )
 
     def _run_channel_graph_refresh_pipeline(
         self,
@@ -1375,16 +1412,32 @@ class AgentTaskExecutor:
             task=task,
             task_service=task_service,
         )
+        raw_intent = _latest_intent_decision(session, task)
+        effective_decision = effective_intent_decision(raw_intent)
+        selector_intent_classification: str | None = None
+        selector_likely_tools: list[str] = []
+        if effective_decision is not None:
+            raw_cls = effective_decision.get("classification")
+            if isinstance(raw_cls, str) and raw_cls:
+                selector_intent_classification = raw_cls
+            raw_lt = effective_decision.get("likely_tools")
+            if isinstance(raw_lt, list):
+                selector_likely_tools = [
+                    item for item in raw_lt if isinstance(item, str) and item
+                ]
+        tool_selection_task_input = _tool_selection_task_input(
+            session=session,
+            task=task,
+            base_input=task.input,
+        )
         try:
             selection = selector.select(
                 task_id=task.id,
-                task_input=_tool_selection_task_input(
-                    session=session,
-                    task=task,
-                    base_input=task.input,
-                ),
+                task_input=tool_selection_task_input,
                 native_cards=native_cards,
                 external_cards=selector_cards,
+                intent_classification=selector_intent_classification,
+                likely_tools=selector_likely_tools,
             )
         except Exception as exc:
             logger.exception("tool selector failed task_id=%s", task.id)
@@ -1400,13 +1453,11 @@ class AgentTaskExecutor:
             )
             selection = HeuristicToolSelector().select(
                 task_id=task.id,
-                task_input=_tool_selection_task_input(
-                    session=session,
-                    task=task,
-                    base_input=task.input,
-                ),
+                task_input=tool_selection_task_input,
                 native_cards=native_cards,
                 external_cards=selector_cards,
+                intent_classification=selector_intent_classification,
+                likely_tools=selector_likely_tools,
             )
         selection = _expand_related_tool_selection(
             task_input=task.input,
@@ -1420,6 +1471,8 @@ class AgentTaskExecutor:
             selection=selection,
             candidate_count=len(external_cards),
             selector_candidate_count=len(selector_cards),
+            intent_classification=selector_intent_classification,
+            intent_likely_tools=selector_likely_tools,
         )
         selected_external_names = set(selection.selected_names)
         suppressed_native_names = set(selection.suppressed_native_tools)
@@ -1470,8 +1523,10 @@ class AgentTaskExecutor:
         selection: ToolSelectionResult,
         candidate_count: int,
         selector_candidate_count: int,
+        intent_classification: str | None = None,
+        intent_likely_tools: list[str] | None = None,
     ) -> None:
-        payload = {
+        payload: JsonObject = {
             "message": "tool_selection_completed",
             "candidate_count": candidate_count,
             "selector_candidate_count": selector_candidate_count,
@@ -1513,6 +1568,16 @@ class AgentTaskExecutor:
                     ),
                 }
                 if selection.budget_omitted_candidate_names
+                else {}
+            ),
+            **(
+                {"intent_classification": intent_classification}
+                if intent_classification is not None
+                else {}
+            ),
+            **(
+                {"intent_likely_tools": intent_likely_tools}
+                if intent_likely_tools
                 else {}
             ),
         }
@@ -1647,6 +1712,7 @@ class AgentTaskExecutor:
                         timeout_seconds=settings.composio_request_timeout_seconds,
                     ),
                     per_toolkit_limit=settings.composio_catalog_limit,
+                    result_max_chars=settings.tool_result_max_chars,
                 )
             )
         if settings.mcp_enabled and self._installation_has_mcp_servers(session, task):
@@ -1656,8 +1722,12 @@ class AgentTaskExecutor:
                     task=task,
                     encryption_key=settings.encryption_key,
                     tool_timeout_seconds=settings.mcp_tool_timeout_seconds,
+                    result_max_chars=settings.tool_result_max_chars,
                 )
             )
+        # Track providers so ``execute`` can close per-task resources (MCP
+        # sessions/subprocesses) when the task finishes.
+        self._active_external_providers.extend(providers)
         return providers
 
     def _installation_has_mcp_servers(
@@ -2085,107 +2155,9 @@ class AgentTaskExecutor:
         task: Task,
         task_service: TaskService,
     ) -> tuple[str, str]:
-        model_route = ModelRouter(settings).route_for_tier(
-            ModelRouteTier.cheap_fast,
-            reason="planned_progress_status",
-        )
-        provider: LLMProvider
-        if self.llm_provider is None:
-            selection = self._select_runtime_model(
-                settings=settings,
-                session=session,
-                task=task,
-                model_route=model_route,
-            )
-            model_route = selection.model_route
-            provider = create_provider_for_selection(
-                settings=settings,
-                selection=selection,
-            )
-            provider_name: DbLLMProvider | str = selection.provider_name
-        else:
-            provider = self.llm_provider
-            provider_name = self.provider_name or DbLLMProvider(
-                settings.llm_provider.value
-            )
-
-        # Freshly built providers are local to this call: clamp the request
-        # timeout so the blurb can't block the pipeline (observed 73s stalls
-        # on slow providers before this cap existed).
-        if hasattr(provider, "timeout"):
-            provider.timeout = min(
-                float(getattr(provider, "timeout", PLANNED_PROGRESS_TIMEOUT_SECONDS)),
-                PLANNED_PROGRESS_TIMEOUT_SECONDS,
-            )
-
-        llm = LLMService(
-            session=session,
-            provider=provider,
-            provider_name=provider_name,
-            task_service=task_service,
-            model_route=model_route,
-        )
-        messages = (
-            ChatMessage(
-                role="system",
-                content=(
-                    "You write Kortny's first Slack progress update for a task that "
-                    "will take more than a quick answer. Return JSON only with a "
-                    "`message` string. Constraints: one sentence, 25-100 characters, "
-                    "first person as Kortny, natural and coworker-like, specific "
-                    "when it helps but never stiff, no user mentions, no emoji, "
-                    "no markdown headings, "
-                    "no backend/agent/model/runtime/tool language, no explanation of "
-                    "what the user is asking, no phrase "
-                    "`split this into workstreams`."
-                ),
-            ),
-            ChatMessage(
-                role="user",
-                content=json.dumps(
-                    {
-                        "slack_surface": (
-                            "dm" if task.slack_channel_id.startswith("D") else "channel"
-                        ),
-                        "user_request": task.input,
-                    },
-                    sort_keys=True,
-                ),
-            ),
-        )
-        try:
-            completion = llm.complete(
-                task_id=task.id,
-                messages=messages,
-                response_format={"type": "json_object"},
-                prompt_name=PLANNED_WORKFLOW_PROGRESS_PROMPT_NAME,
-            )
-            text = _planned_progress_text_from_completion(completion.content)
-        except Exception as exc:
-            task_service.append_event(
-                task,
-                TaskEventType.error,
-                {
-                    "message": "planned_task_progress_synthesis_failed",
-                    "runtime": "adk",
-                    "phase": "started",
-                    "error_type": type(exc).__name__,
-                    "error": str(exc),
-                },
-            )
-            log_observation(
-                logger,
-                "planned_task_progress_synthesis_failed",
-                task=task,
-                runtime="adk",
-                phase="started",
-                error_type=type(exc).__name__,
-                error_summary=str(exc)[:500],
-            )
-            return PLANNED_WORKFLOW_PROGRESS_TEXT, "fallback"
-        if text is None:
-            return PLANNED_WORKFLOW_PROGRESS_TEXT, "fallback"
-        return text, "llm"
+        del settings, session, task_service
+        index = int(task.id.hex[:8], 16) % len(_PLANNED_PROGRESS_TEMPLATES)
+        return _PLANNED_PROGRESS_TEMPLATES[index], "template"
 
     def _project_witness_opportunities_from_result(
         self,
@@ -3303,45 +3275,6 @@ def _input_words(text: str) -> set[str]:
         for raw in text.replace("/", " ").replace("-", " ").replace("_", " ").split()
         if raw.strip()
     } - {""}
-
-
-def _planned_progress_text_from_completion(content: str | None) -> str | None:
-    if not content:
-        return None
-    try:
-        payload = json.loads(content)
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(payload, dict):
-        return None
-    message = payload.get("message")
-    if not isinstance(message, str):
-        return None
-    text = message.strip().strip('"')
-    text = " ".join(text.split())
-    if len(text) < 20 or len(text) > 220:
-        return None
-    lowered = text.casefold()
-    blocked_terms = (
-        "according to",
-        "agent",
-        "backend",
-        "cheap_fast",
-        "guidelines",
-        "inference",
-        "i should",
-        "model",
-        "runtime",
-        "split this into",
-        "the user",
-        "tool",
-        "user asks",
-        "workstreams",
-        "workstream",
-    )
-    if any(term in lowered for term in blocked_terms):
-        return None
-    return text
 
 
 def _tool_approval_prompt_system_prompt() -> str:

@@ -1143,24 +1143,7 @@ def test_agent_executor_posts_planned_workflow_progress_update(
         }
     )
     slack_client = FakeSlackClient()
-    provider = FakeAgentProvider(
-        [
-            Completion(
-                content=json.dumps(
-                    {
-                        "message": (
-                            "I'll check the channel pattern and recent context, "
-                            "then call out what I would watch for."
-                        )
-                    }
-                ),
-                tool_calls=(),
-                usage=TokenUsage(input_tokens=90, output_tokens=24),
-                cost_usd=Decimal("0.000001"),
-                model="deepseek/deepseek-v4-flash-20260423",
-            )
-        ]
-    )
+    provider = FakeAgentProvider([])
 
     class FakeAdkRuntime:
         def __init__(self, **kwargs: Any) -> None:
@@ -1178,6 +1161,8 @@ def test_agent_executor_posts_planned_workflow_progress_update(
         "kortny.agent.adk_runtime.AdkAgentRuntime",
         FakeAdkRuntime,
     )
+
+    from kortny.worker.agent_executor import _PLANNED_PROGRESS_TEMPLATES
 
     result = AgentTaskExecutor(
         settings=settings,
@@ -1200,10 +1185,12 @@ def test_agent_executor_posts_planned_workflow_progress_update(
     assert len(slack_client.messages) == 1
     assert slack_client.messages[0]["channel"] == "C123"
     assert slack_client.messages[0]["thread_ts"] == "EvPlannedWorkflowProgress"
-    assert "channel pattern and recent context" in slack_client.messages[0]["text"]
-    assert "workstreams" not in slack_client.messages[0]["text"].casefold()
-    assert len(provider.calls) == 1
-    assert provider.calls[0][2] == {"type": "json_object"}
+    # Progress text must be one of the deterministic templates
+    posted_text = slack_client.messages[0]["text"]
+    assert posted_text in _PLANNED_PROGRESS_TEMPLATES
+    assert "workstreams" not in posted_text.casefold()
+    # No LLM calls for progress text — provider should be empty
+    assert provider.calls == []
     assert any(
         event.payload.get("message") == "planned_task_started"
         and event.payload.get("progress_updates_enabled") is True
@@ -1217,19 +1204,83 @@ def test_agent_executor_posts_planned_workflow_progress_update(
     assert any(
         event.payload.get("message") == "planned_task_progress_posted"
         and event.payload.get("purpose") == "planned_progress_start"
-        and event.payload.get("text_source") == "llm"
+        and event.payload.get("text_source") == "template"
         for event in events
     )
-    assert any(
-        event.payload.get("message") == "llm_call_started"
-        and event.payload.get("prompt_name") == "kortny.planned_progress_status"
-        and event.payload.get("model_tier") == "cheap_fast"
+    # No llm_call_started events for planned_progress_status
+    assert not any(
+        event.payload.get("prompt_name") == "kortny.planned_progress_status"
         for event in events
     )
-    usage = db_session.scalar(select(LLMUsage).where(LLMUsage.task_id == task.id))
-    assert usage is not None
-    assert usage.model_tier == "cheap_fast"
-    assert usage.model == "deepseek/deepseek-v4-flash-20260423"
+    # No LLMUsage rows from the progress path
+    usage_count = db_session.scalar(
+        select(func.count()).where(LLMUsage.task_id == task.id)
+    )
+    assert usage_count == 0
+
+
+def test_agent_executor_planned_progress_template_is_deterministic(
+    db_session: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same task id always picks the same template; different ids may differ."""
+    from kortny.worker.agent_executor import _PLANNED_PROGRESS_TEMPLATES
+
+    task = create_task(db_session, event_id="EvProgressDeterminism")
+    task.input = "Research best AI agents for trading and summarize the options."
+    db_session.commit()
+
+    # Compute expected template the same way the implementation does
+    expected_index = int(task.id.hex[:8], 16) % len(_PLANNED_PROGRESS_TEMPLATES)
+    expected_text = _PLANNED_PROGRESS_TEMPLATES[expected_index]
+
+    settings = Settings.model_validate(
+        {
+            "SLACK_BOT_TOKEN": "xoxb-test",
+            "SLACK_APP_TOKEN": "xapp-test",
+            "SLACK_SIGNING_SECRET": "signing-secret",
+            "LLM_PROVIDER": SettingsLLMProvider.openrouter,
+            "LLM_API_KEY": "openrouter-key",
+            "LLM_MODEL": "anthropic/sonnet-default",
+            "LLM_CHEAP_MODEL": "deepseek/deepseek-v4-flash",
+            "POSTGRES_URL": "postgresql://kortny:kortny@localhost/kortny",
+            "AGENT_RUNTIME": "adk",
+            "KORTNY_PLANNED_WORKFLOW_PROGRESS_UPDATES_ENABLED": True,
+        }
+    )
+    slack_client = FakeSlackClient()
+    provider = FakeAgentProvider([])
+
+    class FakeAdkRuntime:
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+        def run(self, task_arg: Task) -> AgentRunResult:
+            return AgentRunResult(
+                task_id=task_arg.id,
+                result_summary="Done.",
+                turns=1,
+                artifact_count=0,
+            )
+
+    monkeypatch.setattr("kortny.agent.adk_runtime.AdkAgentRuntime", FakeAdkRuntime)
+
+    AgentTaskExecutor(
+        settings=settings,
+        llm_provider=provider,
+        provider_name="openrouter",
+        slack_client=slack_client,
+    )._run_agent_runtime(
+        settings=settings,
+        session=db_session,
+        task=task,
+        task_service=TaskService(db_session),
+        working_dir=tmp_path,
+    )
+
+    assert len(slack_client.messages) == 1
+    assert slack_client.messages[0]["text"] == expected_text
 
 
 def test_agent_executor_shadow_starts_temporal_for_planned_candidate(

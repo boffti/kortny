@@ -1,0 +1,92 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint, format, typecheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Restore mypy cache
+        uses: actions/cache@v4
+        with:
+          path: .mypy_cache
+          key: mypy-${{ runner.os }}-${{ hashFiles('uv.lock', 'pyproject.toml') }}-${{ github.sha }}
+          restore-keys: |
+            mypy-${{ runner.os }}-${{ hashFiles('uv.lock', 'pyproject.toml') }}-
+            mypy-${{ runner.os }}-
+
+      - name: Ruff lint
+        run: uv run ruff check .
+
+      - name: Ruff format check
+        run: uv run ruff format --check .
+
+      - name: Mypy
+        run: uv run mypy .
+
+  test:
+    name: Tests (Postgres-backed)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: kortny
+          POSTGRES_PASSWORD: kortny
+          POSTGRES_DB: kortny_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U kortny"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Run migrations against the test database
+        # POSTGRES_URL is scoped to this step only: tests/conftest.py refuses to
+        # run if POSTGRES_URL and KORTNY_TEST_POSTGRES_URL point at the same DB.
+        env:
+          POSTGRES_URL: postgresql://kortny:kortny@localhost:5432/kortny_test
+        run: uv run alembic upgrade head
+
+      - name: Run tests
+        env:
+          KORTNY_TEST_POSTGRES_URL: postgresql://kortny:kortny@localhost:5432/kortny_test
+          # Any non-empty string works: kortny derives a Fernet key from it.
+          # Unskips secret-roundtrip tests that are conditional on ENCRYPTION_KEY.
+          ENCRYPTION_KEY: ci-only-test-key
+          # Settings requires this field; tests never call Composio for real.
+          COMPOSIO_API_KEY: ci-only-test-key
+        # Parallel workers each get a private clone of the migrated test DB
+        # (see tests/conftest.py); loadfile keeps each file on one worker.
+        run: uv run pytest -q -n auto --dist loadfile

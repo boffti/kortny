@@ -37,6 +37,7 @@ Return strict JSON with:
 }
 
 If a selected external tool can replace an overlapping native tool for this task, include that native tool name in suppressed_native_tools.
+If the user explicitly names a connected server, toolkit, or integration, always select its matching tools — never substitute a native tool for an explicitly requested one.
 Keep selected_tools to 0-3 items.
 """
 
@@ -120,6 +121,19 @@ class LLMToolSelector:
             },
             allowed_native_names={card.registry_name for card in native_cards},
         )
+        forced = _explicitly_requested_selections(
+            task_input=task_input,
+            external_cards=external_cards,
+            already_selected={
+                selection.registry_name for selection in parsed.selected_tools
+            },
+        )
+        if forced:
+            parsed = replace(
+                parsed,
+                selected_tools=parsed.selected_tools + forced,
+                route_reason=f"{parsed.route_reason}+explicit_toolkit_forced",
+            )
         return replace(
             parsed,
             route_reason=_budgeted_route_reason(parsed.route_reason, budget),
@@ -365,6 +379,53 @@ def _selector_prompt_chars(payload: JsonObject) -> int:
 def _payload_registry_name(payload: JsonObject) -> str:
     registry_name = payload.get("registry_name")
     return registry_name if isinstance(registry_name, str) else ""
+
+
+MAX_FORCED_TOOLKIT_SELECTIONS = 4
+
+
+def _explicitly_requested_selections(
+    *,
+    task_input: str,
+    external_cards: Sequence[ToolCard],
+    already_selected: set[str],
+) -> tuple[ToolSelection, ...]:
+    """Force-include tools whose toolkit/server the user named verbatim.
+
+    The selector LLM runs on the cheap tier and sometimes substitutes a
+    native tool for an explicitly requested integration (observed with MCP
+    servers). Naming a connected toolkit in the request is an unambiguous
+    signal, so it must not be subject to LLM judgment.
+    """
+
+    words = _task_words(task_input)
+    if not words:
+        return ()
+    forced: list[ToolSelection] = []
+    for card in external_cards:
+        if len(forced) >= MAX_FORCED_TOOLKIT_SELECTIONS:
+            break
+        slug = (card.toolkit_slug or "").casefold()
+        if not slug or slug not in words:
+            continue
+        if card.registry_name in already_selected:
+            continue
+        forced.append(
+            ToolSelection(
+                registry_name=card.registry_name,
+                confidence=0.9,
+                reason=f"user explicitly named {card.toolkit_slug}",
+            )
+        )
+    return tuple(forced)
+
+
+def _task_words(text: str) -> set[str]:
+    return {
+        "".join(char for char in raw.casefold() if char.isalnum())
+        for raw in text.replace("/", " ").replace("-", " ").replace("_", " ").split()
+        if raw.strip()
+    } - {""}
 
 
 def _budgeted_route_reason(

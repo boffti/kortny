@@ -62,8 +62,11 @@ def compact_tool_cards(
     ]
     ranked = sorted(scored, key=lambda item: (-item[0], item[1]))
     selected_ranked = ranked[:max_candidates]
-    selected_by_index = sorted(selected_ranked, key=lambda item: item[1])
-    selected = tuple(item[2] for item in selected_by_index)
+    # Keep relevance order (most relevant first): the selector prompt fitter
+    # trims candidates from the tail, so tail position must mean "least
+    # relevant", not "registered last" (which silently dropped MCP tools
+    # because the MCP provider runs after Composio).
+    selected = tuple(item[2] for item in selected_ranked)
     selected_names = {card.registry_name for card in selected}
     omitted = tuple(card for card in cards if card.registry_name not in selected_names)
     return selected, ToolCatalogCompaction(
@@ -96,6 +99,10 @@ def _score_tool_card(task_input: str, card: ToolCard) -> float:
     score = min(0.35, len(overlap) * 0.04)
     if card.toolkit_slug and card.toolkit_slug.casefold() in words:
         score += 0.45
+    if card.provider == "mcp":
+        # Admin-registered MCP servers are a handful of deliberate tools;
+        # never let them drown under hundreds of auto-imported catalog cards.
+        score += 0.15
     if card.side_effect == "read":
         score += 0.05
     for capability in card.capabilities:

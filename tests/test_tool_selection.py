@@ -200,6 +200,89 @@ def test_compact_tool_cards_keeps_relevant_candidates_under_budget() -> None:
     assert compaction.original_candidate_count == 11
     assert compaction.selected_candidate_count == 3
     assert "composio_firecrawl_search" in {card.registry_name for card in selected}
+    # Most relevant first: the selector prompt fitter trims from the tail,
+    # so compaction output must be relevance-ordered, not catalog-ordered.
+    assert selected[0].registry_name == "composio_firecrawl_search"
+
+
+def test_llm_selector_forces_tools_for_explicitly_named_toolkit() -> None:
+    # Reproduces the production incident: the cheap selector LLM declined the
+    # context7 MCP tools ("native web_search can check the docs") even though
+    # the user named the server verbatim. Explicit naming must bypass LLM
+    # judgment.
+    mcp_cards = tuple(
+        ToolCard(
+            registry_name=f"mcp__context7__{slug}",
+            provider="mcp",
+            display_name=f"{slug} via context7 (MCP)",
+            description="Query library documentation from context7.",
+            capabilities=("external_tool",),
+            side_effect="read",
+            toolkit_slug="context7",
+            tool_slugs=(slug,),
+        )
+        for slug in ("query_docs", "resolve_library_id")
+    )
+    provider = FakeSelectorLLM(
+        content="""
+        {
+          "selected_tools": [],
+          "suppressed_native_tools": [],
+          "rejected_tools": [],
+          "route_reason": "native web_search can check the docs"
+        }
+        """
+    )
+
+    result = LLMToolSelector(provider).select(
+        task_id=uuid.uuid4(),
+        task_input="Can you access the context7 mcp server and check Electron docs?",
+        native_cards=(native_slack_history_card(),),
+        external_cards=mcp_cards,
+    )
+
+    assert set(result.selected_names) == {
+        "mcp__context7__query_docs",
+        "mcp__context7__resolve_library_id",
+    }
+    assert "explicit_toolkit_forced" in result.route_reason
+
+
+def test_compact_tool_cards_ranks_mcp_tools_above_generic_catalog_cards() -> None:
+    composio_cards = tuple(
+        ToolCard(
+            registry_name=f"composio_other_{index}",
+            provider="composio",
+            display_name=f"Other {index}",
+            description="Generic integration tool.",
+            capabilities=("external_tool",),
+            side_effect="read",
+            toolkit_slug="other",
+        )
+        for index in range(30)
+    )
+    mcp_card = ToolCard(
+        registry_name="mcp__context7__query-docs",
+        provider="mcp",
+        display_name="query-docs via context7 (MCP)",
+        description="Query library documentation from the context7 MCP server.",
+        capabilities=("external_tool",),
+        side_effect="read",
+        toolkit_slug="context7",
+    )
+    # MCP provider registers after Composio, so the MCP card sits last.
+    cards = composio_cards + (mcp_card,)
+
+    selected, compaction = compact_tool_cards(
+        task_input="can you access the context7 mcp server?",
+        cards=cards,
+        max_candidates=5,
+    )
+
+    assert compaction.compacted is True
+    # The admin-registered MCP tool must survive the cap and lead the
+    # ranking so later prompt-budget tail-trimming cannot drop it.
+    assert selected[0].registry_name == "mcp__context7__query-docs"
 
 
 def test_native_tool_cards_use_catalog_metadata() -> None:

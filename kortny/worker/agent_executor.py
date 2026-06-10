@@ -139,6 +139,10 @@ GENERIC_FAILURE_TEXT = (
 MEMORY_CONFIRMATION_PURPOSE = "memory_confirmation"
 PLANNED_WORKFLOW_PROGRESS_PURPOSE = "planned_progress_start"
 PLANNED_WORKFLOW_PROGRESS_TEXT = "Hang on, I'll check."
+# The progress blurb runs in the critical path before any real work starts;
+# a slow provider must never stall the task, so cap it hard and fall back to
+# the canned text.
+PLANNED_PROGRESS_TIMEOUT_SECONDS = 10.0
 PLANNED_WORKFLOW_PROGRESS_PROMPT_NAME = "kortny.planned_progress_status"
 TOOL_APPROVAL_PROMPT_SYNTHESIS_PROMPT_NAME = "kortny.tool_approval_prompt"
 TOOL_APPROVAL_PROMPT_RESPONSE_FORMAT: dict[str, str] = {"type": "json_object"}
@@ -2103,6 +2107,15 @@ class AgentTaskExecutor:
             provider = self.llm_provider
             provider_name = self.provider_name or DbLLMProvider(
                 settings.llm_provider.value
+            )
+
+        # Freshly built providers are local to this call: clamp the request
+        # timeout so the blurb can't block the pipeline (observed 73s stalls
+        # on slow providers before this cap existed).
+        if hasattr(provider, "timeout"):
+            provider.timeout = min(
+                float(getattr(provider, "timeout", PLANNED_PROGRESS_TIMEOUT_SECONDS)),
+                PLANNED_PROGRESS_TIMEOUT_SECONDS,
             )
 
         llm = LLMService(

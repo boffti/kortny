@@ -18,6 +18,15 @@
 </p>
 
 <p align="center">
+  <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.11+-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python 3.11+"></a>
+  <a href="https://github.com/astral-sh/uv"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/uv/main/assets/badge/v0.json&style=flat-square" alt="uv"></a>
+  <a href="https://github.com/astral-sh/ruff"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json&style=flat-square" alt="Ruff"></a>
+  <a href="https://www.docker.com/"><img src="https://img.shields.io/badge/docker_compose-ready-2496ED?style=flat-square&logo=docker&logoColor=white" alt="Docker Compose ready"></a>
+  <a href="https://github.com/boffti/kortny/commits/main"><img src="https://img.shields.io/github/last-commit/boffti/kortny?style=flat-square" alt="Last commit"></a>
+  <a href="https://github.com/boffti/kortny/issues"><img src="https://img.shields.io/github/issues/boffti/kortny?style=flat-square" alt="Open issues"></a>
+</p>
+
+<p align="center">
   <a href="#-quickstart">Quickstart</a> ·
   <a href="#-what-can-it-do">Features</a> ·
   <a href="#-security-model">Security</a> ·

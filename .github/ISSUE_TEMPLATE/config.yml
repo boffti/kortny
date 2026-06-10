@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: 🔒 Report a security vulnerability
+    url: https://github.com/boffti/kortny/security/advisories/new
+    about: Please report security issues privately — never in a public issue.
+  - name: 💬 Questions & discussions
+    url: https://github.com/boffti/kortny/discussions
+    about: Ask questions, share what you built, and discuss ideas.

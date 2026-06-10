@@ -25,6 +25,8 @@ def test_mvp_schema_declares_all_core_tables() -> None:
         "procedural_skills",
         "procedural_skill_versions",
         "procedural_skill_invocations",
+        "skill_files",
+        "skill_enablements",
         "episodes",
         "llm_usage",
         "artifacts",

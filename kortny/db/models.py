@@ -1829,6 +1829,9 @@ class ProceduralSkill(Base):
     status: Mapped[str] = mapped_column(String, nullable=False)
     trust_level: Mapped[str] = mapped_column(String, nullable=False)
     visibility: Mapped[str] = mapped_column(String, nullable=False)
+    provenance: Mapped[str] = mapped_column(
+        String, nullable=False, server_default="kortny"
+    )
     created_at: Mapped[datetime] = mapped_column(
         TZ, nullable=False, server_default=func.now()
     )
@@ -1846,7 +1849,7 @@ class ProceduralSkill(Base):
             name="ck_procedural_skills_status",
         ),
         CheckConstraint(
-            "trust_level in ('trusted', 'reviewed', 'unreviewed', 'quarantined')",
+            "trust_level in ('trusted', 'community', 'untrusted', 'quarantined')",
             name="ck_procedural_skills_trust_level",
         ),
         CheckConstraint(
@@ -1989,6 +1992,97 @@ class ProceduralSkillInvocation(Base):
             "idx_procedural_skill_invocations_installation",
             "installation_id",
             "created_at",
+        ),
+    )
+
+
+class SkillFile(Base):
+    __tablename__ = "skill_files"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    skill_version_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("procedural_skill_versions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    path: Mapped[str] = mapped_column(String, nullable=False)
+    kind: Mapped[str] = mapped_column(String, nullable=False)
+    content_text: Mapped[str | None] = mapped_column(Text)
+    content_bytes: Mapped[bytes | None] = mapped_column(BYTEA)
+    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    sha256: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "kind in ('reference', 'asset', 'script')",
+            name="ck_skill_files_kind",
+        ),
+        UniqueConstraint(
+            "skill_version_id",
+            "path",
+            name="uq_skill_files_version_path",
+        ),
+        Index("idx_skill_files_version", "skill_version_id", "kind"),
+    )
+
+
+class SkillEnablement(Base):
+    __tablename__ = "skill_enablements"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    installation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("installations.id", ondelete="CASCADE"), nullable=False
+    )
+    skill_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("procedural_skills.id", ondelete="CASCADE"), nullable=False
+    )
+    scope_type: Mapped[str] = mapped_column(String, nullable=False)
+    scope_id: Mapped[str | None] = mapped_column(String)
+    status: Mapped[str] = mapped_column(
+        String, nullable=False, server_default="enabled"
+    )
+    added_by: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "scope_type in ('workspace', 'channel', 'user')",
+            name="ck_skill_enablements_scope_type",
+        ),
+        CheckConstraint(
+            "status in ('enabled', 'disabled')",
+            name="ck_skill_enablements_status",
+        ),
+        CheckConstraint(
+            "(scope_type = 'workspace' and scope_id is null) or "
+            "(scope_type in ('channel', 'user') and scope_id is not null)",
+            name="ck_skill_enablements_scope_id",
+        ),
+        Index(
+            "idx_skill_enablements_unique",
+            "installation_id",
+            "skill_id",
+            "scope_type",
+            text("coalesce(scope_id, '')"),
+            unique=True,
+        ),
+        Index(
+            "idx_skill_enablements_scope",
+            "installation_id",
+            "scope_type",
+            "scope_id",
+            "status",
         ),
     )
 

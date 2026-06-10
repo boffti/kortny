@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import os
+import shutil
 import uuid
+import zipfile
 from collections.abc import Iterator
+from io import BytesIO
+from pathlib import Path
 
 import pytest
 from alembic import command
@@ -24,6 +28,7 @@ from kortny.db.models import (
     TaskEvent,
 )
 from kortny.db.session import make_engine, make_session_factory, normalize_database_url
+from kortny.skills.ingestion import SkillIngestionError, SkillIngestionService
 from kortny.tasks import TaskService
 
 TEST_POSTGRES_URL = os.environ.get("KORTNY_TEST_POSTGRES_URL")
@@ -168,9 +173,12 @@ class TestSkillDirectoryModels:
         stored_enablement = db_session.scalar(select(SkillEnablement))
         assert stored_enablement is not None
         assert stored_enablement.status == "enabled"
-        assert db_session.scalar(
-            select(ProceduralSkill.provenance).where(ProceduralSkill.id == skill.id)
-        ) == "kortny"
+        assert (
+            db_session.scalar(
+                select(ProceduralSkill.provenance).where(ProceduralSkill.id == skill.id)
+            )
+            == "kortny"
+        )
 
     def test_workspace_enablement_rejects_scope_id(self, db_session: Session) -> None:
         installation = create_installation(db_session)
@@ -211,3 +219,139 @@ class TestSkillDirectoryModels:
         with pytest.raises(IntegrityError):
             create_skill(db_session, slug="legacy", trust_level="reviewed")
         db_session.rollback()
+
+
+FIXTURE_SKILL_DIR = Path(__file__).parent / "fixtures" / "skills" / "demo-skill"
+
+INGEST_KWARGS = {
+    "owner_type": "workspace",
+    "provenance": "user:U123",
+    "trust_level": "untrusted",
+    "created_by": "dashboard:tester",
+}
+
+
+def make_zip(root: Path, *, prefix: str = "") -> bytes:
+    buffer = BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        for file_path in sorted(root.rglob("*")):
+            if file_path.is_file():
+                archive.write(file_path, prefix + str(file_path.relative_to(root)))
+    return buffer.getvalue()
+
+
+class TestSkillIngestion:
+    def test_ingest_directory_maps_skill_md_to_registry(
+        self, db_session: Session
+    ) -> None:
+        service = SkillIngestionService(db_session)
+
+        result = service.ingest_directory(
+            FIXTURE_SKILL_DIR, owner_id="W1", **INGEST_KWARGS
+        )
+
+        assert result.created_new_version
+        assert result.skill.slug == "demo-skill"
+        assert result.skill.trust_level == "untrusted"
+        assert result.skill.provenance == "user:U123"
+        assert result.version.version == "1.2.0"
+        assert result.version.name == "Demo Skill"
+        assert "methodology" in result.version.instructions_md
+        assert result.version.description.startswith("Use when the user asks")
+        paths = {f.path: f for f in result.files}
+        assert paths["references/notes.md"].kind == "reference"
+        assert paths["references/notes.md"].content_text is not None
+        assert paths["scripts/hello.py"].kind == "script"
+        assert paths["references/diagram.png"].content_bytes is not None
+
+    def test_reingest_same_content_is_noop(self, db_session: Session) -> None:
+        service = SkillIngestionService(db_session)
+        first = service.ingest_directory(
+            FIXTURE_SKILL_DIR, owner_id="W1", **INGEST_KWARGS
+        )
+        second = service.ingest_directory(
+            FIXTURE_SKILL_DIR, owner_id="W1", **INGEST_KWARGS
+        )
+
+        assert not second.created_new_version
+        assert second.version.id == first.version.id
+
+    def test_changed_content_bumps_version_and_deprecates_old(
+        self, db_session: Session, tmp_path: Path
+    ) -> None:
+        service = SkillIngestionService(db_session)
+        first = service.ingest_directory(
+            FIXTURE_SKILL_DIR, owner_id="W1", **INGEST_KWARGS
+        )
+
+        edited = tmp_path / "demo-skill"
+        shutil.copytree(FIXTURE_SKILL_DIR, edited)
+        skill_md = edited / "SKILL.md"
+        skill_md.write_text(skill_md.read_text() + "\n3. Double-check the numbers.\n")
+        second = service.ingest_directory(edited, owner_id="W1", **INGEST_KWARGS)
+
+        assert second.created_new_version
+        assert second.version.version == "1.2.1"
+        db_session.refresh(first.version)
+        assert first.version.status == "deprecated"
+
+    def test_ingest_zip_with_nested_root(self, db_session: Session) -> None:
+        service = SkillIngestionService(db_session)
+        data = make_zip(FIXTURE_SKILL_DIR, prefix="some-upload-name/")
+
+        result = service.ingest_zip(data, owner_id="W1", **INGEST_KWARGS)
+
+        assert result.skill.slug == "demo-skill"
+        assert {f.path for f in result.files} >= {
+            "references/notes.md",
+            "scripts/hello.py",
+        }
+
+    def test_ingest_zip_rejects_path_traversal(self, db_session: Session) -> None:
+        buffer = BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            archive.writestr("../evil.md", "boom")
+        service = SkillIngestionService(db_session)
+
+        with pytest.raises(SkillIngestionError, match="Unsafe path"):
+            service.ingest_zip(buffer.getvalue(), owner_id="W1", **INGEST_KWARGS)
+
+    def test_ingest_markdown_with_frontmatter(self, db_session: Session) -> None:
+        service = SkillIngestionService(db_session)
+        content = (
+            "---\n"
+            "name: release-notes\n"
+            "description: Use when drafting release notes from merged PRs.\n"
+            "allowed-tools: web_search\n"
+            "---\n\n## Steps\nSummarize the changes."
+        )
+
+        result = service.ingest_markdown(content, owner_id="W1", **INGEST_KWARGS)
+
+        assert result.skill.slug == "release-notes"
+        assert result.version.allowed_tools == ["web_search"]
+        assert result.files == []
+
+    def test_ingest_markdown_without_frontmatter_uses_fallbacks(
+        self, db_session: Session
+    ) -> None:
+        service = SkillIngestionService(db_session)
+
+        result = service.ingest_markdown(
+            "## How to triage bugs\nAlways reproduce first.",
+            owner_id="W1",
+            fallback_name="Bug Triage!",
+            fallback_description="Use when triaging incoming bug reports.",
+            **INGEST_KWARGS,
+        )
+
+        assert result.skill.slug == "bug-triage"
+        assert result.version.description == "Use when triaging incoming bug reports."
+
+    def test_ingest_markdown_without_frontmatter_or_name_fails(
+        self, db_session: Session
+    ) -> None:
+        service = SkillIngestionService(db_session)
+
+        with pytest.raises(SkillIngestionError, match="name is required"):
+            service.ingest_markdown("just some text", owner_id="W1", **INGEST_KWARGS)

@@ -186,6 +186,21 @@ _USER_CAPABILITY_GROUPS: tuple[tuple[str, JsonObject], ...] = (
         },
     ),
     (
+        "Skills",
+        {
+            "label": "Skills",
+            "summary": (
+                "I can apply added skills — reusable instruction playbooks "
+                "enabled for this workspace, channel, or user — when a task "
+                "matches what a skill is for."
+            ),
+            "examples": [
+                "use the meeting-notes skill to structure a recap",
+                "follow an added playbook for a recurring deliverable",
+            ],
+        },
+    ),
+    (
         "Workspace context",
         {
             "label": "Workspace knowledge",

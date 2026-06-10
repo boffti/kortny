@@ -614,3 +614,120 @@ class TestSkillsContextBlock:
         assert len(block) <= DEFAULT_SKILLS_CONTEXT_MAX_CHARS + 50
         assert any(o.kind == "skills" for o in package.omissions)
         assert 0 < len(package.selected_skills) < 40
+
+
+class TestSkillTools:
+    def _setup(self, db_session: Session) -> tuple[Task, ProceduralSkill]:
+        installation = create_installation(db_session)
+        ingestion = SkillIngestionService(db_session)
+        result = ingestion.ingest_directory(
+            FIXTURE_SKILL_DIR,
+            owner_type="system",
+            owner_id=None,
+            provenance="kortny",
+            trust_level="trusted",
+            created_by="system",
+        )
+        SkillRegistryService(db_session).enable_skill(
+            installation_id=installation.id,
+            skill_id=result.skill.id,
+            scope_type="workspace",
+            scope_id=None,
+            added_by="dashboard:tester",
+        )
+        task = create_task(db_session, installation)
+        return task, result.skill
+
+    def test_load_skill_returns_instructions_and_records_invocation(
+        self, db_session: Session
+    ) -> None:
+        from kortny.tasks import TaskService as TS
+        from kortny.tools.skills import LoadSkillTool
+
+        task, skill = self._setup(db_session)
+        tool = LoadSkillTool(session=db_session, task=task, task_service=TS(db_session))
+
+        result = tool.invoke({"slug": "demo-skill"})
+
+        assert result.output["slug"] == "demo-skill"
+        assert "methodology" in result.output["instructions_md"]
+        assert "references/notes.md" in result.output["resources"]
+        assert "scripts_note" in result.output
+        invocation = db_session.scalar(
+            select(ProceduralSkillInvocation).where(
+                ProceduralSkillInvocation.task_id == task.id
+            )
+        )
+        assert invocation is not None
+        assert invocation.invocation_kind == "execution"
+        assert invocation.skill_id == skill.id
+
+    def test_load_skill_rejects_unenabled_slug(self, db_session: Session) -> None:
+        from kortny.tasks import TaskService as TS
+        from kortny.tools.skills import LoadSkillTool
+        from kortny.tools.types import RecoverableToolError
+
+        task, _ = self._setup(db_session)
+        tool = LoadSkillTool(session=db_session, task=task, task_service=TS(db_session))
+
+        with pytest.raises(RecoverableToolError) as exc_info:
+            tool.invoke({"slug": "nonexistent-skill"})
+        assert exc_info.value.code == "skill_not_enabled"
+        assert "demo-skill" in (exc_info.value.hint or "")
+
+    def test_load_skill_resource_returns_text_and_rejects_binary(
+        self, db_session: Session
+    ) -> None:
+        from kortny.tasks import TaskService as TS
+        from kortny.tools.skills import LoadSkillResourceTool
+        from kortny.tools.types import RecoverableToolError
+
+        task, _ = self._setup(db_session)
+        tool = LoadSkillResourceTool(
+            session=db_session, task=task, task_service=TS(db_session)
+        )
+
+        result = tool.invoke({"slug": "demo-skill", "path": "references/notes.md"})
+        assert "cite the data source" in result.output["content"]
+        assert result.output["kind"] == "reference"
+
+        with pytest.raises(RecoverableToolError) as exc_info:
+            tool.invoke({"slug": "demo-skill", "path": "references/diagram.png"})
+        assert exc_info.value.code == "skill_resource_binary"
+
+        with pytest.raises(RecoverableToolError) as exc_info:
+            tool.invoke({"slug": "demo-skill", "path": "references/missing.md"})
+        assert exc_info.value.code == "skill_resource_not_found"
+
+    def test_native_factories_gate_on_enabled_skills(self, db_session: Session) -> None:
+        from kortny.tools.native_runtime import (
+            _build_load_skill_resource_tool,
+            _build_load_skill_tool,
+        )
+
+        task_with, _ = self._setup(db_session)
+        task_without = create_task(db_session)
+
+        from unittest.mock import MagicMock
+
+        from kortny.tools.native_runtime import NativeToolBuildContext
+
+        def make_context(task: Task) -> NativeToolBuildContext:
+            return NativeToolBuildContext(
+                settings=MagicMock(),
+                session=db_session,
+                task=task,
+                task_service=TaskService(db_session),
+                working_dir=Path("/tmp"),
+                web_search_tool=None,
+                slack_history_client=None,
+                slack_file_client=None,
+                slack_identity_client=None,
+                slack_action_client=None,
+                memory_service=MagicMock(),
+            )
+
+        assert _build_load_skill_tool(make_context(task_with)) is not None
+        assert _build_load_skill_resource_tool(make_context(task_with)) is not None
+        assert _build_load_skill_tool(make_context(task_without)) is None
+        assert _build_load_skill_resource_tool(make_context(task_without)) is None

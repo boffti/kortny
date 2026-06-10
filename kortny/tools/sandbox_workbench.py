@@ -231,9 +231,7 @@ class SandboxReadFileTool(_WorkbenchToolBase):
             raise ValueError("sandbox_read_file 'max_chars' must be positive")
         try:
             session = self._session()
-            content_bytes = self.workbench.client.read_file(
-                session.session_id, path
-            )
+            content_bytes = self.workbench.client.read_file(session.session_id, path)
         except (SandboxUnavailableError, SandboxSessionError) as exc:
             return _sandbox_error_result(exc)
         text = content_bytes.decode("utf-8", errors="replace")
@@ -301,9 +299,7 @@ class SandboxExportArtifactTool(_WorkbenchToolBase):
         except (SandboxUnavailableError, SandboxSessionError) as exc:
             return _sandbox_error_result(exc)
 
-        staging_dir = (
-            Path(self.working_dir) / f"sandbox-export-{uuid.uuid4().hex[:8]}"
-        )
+        staging_dir = Path(self.working_dir) / f"sandbox-export-{uuid.uuid4().hex[:8]}"
         staging_dir.mkdir(parents=True, exist_ok=True)
         staging_dir = staging_dir.resolve()
         try:

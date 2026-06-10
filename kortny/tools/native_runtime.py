@@ -41,6 +41,7 @@ from kortny.tools.schedules import (
     UpdateScheduleTool,
 )
 from kortny.tools.search_observed_slack_history import SearchObservedSlackHistoryTool
+from kortny.tools.skills import LoadSkillResourceTool, LoadSkillTool
 from kortny.tools.slack_actions import (
     SlackAddBookmarkTool,
     SlackAddReactionTool,
@@ -333,6 +334,36 @@ def _build_deploy_site_tool(context: NativeToolBuildContext) -> Tool | None:
     )
 
 
+def _has_enabled_skills(context: NativeToolBuildContext) -> bool:
+    from kortny.skills import SkillRegistryService
+
+    return bool(
+        SkillRegistryService(
+            context.session, task_service=context.task_service
+        ).enabled_skills_for_task(context.task)
+    )
+
+
+def _build_load_skill_tool(context: NativeToolBuildContext) -> Tool | None:
+    if not _has_enabled_skills(context):
+        return None
+    return LoadSkillTool(
+        session=context.session,
+        task=context.task,
+        task_service=context.task_service,
+    )
+
+
+def _build_load_skill_resource_tool(context: NativeToolBuildContext) -> Tool | None:
+    if not _has_enabled_skills(context):
+        return None
+    return LoadSkillResourceTool(
+        session=context.session,
+        task=context.task,
+        task_service=context.task_service,
+    )
+
+
 NATIVE_TOOL_REGISTRATIONS: tuple[NativeToolRegistration, ...] = (
     NativeToolRegistration("web_search", WebSearchTool, _build_web_search_tool),
     NativeToolRegistration(
@@ -505,6 +536,12 @@ NATIVE_TOOL_REGISTRATIONS: tuple[NativeToolRegistration, ...] = (
             session=context.session,
             task=context.task,
         ),
+    ),
+    NativeToolRegistration("load_skill", LoadSkillTool, _build_load_skill_tool),
+    NativeToolRegistration(
+        "load_skill_resource",
+        LoadSkillResourceTool,
+        _build_load_skill_resource_tool,
     ),
     NativeToolRegistration(
         "list_schedules",

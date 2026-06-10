@@ -46,6 +46,7 @@ class EnabledSkill:
     name: str
     version: str
     description: str
+    owner_type: str
     trust_level: str
     scope_type: str
     scope_id: str | None
@@ -238,6 +239,7 @@ class SkillRegistryService:
                 name=version.name,
                 version=version.version,
                 description=version.description,
+                owner_type=skill.owner_type,
                 trust_level=skill.trust_level,
                 scope_type=enablement.scope_type,
                 scope_id=enablement.scope_id,

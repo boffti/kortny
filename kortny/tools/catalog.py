@@ -475,9 +475,7 @@ NATIVE_TOOL_METADATA: dict[str, ToolMetadata] = {
         required_env_vars=("KORTNY_SANDBOX_RUNNER_URL",),
         plan_gates=("requester_approval_required", "sandbox_required"),
         result_budget="artifact",
-        notes=(
-            "Exports sandbox files or zipped directories as task artifacts.",
-        ),
+        notes=("Exports sandbox files or zipped directories as task artifacts.",),
         sandbox=_WORKBENCH_SANDBOX_POLICY,
     ),
     "sandbox_publish_preview": ToolMetadata(
@@ -500,9 +498,7 @@ NATIVE_TOOL_METADATA: dict[str, ToolMetadata] = {
         ),
         plan_gates=("requester_approval_required", "sandbox_required"),
         result_budget="normal",
-        notes=(
-            "Publishes static sites from the sandbox at signed preview URLs.",
-        ),
+        notes=("Publishes static sites from the sandbox at signed preview URLs.",),
         sandbox=_WORKBENCH_SANDBOX_POLICY,
     ),
     "deploy_site": ToolMetadata(
@@ -565,6 +561,32 @@ NATIVE_TOOL_METADATA: dict[str, ToolMetadata] = {
         required_env_vars=("POSTGRES_URL",),
         plan_gates=("memory_mutation",),
         notes=("Uses audit-preserving soft delete.",),
+    ),
+    "load_skill": ToolMetadata(
+        name="load_skill",
+        namespace="native.skills",
+        category="Skills",
+        display_name="Load skill",
+        capabilities=("procedural_skills", "skill_instructions"),
+        side_effect="read",
+        required_env_vars=("POSTGRES_URL",),
+        notes=(
+            "Loads full SKILL.md instructions for a skill enabled in the "
+            "task's scope; records the invocation.",
+        ),
+    ),
+    "load_skill_resource": ToolMetadata(
+        name="load_skill_resource",
+        namespace="native.skills",
+        category="Skills",
+        display_name="Load skill resource",
+        capabilities=("procedural_skills", "skill_resources"),
+        side_effect="read",
+        required_env_vars=("POSTGRES_URL",),
+        notes=(
+            "Reads one bundled reference/asset/script file from an enabled "
+            "skill. Scripts are viewable, never executed.",
+        ),
     ),
     "query_workspace_graph": ToolMetadata(
         name="query_workspace_graph",

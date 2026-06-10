@@ -130,9 +130,7 @@ class DeploySiteTool:
             files, site_name=site_name, token=token, production=production
         )
 
-    def _collect_files(
-        self, source_path: str
-    ) -> dict[str, bytes] | ToolResult:
+    def _collect_files(self, source_path: str) -> dict[str, bytes] | ToolResult:
         try:
             session = self.workbench.ensure()
             tar_bytes = self.workbench.client.export_archive(
@@ -158,10 +156,7 @@ class DeploySiteTool:
                 code="deploy_source_too_large",
                 message=f"Deploy exceeds {MAX_DEPLOY_FILES} files.",
             )
-        return {
-            str(path.relative_to(staging)): path.read_bytes()
-            for path in extracted
-        }
+        return {str(path.relative_to(staging)): path.read_bytes() for path in extracted}
 
     def _deploy_netlify(
         self,
@@ -199,9 +194,7 @@ class DeploySiteTool:
                 deploy_id = _str_field(payload, "deploy_id") or _str_field(
                     payload, "id"
                 )
-                site_url = _str_field(payload, "ssl_url") or _str_field(
-                    payload, "url"
-                )
+                site_url = _str_field(payload, "ssl_url") or _str_field(payload, "url")
             else:
                 response = client.post(
                     f"{NETLIFY_API_BASE}/sites/{site_id}/deploys",
@@ -342,8 +335,7 @@ def _provider_error(provider: str, response: httpx.Response) -> ToolResult:
     return _error_result(
         code="deploy_failed",
         message=(
-            f"{provider} API returned {response.status_code}: "
-            f"{response.text[:300]}"
+            f"{provider} API returned {response.status_code}: {response.text[:300]}"
         ),
     )
 

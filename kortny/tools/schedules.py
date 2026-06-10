@@ -74,7 +74,15 @@ class ListSchedulesTool:
             },
             "status": {
                 "type": "string",
-                "enum": ["open", "active", "paused", "proposed", "completed", "cancelled", "all"],
+                "enum": [
+                    "open",
+                    "active",
+                    "paused",
+                    "proposed",
+                    "completed",
+                    "cancelled",
+                    "all",
+                ],
                 "description": "Which schedule status set to return.",
             },
             "query": {
@@ -109,7 +117,10 @@ class ListSchedulesTool:
         statuses = _status_filter(args.get("status"))
         query = _optional_string(args.get("query"))
         limit = _bounded_int(
-            args.get("limit"), default=DEFAULT_SCHEDULE_LIMIT, minimum=1, maximum=MAX_SCHEDULE_LIMIT
+            args.get("limit"),
+            default=DEFAULT_SCHEDULE_LIMIT,
+            minimum=1,
+            maximum=MAX_SCHEDULE_LIMIT,
         )
         schedules = _find_visible_schedules(
             self.session,
@@ -127,7 +138,10 @@ class ListSchedulesTool:
                 "query": query,
                 "count": len(schedules),
                 "assistant_summary": _list_summary(schedules, task=self.task),
-                "schedules": [_schedule_payload(schedule, task=self.task) for schedule in schedules],
+                "schedules": [
+                    _schedule_payload(schedule, task=self.task)
+                    for schedule in schedules
+                ],
                 "scope_note": (
                     "Only schedules owned by this Slack user or delivered to this "
                     "Slack surface are returned."
@@ -273,7 +287,9 @@ class PauseScheduleTool:
         self.task_service = task_service or TaskService(session)
 
     def invoke(self, args: JsonObject) -> ToolResult:
-        schedule = _resolve_schedule_for_mutation(self.session, task=self.task, args=args)
+        schedule = _resolve_schedule_for_mutation(
+            self.session, task=self.task, args=args
+        )
         _ensure_schedule_status(
             schedule,
             allowed={"active", "paused", "proposed"},
@@ -326,7 +342,9 @@ class ResumeScheduleTool:
         self.task_service = task_service or TaskService(session)
 
     def invoke(self, args: JsonObject) -> ToolResult:
-        schedule = _resolve_schedule_for_mutation(self.session, task=self.task, args=args)
+        schedule = _resolve_schedule_for_mutation(
+            self.session, task=self.task, args=args
+        )
         _ensure_schedule_status(
             schedule,
             allowed={"active", "paused", "proposed"},
@@ -385,7 +403,9 @@ class CancelScheduleTool:
         self.task_service = task_service or TaskService(session)
 
     def invoke(self, args: JsonObject) -> ToolResult:
-        schedule = _resolve_schedule_for_mutation(self.session, task=self.task, args=args)
+        schedule = _resolve_schedule_for_mutation(
+            self.session, task=self.task, args=args
+        )
         _ensure_schedule_status(
             schedule,
             allowed={"active", "paused", "proposed"},
@@ -457,7 +477,9 @@ class UpdateScheduleTool:
 
     def invoke(self, args: JsonObject) -> ToolResult:
         update_request = _required_string(args, "update_request")
-        schedule = _resolve_schedule_for_mutation(self.session, task=self.task, args=args)
+        schedule = _resolve_schedule_for_mutation(
+            self.session, task=self.task, args=args
+        )
         _ensure_schedule_status(
             schedule,
             allowed={"active", "paused", "proposed"},
@@ -872,7 +894,9 @@ def _schedule_title(schedule: Schedule) -> str:
 
 
 def _schedule_task_input(schedule: Schedule) -> str:
-    template = schedule.task_template if isinstance(schedule.task_template, dict) else {}
+    template = (
+        schedule.task_template if isinstance(schedule.task_template, dict) else {}
+    )
     value = template.get("input")
     if isinstance(value, str) and value.strip():
         return value.strip()
@@ -880,7 +904,9 @@ def _schedule_task_input(schedule: Schedule) -> str:
 
 
 def _cadence_label(schedule: Schedule) -> str:
-    metadata = schedule.metadata_json if isinstance(schedule.metadata_json, dict) else {}
+    metadata = (
+        schedule.metadata_json if isinstance(schedule.metadata_json, dict) else {}
+    )
     cadence = metadata.get("cadence_label")
     if isinstance(cadence, str) and cadence.strip():
         return cadence.strip()

@@ -27,7 +27,7 @@ from kortny.agent.adk_tools import KortnyRegistryToolset, adk_tools_from_registr
 from kortny.agent.context import ContextAssembler, ContextPackage
 from kortny.agent.coordinator import AgentLoopError, AgentRunResult
 from kortny.agent.thread_context import ThreadTranscriptProvider
-from kortny.approvals import ToolApprovalPolicy
+from kortny.approvals import ToolApprovalPolicy, ToolApprovalRequired
 from kortny.config import LLMProvider, Settings
 from kortny.db.models import LLMProvider as DbLLMProvider
 from kortny.db.models import LLMUsage, ModelPricing, Task, TaskEvent, TaskEventType
@@ -53,7 +53,7 @@ from kortny.observability.content import (
     render_text_messages,
 )
 from kortny.routing import RoutingDecisionTrace
-from kortny.tasks import TaskService
+from kortny.tasks import TaskCancelledError, TaskService
 from kortny.tools import ToolRegistry
 
 ADK_APP_NAME = "kortny"
@@ -330,6 +330,26 @@ Rules:
 logger = logging.getLogger(__name__)
 
 
+def _unwrap_control_flow_exception(exc: BaseException) -> BaseException | None:
+    """Return a control-flow exception buried in (possibly nested) groups.
+
+    ADK's ParallelAgent runs branches inside an ``asyncio.TaskGroup``; a
+    ``ToolApprovalRequired`` (pause for Slack approval) or
+    ``TaskCancelledError`` raised in a branch therefore arrives wrapped in an
+    ``ExceptionGroup`` and would otherwise bypass the executor's typed
+    handlers and fail the task.
+    """
+
+    if isinstance(exc, (ToolApprovalRequired, TaskCancelledError)):
+        return exc
+    if isinstance(exc, BaseExceptionGroup):
+        for inner in exc.exceptions:
+            found = _unwrap_control_flow_exception(inner)
+            if found is not None:
+                return found
+    return None
+
+
 class AdkAgentRuntime:
     """ADK runtime behind Kortny's durable worker boundary."""
 
@@ -403,6 +423,12 @@ class AdkAgentRuntime:
                 self._run_adk_async(task_obj)
             )
         except Exception as exc:
+            # ADK runs branches in a TaskGroup, so control-flow exceptions
+            # (approval pauses, cancellations) surface wrapped in an
+            # ExceptionGroup and would miss the executor's typed handlers.
+            unwrapped = _unwrap_control_flow_exception(exc)
+            if unwrapped is not None:
+                raise unwrapped from exc
             self.task_service.append_event(
                 task_obj,
                 TaskEventType.error,

@@ -9,13 +9,20 @@ from google.genai import types as genai_types
 
 from kortny.agent.adk_runtime import (
     AdkAgentRuntime,
+    _unwrap_control_flow_exception,
     adk_litellm_model,
     adk_litellm_model_name,
+)
+from kortny.approvals import (
+    ApprovalScope,
+    ToolApprovalRequest,
+    ToolApprovalRequired,
 )
 from kortny.config import load_settings
 from kortny.db.models import Task
 from kortny.llm.provider_config import ResolvedLLMModel, ResolvedLLMModelChain
 from kortny.llm.routing import ModelRouteTier
+from kortny.tasks import TaskCancelledError
 from kortny.tools import ToolRegistry
 from kortny.tools.types import JsonObject, ToolResult
 
@@ -1095,3 +1102,43 @@ def set_required_settings_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LLM_MODEL", "openai/gpt-4o")
     monkeypatch.setenv("POSTGRES_URL", "postgresql://kortny:kortny@localhost/kortny")
     os.environ.pop("OPENROUTER_API_KEY", None)
+
+
+def _approval_required() -> ToolApprovalRequired:
+    return ToolApprovalRequired(
+        ToolApprovalRequest(
+            approval_key="code_exec:deadbeef",
+            tool_name="code_exec",
+            tool_call_id="call-1",
+            normalized_args_hash="deadbeef",
+            argument_keys=("code",),
+            scope=ApprovalScope.user,
+            reason="sandboxed code execution",
+            risk="destructive",
+            arguments={"code": "print(1)"},
+        )
+    )
+
+
+def test_unwrap_control_flow_finds_approval_inside_nested_groups() -> None:
+    approval = _approval_required()
+    group = ExceptionGroup(
+        "outer",
+        [ExceptionGroup("inner", [ValueError("noise"), approval])],
+    )
+
+    assert _unwrap_control_flow_exception(group) is approval
+
+
+def test_unwrap_control_flow_finds_cancellation() -> None:
+    cancelled = TaskCancelledError("cancelled")
+    group = ExceptionGroup("outer", [cancelled])
+
+    assert _unwrap_control_flow_exception(group) is cancelled
+
+
+def test_unwrap_control_flow_ignores_ordinary_errors() -> None:
+    group = ExceptionGroup("outer", [ValueError("boom")])
+
+    assert _unwrap_control_flow_exception(group) is None
+    assert _unwrap_control_flow_exception(ValueError("boom")) is None

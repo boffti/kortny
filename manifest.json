@@ -10,6 +10,9 @@
             "messages_tab_enabled": false,
             "messages_tab_read_only_enabled": false
         },
+        "assistant_view": {
+            "assistant_description": "Kortny is your AI coworker — ask it to research, draft, analyze data, track decisions, and automate recurring work across your workspace."
+        },
         "bot_user": {
             "display_name": "Kortny",
             "always_online": true

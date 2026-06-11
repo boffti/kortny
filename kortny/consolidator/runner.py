@@ -101,6 +101,7 @@ class ConsolidatorRunner:
                     "consolidator.runner.id": self.runner_id,
                 },
             ):
+                self.service.fail_stale_runs(now=run_at)
                 decisions: list[tuple[uuid.UUID, TriggerDecision]] = []
                 outcomes: list[ConsolidationOutcome] = []
                 for installation_id in self._installation_ids():

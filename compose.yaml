@@ -1,5 +1,6 @@
 services:
   postgres:
+    restart: unless-stopped
     # pgvector required for tool/skill embeddings (HIG-219); bookworm pinned
     # because the unsuffixed pg16 tag tracks trixie.
     image: pgvector/pgvector:pg16-bookworm
@@ -35,6 +36,7 @@ services:
       - uv-cache:/tmp/uv-cache
 
   app:
+    restart: unless-stopped
     image: ghcr.io/astral-sh/uv:python3.11-bookworm-slim
     working_dir: /app
     command: ["uv", "run", "python", "-m", "kortny.slack"]
@@ -59,6 +61,7 @@ services:
       - uv-cache:/tmp/uv-cache
 
   worker:
+    restart: unless-stopped
     image: ghcr.io/astral-sh/uv:python3.11-bookworm-slim
     working_dir: /app
     command: ["uv", "run", "python", "-m", "kortny.worker"]
@@ -94,6 +97,7 @@ services:
       - fastembed-cache:/data/fastembed-cache
 
   scheduler:
+    restart: unless-stopped
     image: ghcr.io/astral-sh/uv:python3.11-bookworm-slim
     working_dir: /app
     command: ["uv", "run", "python", "-m", "kortny.scheduler"]
@@ -121,6 +125,7 @@ services:
       - uv-cache:/tmp/uv-cache
 
   witness:
+    restart: unless-stopped
     image: ghcr.io/astral-sh/uv:python3.11-bookworm-slim
     working_dir: /app
     command: ["uv", "run", "python", "-m", "kortny.witness"]
@@ -151,6 +156,7 @@ services:
       - uv-cache:/tmp/uv-cache
 
   consolidator:
+    restart: unless-stopped
     image: ghcr.io/astral-sh/uv:python3.11-bookworm-slim
     working_dir: /app
     command: ["uv", "run", "python", "-m", "kortny.consolidator"]
@@ -186,6 +192,7 @@ services:
       - fastembed-cache:/data/fastembed-cache
 
   dashboard:
+    restart: unless-stopped
     image: ghcr.io/astral-sh/uv:python3.11-bookworm-slim
     working_dir: /app
     command:
@@ -299,6 +306,7 @@ services:
       - fastembed-cache:/data/fastembed-cache
 
   sandbox-docker-proxy:
+    restart: unless-stopped
     image: ${DOCKER_SOCKET_PROXY_IMAGE:-tecnativa/docker-socket-proxy:latest}
     environment:
       CONTAINERS: 1
@@ -319,6 +327,7 @@ services:
       - sandbox-control
 
   sandbox-runner:
+    restart: unless-stopped
     image: ghcr.io/astral-sh/uv:python3.11-bookworm-slim
     working_dir: /app
     command: ["uv", "run", "python", "-m", "kortny.sandbox_runner"]

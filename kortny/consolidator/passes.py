@@ -789,42 +789,65 @@ def backfill_embeddings(
     *,
     installation_id: uuid.UUID,
     embedding_index: EmbeddingIndex | None,
+    max_items: int = 500,
 ) -> BackfillCounters:
-    """Pass 7: sha-gated embedding backfill for facts/episodes/entities."""
+    """Pass 7: sha-gated embedding backfill for facts/episodes/entities.
+
+    Bounded per run (``max_items`` rows scanned across the three stores) so
+    a large backlog can't drive an unbounded embed burst in one run — the
+    sha gate makes the leftover drain across subsequent runs.
+    """
 
     if embedding_index is None:
         return BackfillCounters()
     embedded = 0
+    remaining = max_items
     facts = list(
         session.scalars(
-            select(WorkspaceState).where(
+            select(WorkspaceState)
+            .where(
                 WorkspaceState.installation_id == installation_id,
                 WorkspaceState.status == "active",
             )
+            .limit(remaining)
         )
     )
+    remaining -= len(facts)
     embedded += embedding_index.ensure(
         FACT_EMBEDDING_KIND,
         [(str(fact.id), fact_embedding_text(fact)) for fact in facts],
     )
-    episodes = list(
-        session.scalars(
-            select(Episode).where(Episode.installation_id == installation_id)
+    episodes = (
+        list(
+            session.scalars(
+                select(Episode)
+                .where(Episode.installation_id == installation_id)
+                .limit(remaining)
+            )
         )
+        if remaining > 0
+        else []
     )
+    remaining -= len(episodes)
     embedded += embedding_index.ensure(
         EPISODE_EMBEDDING_KIND,
         [(str(episode.id), episode_embedding_text(episode)) for episode in episodes],
     )
-    entities = list(
-        session.scalars(
-            select(KnowledgeGraphEntity).where(
-                KnowledgeGraphEntity.installation_id == installation_id,
-                KnowledgeGraphEntity.is_current.is_(True),
-                KnowledgeGraphEntity.expired_at.is_(None),
-                KnowledgeGraphEntity.system_expired_at.is_(None),
+    entities = (
+        list(
+            session.scalars(
+                select(KnowledgeGraphEntity)
+                .where(
+                    KnowledgeGraphEntity.installation_id == installation_id,
+                    KnowledgeGraphEntity.is_current.is_(True),
+                    KnowledgeGraphEntity.expired_at.is_(None),
+                    KnowledgeGraphEntity.system_expired_at.is_(None),
+                )
+                .limit(remaining)
             )
         )
+        if remaining > 0
+        else []
     )
     embedded += embedding_index.ensure(
         KG_ENTITY_EMBEDDING_KIND,

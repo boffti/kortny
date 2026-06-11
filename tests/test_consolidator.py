@@ -1214,3 +1214,82 @@ def test_second_runner_skips_when_advisory_lock_held(engine: Engine) -> None:
             contender.rollback()
         cleanup_database(holder)
         holder.commit()
+
+
+def test_fail_stale_runs_marks_interrupted(db_session: Session) -> None:
+    installation = create_installation(db_session)
+    stale = ConsolidationRun(
+        installation_id=installation.id,
+        started_at=NOW - timedelta(hours=5),
+        status="running",
+    )
+    fresh = ConsolidationRun(
+        installation_id=installation.id,
+        started_at=NOW - timedelta(minutes=30),
+        status="running",
+    )
+    db_session.add_all([stale, fresh])
+    db_session.flush()
+    service = make_service(db_session)
+
+    recovered = service.fail_stale_runs(now=NOW)
+
+    assert recovered == 1
+    db_session.refresh(stale)
+    db_session.refresh(fresh)
+    assert stale.status == "failed"
+    assert stale.error == "interrupted"
+    assert stale.finished_at is not None
+    # A recent running row is presumed live and untouched.
+    assert fresh.status == "running"
+
+
+def test_pass_failure_rolls_back_only_that_pass(db_session: Session) -> None:
+    """A failed pass must not poison committed work from earlier passes.
+
+    Promotion (with a raising LLM) fails first; adjudication afterwards
+    still promotes a consensus candidate, and the run row keeps per-pass
+    progress in counters_json — the crash-safety contract added after the
+    first live run lost all pass work to a single-transaction OOM kill.
+    """
+
+    installation = create_installation(db_session)
+    create_episode(db_session, installation, summary="Anything at all.")
+    graph = GraphService(db_session)
+    task = create_task(db_session, installation)
+    evidence = EvidenceInput(
+        source_type="task_summary",
+        extracted_by="test",
+        source_task_id=task.id,
+    )
+    entity = graph.create_entity(
+        installation_id=installation.id,
+        entity_type="project",
+        canonical_key="crashsafe_consensus",
+        visibility_scope=VisibilityScope.workspace(),
+        source_type="task_summary",
+        lifecycle_state="candidate",
+        evidence=evidence,
+    )
+    graph.add_evidence(
+        installation_id=installation.id,
+        target_kind="entity",
+        target_id=entity.id,
+        evidence=evidence,
+    )
+    entity.created_at = NOW - timedelta(days=4)
+    entity.valid_at = None
+    service = make_service(db_session, provider=RaisingLLMProvider())
+
+    outcome = service.run_once(installation_id=installation.id, now=NOW)
+
+    assert outcome.status == "succeeded"
+    pass_errors = outcome.counters["pass_errors"]
+    assert isinstance(pass_errors, dict)
+    assert "promotion" in pass_errors
+    db_session.refresh(entity)
+    assert entity.lifecycle_state == "active"
+    run = db_session.get(ConsolidationRun, outcome.run_id)
+    assert run is not None
+    counters = run.counters_json
+    assert "adjudication" in counters

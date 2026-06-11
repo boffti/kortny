@@ -12,7 +12,7 @@ import logging
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -108,6 +108,41 @@ class ConsolidationService:
         )
 
     # -- trigger inputs -----------------------------------------------------
+
+    def fail_stale_runs(
+        self,
+        *,
+        older_than_hours: int = 2,
+        now: datetime | None = None,
+    ) -> int:
+        """Mark long-`running` runs as failed (dead process, e.g. OOM kill).
+
+        The advisory lock guarantees one live runner, so a `running` row
+        older than any plausible run duration belongs to a killed process.
+        """
+
+        effective_now = now or datetime.now(UTC)
+        cutoff = effective_now - timedelta(hours=older_than_hours)
+        stale = list(
+            self.session.scalars(
+                select(ConsolidationRun).where(
+                    ConsolidationRun.status == "running",
+                    ConsolidationRun.started_at < cutoff,
+                )
+            )
+        )
+        for run in stale:
+            run.status = "failed"
+            run.error = "interrupted"
+            run.finished_at = effective_now
+        if stale:
+            self.session.commit()
+            logger.warning(
+                "consolidator recovered stale runs count=%s run_ids=%s",
+                len(stale),
+                ",".join(str(run.id) for run in stale),
+            )
+        return len(stale)
 
     def last_successful_run_started_at(
         self, installation_id: uuid.UUID
@@ -227,6 +262,9 @@ class ConsolidationService:
             run_id=run.id,
         )
         task_service.transition(task, TaskStatus.running)
+        # Commit before any pass runs: an OOM kill mid-run must leave a
+        # visible `running` row (recovered by fail_stale_runs), not nothing.
+        self.session.commit()
 
         counters: dict[str, object] = {}
         pass_errors: dict[str, str] = {}
@@ -338,7 +376,19 @@ class ConsolidationService:
                     installation_id,
                     pass_name,
                 )
+                # Roll back the failed pass's partial writes so the session
+                # is usable for the remaining passes, then persist the error
+                # marker. Prior passes already committed.
+                self.session.rollback()
                 pass_errors[pass_name] = f"{type(exc).__name__}: {exc}"
+                run.counters_json = {**counters, "pass_errors": dict(pass_errors)}
+                self.session.commit()
+            else:
+                # Commit each completed pass: a crash later in the run keeps
+                # this pass's work (the first live run lost ~20 minutes of
+                # LLM output to a single-transaction OOM kill).
+                run.counters_json = dict(counters)
+                self.session.commit()
 
         if "promotion" not in counters:
             # Promotion blew up: keep the episode window open for retry.
@@ -364,7 +414,7 @@ class ConsolidationService:
             f"archived={counters.get('archived', 0)}"
         )
         task_service.transition(task, TaskStatus.succeeded)
-        self.session.flush()
+        self.session.commit()
         return ConsolidationOutcome(
             run_id=run.id,
             installation_id=installation_id,

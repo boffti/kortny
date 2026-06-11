@@ -12,6 +12,7 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from kortny.ambient.system_drives import is_system_drive, system_drive_purpose
 from kortny.db.models import Schedule, SlackIdentity, Task
 from kortny.scheduler.creation import parse_schedule_request
 from kortny.witness.automation import sync_candidate_for_schedule_action
@@ -57,6 +58,8 @@ class ScheduleRow:
     can_pause: bool
     can_resume: bool
     can_cancel: bool
+    is_system: bool = False
+    purpose: str | None = None
 
 
 @dataclass(frozen=True)
@@ -99,6 +102,16 @@ class SchedulePage:
     base_path: str
     previous_page_url: str | None
     next_page_url: str | None
+
+    @property
+    def system_rows(self) -> tuple[ScheduleRow, ...]:
+        """System drive rows, grouped distinctly in the dashboard (HIG-233)."""
+
+        return tuple(row for row in self.rows if row.is_system)
+
+    @property
+    def user_rows(self) -> tuple[ScheduleRow, ...]:
+        return tuple(row for row in self.rows if not row.is_system)
 
     @property
     def total_pages(self) -> int:
@@ -224,6 +237,12 @@ def apply_schedule_action(
         is_admin=is_admin,
     ):
         raise ValueError("You do not have access to this scheduled task.")
+
+    if is_system_drive(schedule) and action in {"activate", "cancel"}:
+        raise ValueError(
+            "System drives can only be paused or resumed, not "
+            f"{'activated' if action == 'activate' else 'cancelled'}."
+        )
 
     if action == "activate":
         if schedule.status != "proposed":
@@ -489,6 +508,7 @@ def _schedule_row(
     *,
     identities: dict[tuple[uuid.UUID, str], str],
 ) -> ScheduleRow:
+    drive = is_system_drive(schedule)
     return ScheduleRow(
         schedule=schedule,
         cadence=_cadence_label(schedule),
@@ -498,10 +518,13 @@ def _schedule_row(
         last_run=_datetime_label(schedule.last_run_at),
         budget=_budget_label(schedule.planned_cost_ceiling_usd),
         tone=_status_tone(schedule.status),
-        can_activate=schedule.status == "proposed",
+        can_activate=(not drive) and schedule.status == "proposed",
         can_pause=schedule.status == "active",
         can_resume=schedule.status == "paused",
-        can_cancel=schedule.status in {"proposed", "active", "paused"},
+        # System drives are pause/resume only — never cancellable or deletable.
+        can_cancel=(not drive) and schedule.status in {"proposed", "active", "paused"},
+        is_system=drive,
+        purpose=system_drive_purpose(schedule) if drive else None,
     )
 
 

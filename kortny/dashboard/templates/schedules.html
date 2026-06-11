@@ -54,8 +54,60 @@
     </div>
   </div>
 
+  {% if schedule_page.system_rows %}
+    <div class="schedule-section-header">
+      <h2 class="schedule-section-title">
+        <span class="badge badge-accent">System</span>
+        Kortny's ambient drives
+      </h2>
+      <p class="muted schedule-section-note">These run continuously inside Kortny. Pause or resume them here; they cannot be cancelled. Edit cadence by talking to Kortny.</p>
+    </div>
+    <div class="schedule-list" role="list" aria-label="System drives">
+      {% for row in schedule_page.system_rows %}
+        <article class="schedule-card schedule-card-{{ row.tone }}" role="listitem">
+          <div class="schedule-card-top">
+            <div class="schedule-card-id">
+              <span class="schedule-status-pill schedule-status-{{ row.tone }}">
+                <span class="status-dot"></span>{{ row.schedule.status }}
+              </span>
+              <span class="badge badge-accent">System</span>
+              <strong class="schedule-card-title">{{ row.schedule.title }}</strong>
+            </div>
+          </div>
+          {% if row.purpose %}
+            <p class="muted schedule-drive-purpose">{{ row.purpose }}</p>
+          {% endif %}
+          <div class="schedule-card-meta">
+            <span class="schedule-meta-chip" title="Cadence">{{ row.cadence }}</span>
+            <span class="schedule-meta-chip" title="Last run">Last run {{ row.last_run }}</span>
+          </div>
+          <div class="schedule-card-foot">
+            <span class="schedule-foot-last"></span>
+            <div class="schedule-card-actions" aria-label="Drive actions">
+              {% if row.can_pause %}
+                <form method="post" action="/schedules/{{ row.schedule.id }}/pause" onsubmit="return confirm('Pause this system drive?');">
+                  <input type="hidden" name="next" value="{{ schedules_return_path }}">
+                  <button class="btn-ghost" type="submit">Pause</button>
+                </form>
+              {% endif %}
+              {% if row.can_resume %}
+                <form method="post" action="/schedules/{{ row.schedule.id }}/resume" onsubmit="return confirm('Resume this system drive?');">
+                  <input type="hidden" name="next" value="{{ schedules_return_path }}">
+                  <button class="btn" type="submit">Resume</button>
+                </form>
+              {% endif %}
+              {% if not row.can_pause and not row.can_resume %}
+                <span class="schedule-no-controls">No active controls</span>
+              {% endif %}
+            </div>
+          </div>
+        </article>
+      {% endfor %}
+    </div>
+  {% endif %}
+
   <div class="schedule-list" role="list" aria-label="Scheduled tasks">
-    {% for row in schedule_page.rows %}
+    {% for row in schedule_page.user_rows %}
       <article class="schedule-card schedule-card-{{ row.tone }}" role="listitem">
         <div class="schedule-card-top">
           <div class="schedule-card-id">

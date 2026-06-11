@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from kortny.ambient.system_drives import is_system_drive, system_drive_purpose
 from kortny.db.models import Schedule, Task, TaskEventType
 from kortny.scheduler.commands import (
     SCHEDULE_CANCELLED_MESSAGE,
@@ -350,7 +351,9 @@ class ResumeScheduleTool:
             allowed={"active", "paused", "proposed"},
             action="resume",
         )
-        if schedule.next_run_at is None:
+        # System drives never carry next_run_at (they run in the ambient loops,
+        # not via materialization), so the future-run guard does not apply.
+        if not is_system_drive(schedule) and schedule.next_run_at is None:
             raise RecoverableToolError(
                 code="schedule_has_no_next_run",
                 message="That schedule does not have a future run to resume.",
@@ -368,15 +371,22 @@ class ResumeScheduleTool:
             action="resume",
             previous_status=previous_status,
         )
+        if is_system_drive(schedule):
+            resume_summary = (
+                f"Done, I resumed *{_schedule_title(schedule)}*. It is running "
+                f"on its usual cadence ({_cadence_label(schedule).lower()}) again."
+            )
+        else:
+            resume_summary = (
+                f"Done, I resumed *{_schedule_title(schedule)}*. Next run is "
+                f"{_human_datetime(schedule.next_run_at, schedule.timezone)}."
+            )
         return ToolResult(
             output=_mutation_output(
                 action="resumed",
                 schedule=schedule,
                 task=self.task,
-                assistant_summary=(
-                    f"Done, I resumed *{_schedule_title(schedule)}*. Next run is "
-                    f"{_human_datetime(schedule.next_run_at, schedule.timezone)}."
-                ),
+                assistant_summary=resume_summary,
             )
         )
 
@@ -406,6 +416,7 @@ class CancelScheduleTool:
         schedule = _resolve_schedule_for_mutation(
             self.session, task=self.task, args=args
         )
+        _refuse_system_drive(schedule, action="cancel")
         _ensure_schedule_status(
             schedule,
             allowed={"active", "paused", "proposed"},
@@ -480,6 +491,7 @@ class UpdateScheduleTool:
         schedule = _resolve_schedule_for_mutation(
             self.session, task=self.task, args=args
         )
+        _refuse_system_drive(schedule, action="update")
         _ensure_schedule_status(
             schedule,
             allowed={"active", "paused", "proposed"},
@@ -621,7 +633,13 @@ def _resolve_schedule(
                 message="That schedule is not visible from this Slack surface.",
                 hint="Ask from the owning DM/thread or use a schedule you can see here.",
             )
-        if require_owner and not _is_owner(schedule, task=task):
+        # System drives have no user owner but are pausable/resumable by anyone;
+        # cancel/update are refused inside the individual tools.
+        if (
+            require_owner
+            and not is_system_drive(schedule)
+            and not _is_owner(schedule, task=task)
+        ):
             raise RecoverableToolError(
                 code="schedule_not_owned",
                 message="I can see that schedule, but I can't change it for you.",
@@ -658,6 +676,22 @@ def _resolve_schedule(
             details={"matches": [_schedule_choice(schedule) for schedule in matches]},
         )
     return matches[0]
+
+
+def _refuse_system_drive(schedule: Schedule, *, action: str) -> None:
+    """Refuse cancel/delete/update on a system drive (HIG-233): pause/resume only."""
+
+    if not is_system_drive(schedule):
+        return
+    verb = "delete" if action == "cancel" else action
+    raise RecoverableToolError(
+        code="system_drive_not_cancellable",
+        message=(
+            f"*{_schedule_title(schedule)}* is one of Kortny's built-in system "
+            f"drives, so I can't {verb} it. I can pause or resume it instead."
+        ),
+        hint="Use pause_schedule or resume_schedule for system drives.",
+    )
 
 
 def _ensure_schedule_status(
@@ -727,10 +761,13 @@ def _mutation_output(
 
 
 def _schedule_payload(schedule: Schedule, *, task: Task) -> JsonObject:
+    drive = is_system_drive(schedule)
     return {
         "id": str(schedule.id),
         "title": schedule.title,
         "status": schedule.status,
+        "is_system_drive": drive,
+        "system_purpose": system_drive_purpose(schedule) if drive else None,
         "owner": {
             "type": schedule.owner_type,
             "slack_user_id": schedule.owner_slack_user_id,
@@ -787,6 +824,7 @@ def _list_summary(schedules: tuple[Schedule, ...], *, task: Task) -> str:
     active = [schedule for schedule in schedules if schedule.status == "active"]
     paused = [schedule for schedule in schedules if schedule.status == "paused"]
     proposed = [schedule for schedule in schedules if schedule.status == "proposed"]
+    system = [schedule for schedule in schedules if is_system_drive(schedule)]
     lead = f"I found {len(schedules)} schedule{'s' if len(schedules) != 1 else ''}"
     details: list[str] = []
     if active:
@@ -795,6 +833,8 @@ def _list_summary(schedules: tuple[Schedule, ...], *, task: Task) -> str:
         details.append(f"{len(paused)} paused")
     if proposed:
         details.append(f"{len(proposed)} waiting")
+    if system:
+        details.append(f"{len(system)} system drive{'s' if len(system) != 1 else ''}")
     if details:
         lead += f" ({', '.join(details)})"
     first = schedules[0]
@@ -828,6 +868,10 @@ def _matches_scope(schedule: Schedule, *, task: Task, scope: str) -> bool:
 
 
 def _is_visible(schedule: Schedule, *, task: Task) -> bool:
+    # System drives (HIG-233) are always listable so "what schedules are
+    # running?" surfaces the ambient drives alongside user schedules.
+    if is_system_drive(schedule):
+        return True
     return _is_owner(schedule, task=task) or _delivers_to_current_surface(
         schedule, task=task
     )

@@ -18,6 +18,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
+from kortny.ambient.system_drives import SYSTEM_DRIVE_METADATA_KEY
 from kortny.config import load_settings
 from kortny.db.models import Schedule, Task, TaskEventType, TaskStatus
 from kortny.db.session import make_session_factory
@@ -116,6 +117,11 @@ class ScheduleMaterializer:
                     Schedule.status == "active",
                     Schedule.next_run_at.is_not(None),
                     Schedule.next_run_at <= now,
+                    # System drives (HIG-233) are the control/visibility surface
+                    # for the ambient loops; they execute in the loops, never via
+                    # materialization. They carry no next_run_at, but the filter
+                    # is defensive even if that representation ever changes.
+                    ~Schedule.metadata_json.has_key(SYSTEM_DRIVE_METADATA_KEY),
                 )
                 .order_by(Schedule.next_run_at, Schedule.created_at)
                 .with_for_update(skip_locked=True)

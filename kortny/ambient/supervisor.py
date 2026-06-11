@@ -38,8 +38,12 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import timedelta
 from types import FrameType
+from typing import TYPE_CHECKING
 
 from kortny.config import Settings
+
+if TYPE_CHECKING:
+    from kortny.ambient.system_drives import SystemDriveGate
 
 logger = logging.getLogger(__name__)
 
@@ -187,18 +191,68 @@ class AmbientSupervisor:
         signal.signal(signal.SIGINT, _handle)
 
 
+def run_gated_forever(
+    *,
+    gate: SystemDriveGate,
+    run_once: Callable[[], object],
+    poll_interval_seconds: float,
+    stop: threading.Event | None = None,
+    sleep: Callable[[float], None] | None = None,
+) -> None:
+    """Drive a worker's ``run_once`` under its system-drive control row (HIG-233).
+
+    Each iteration resolves the drive: paused -> skip this tick's work (the
+    transition is logged once, not per tick); an interval override on the row
+    adjusts this iteration's sleep. After a productive (non-paused) tick the
+    drive's last-run is stamped. A missing row keeps current env-var behavior.
+
+    The default sleeper waits on ``stop`` so shutdown interrupts the inter-tick
+    sleep; tests inject a ``sleep`` that drives one iteration deterministically.
+    """
+
+    stop_event = stop or threading.Event()
+    sleeper = sleep if sleep is not None else (lambda s: stop_event.wait(timeout=s))
+    while not stop_event.is_set():
+        decision = gate.before_tick()
+        if decision.should_run:
+            try:
+                run_once()
+            except Exception:
+                logger.exception("gated ambient tick failed; continuing")
+            else:
+                gate.mark_ran_all()
+        sleep_seconds = (
+            float(decision.interval_seconds)
+            if decision.interval_seconds is not None
+            else poll_interval_seconds
+        )
+        sleeper(max(sleep_seconds, 0.0))
+
+
 def build_default_loops(settings: Settings) -> list[LoopSpec]:
     """Build the scheduler/witness/consolidator loop specs from settings.
 
     Each spec wraps the existing worker's ``run_forever`` so loop logic is
     reused, not reimplemented. The scheduler has no enable flag (always on);
     witness and consolidator honor their existing settings flags.
+
+    The witness, consolidator, and Composio-sync loops run gated by their
+    system-drive control rows (HIG-233): pause skips the tick, a cadence
+    override adjusts the sleep, last-run is stamped after a productive tick.
+    The scheduler is the materializer itself and is never gated.
     """
 
     # Imported lazily so importing the supervisor (e.g. in tests) does not pull
     # in the heavy worker dependency graphs.
+    from kortny.ambient.system_drives import (
+        INTEGRATION_CATALOG_SYNC_DRIVE_KEY,
+        MEMORY_CONSOLIDATION_DRIVE_KEY,
+        WITNESS_SCAN_DRIVE_KEY,
+        SystemDriveGate,
+    )
     from kortny.composio.catalog_sync import ComposioCatalogSyncWorker
     from kortny.consolidator.runner import ConsolidatorWorker
+    from kortny.db.session import make_session_factory
     from kortny.scheduler.service import SchedulerWorker
     from kortny.witness.runner import WitnessWorker
 
@@ -210,27 +264,51 @@ def build_default_loops(settings: Settings) -> list[LoopSpec]:
         ).run_forever()
 
     def _witness() -> None:
-        WitnessWorker(
+        worker = WitnessWorker(
             settings=settings,
             poll_interval_seconds=settings.witness_poll_interval_seconds,
             profile_limit=settings.witness_profile_scan_limit,
             delivery_limit=settings.witness_delivery_limit,
             scan_interval=timedelta(seconds=settings.witness_scan_interval_seconds),
             deliver_private=settings.witness_deliver_private,
-        ).run_forever()
+        )
+        run_gated_forever(
+            gate=SystemDriveGate(
+                key=WITNESS_SCAN_DRIVE_KEY,
+                session_factory=make_session_factory(),
+            ),
+            run_once=worker.run_once,
+            poll_interval_seconds=worker.poll_interval_seconds,
+        )
 
     def _consolidator() -> None:
-        ConsolidatorWorker(
+        worker = ConsolidatorWorker(
             settings=settings,
             poll_interval_seconds=settings.consolidator_poll_interval_seconds,
-        ).run_forever()
+        )
+        run_gated_forever(
+            gate=SystemDriveGate(
+                key=MEMORY_CONSOLIDATION_DRIVE_KEY,
+                session_factory=make_session_factory(),
+            ),
+            run_once=worker.run_once,
+            poll_interval_seconds=worker.poll_interval_seconds,
+        )
 
     def _composio_catalog_sync() -> None:
-        ComposioCatalogSyncWorker(
+        worker = ComposioCatalogSyncWorker(
             settings=settings,
             poll_interval_seconds=settings.composio_sync_interval_hours * 3600.0,
             advisory_lock_key=settings.composio_sync_advisory_lock_key,
-        ).run_forever()
+        )
+        run_gated_forever(
+            gate=SystemDriveGate(
+                key=INTEGRATION_CATALOG_SYNC_DRIVE_KEY,
+                session_factory=make_session_factory(),
+            ),
+            run_once=worker.run_once,
+            poll_interval_seconds=worker.poll_interval_seconds,
+        )
 
     return [
         LoopSpec(name="scheduler", target=_scheduler, enabled=True),

@@ -14,7 +14,7 @@ import logging
 from collections.abc import Sequence
 
 from kortny.ambient.supervisor import AmbientSupervisor, build_default_loops
-from kortny.config import load_settings
+from kortny.config import Settings, load_settings
 from kortny.logging_config import configure_logging
 from kortny.observability import configure_tracing
 
@@ -43,6 +43,8 @@ def main(argv: Sequence[str] | None = None) -> None:
             print(f"{spec.name}: {state}")
         return
 
+    _seed_system_drives(settings)
+
     supervisor = AmbientSupervisor(loops)
     supervisor.install_signal_handlers()
     live = supervisor.start()
@@ -52,6 +54,22 @@ def main(argv: Sequence[str] | None = None) -> None:
         return
     supervisor.join()
     logger.info("ambient supervisor stopped")
+
+
+def _seed_system_drives(settings: Settings) -> None:
+    """Idempotently seed the user-visible system drive rows at boot (HIG-233)."""
+
+    from kortny.ambient.system_drives import seed_system_drives_for_all_installations
+    from kortny.db.session import make_session_factory
+
+    try:
+        ensured = seed_system_drives_for_all_installations(
+            make_session_factory(), settings=settings
+        )
+        logger.info("ambient system drives seeded rows=%s", ensured)
+    except Exception:
+        # Seeding is a visibility convenience; a failure must not stop the loops.
+        logger.exception("ambient system drive seeding failed; continuing")
 
 
 if __name__ == "__main__":

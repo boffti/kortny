@@ -22,11 +22,18 @@ from kortny.agent.thread_context import ThreadTranscriptProvider
 from kortny.approvals import (
     TOOL_APPROVAL_PROMPT_PURPOSE,
     TOOL_APPROVAL_REACTION_INSTRUCTION,
+    TOOL_APPROVAL_REQUIRED_MESSAGE,
     ToolApprovalRequest,
     ToolApprovalRequired,
     approval_prompt_text,
 )
 from kortny.composio import ComposioClient
+from kortny.composio.connect import (
+    ComposioConnectionRequired,
+    connect_prompt_text,
+    initiate_connect_for_task,
+    park_payload,
+)
 from kortny.composio.provider import ComposioExternalToolProvider
 from kortny.config import Settings, load_settings
 from kortny.db.models import (
@@ -370,6 +377,31 @@ class AgentTaskExecutor:
                     agent_result.artifact_count,
                 )
                 return TaskExecutionResult(result_summary=agent_result.result_summary)
+        except ComposioConnectionRequired as exc:
+            logger.info(
+                "agent executor needs composio connect task_id=%s toolkit=%s",
+                task.id,
+                exc.toolkit_slug,
+            )
+            self._park_for_composio_connect(
+                settings=settings,
+                session=session,
+                task=task,
+                task_service=task_service,
+                connect=exc,
+            )
+            self._complete_ack_reaction(
+                settings=settings,
+                session=session,
+                task=task,
+                task_service=task_service,
+                succeeded=True,
+            )
+            return TaskExecutionResult(
+                result_summary=(
+                    f"Waiting for you to connect {exc.toolkit_slug} before I continue."
+                )
+            )
         except ToolApprovalRequired as exc:
             logger.info(
                 "agent executor waiting for approval task_id=%s tool=%s approval_key=%s",
@@ -2106,6 +2138,111 @@ class AgentTaskExecutor:
                 title=artifact.filename,
             )
         return None
+
+    def _park_for_composio_connect(
+        self,
+        *,
+        settings: Settings,
+        session: Session,
+        task: Task,
+        task_service: TaskService,
+        connect: ComposioConnectionRequired,
+    ) -> None:
+        """Post a connect link and park the task on waiting_approval (HIG-209).
+
+        Creates the auth config + connect link, a pending user-scoped
+        ComposioConnection row, posts the threaded connect prompt once (outbox
+        idempotency via SlackPoster's task-bound message key), writes the
+        ``wait_auth`` request marker, then parks the task. No new status enum
+        value: the resume scan distinguishes connect-parks via the request
+        payload's ``recovery_action``.
+        """
+
+        client = self._resolve_composio_connect_client(settings)
+        callback_url = self._composio_connect_callback_url(settings)
+        prompt = initiate_connect_for_task(
+            session,
+            task=task,
+            toolkit_slug=connect.toolkit_slug,
+            client=client,
+            callback_url=callback_url,
+        )
+        prompt_ts = self._post_composio_connect_prompt(
+            settings=settings,
+            session=session,
+            task=task,
+            task_service=task_service,
+            toolkit_slug=connect.toolkit_slug,
+            redirect_url=prompt.redirect_url,
+        )
+        request = park_payload(
+            toolkit_slug=connect.toolkit_slug,
+            tool_name=connect.tool_name,
+            connection_id=prompt.connection_id,
+            scope_type=prompt.scope_type,
+            scope_id=prompt.scope_id,
+            prompt_message_ts=prompt_ts,
+        )
+        # Write the canonical approval-required marker so the existing
+        # latest_pending_tool_approval / approve_tool_approval resume path finds
+        # this connect park by its approval_key.
+        task_service.append_event(
+            task,
+            TaskEventType.log,
+            {
+                "message": TOOL_APPROVAL_REQUIRED_MESSAGE,
+                "request": request,
+            },
+        )
+        task_service.mark_waiting_for_tool_approval(
+            task,
+            request=request,
+            prompt_message_ts=prompt_ts or "",
+        )
+
+    def _resolve_composio_connect_client(self, settings: Settings) -> ComposioClient:
+        if self.composio_client is not None:
+            return cast(ComposioClient, self.composio_client)
+        return ComposioClient(
+            api_key=settings.composio_api_key,
+            timeout_seconds=settings.composio_request_timeout_seconds,
+        )
+
+    def _composio_connect_callback_url(self, settings: Settings) -> str:
+        base = (settings.public_base_url or "http://localhost:8080").rstrip("/")
+        return f"{base}/composio/callback"
+
+    def _post_composio_connect_prompt(
+        self,
+        *,
+        settings: Settings,
+        session: Session,
+        task: Task,
+        task_service: TaskService,
+        toolkit_slug: str,
+        redirect_url: str,
+    ) -> str:
+        client = self.slack_client
+        if client is None:
+            client = cast(
+                SlackPostingClient,
+                WebClient(token=settings.slack_bot_token),
+            )
+        return cast(
+            str,
+            SlackPoster(
+                session=session,
+                client=client,
+                task_service=task_service,
+            ).post_message(
+                SlackThread.from_task(task),
+                connect_prompt_text(
+                    toolkit_slug=toolkit_slug,
+                    redirect_url=redirect_url,
+                ),
+                purpose=TOOL_APPROVAL_PROMPT_PURPOSE,
+            ),
+        )
 
     def _post_approval_request(
         self,

@@ -109,6 +109,17 @@ from kortny.dashboard.schedules import (
     update_schedule_from_dashboard,
 )
 from kortny.dashboard.settings import DashboardSettings, load_dashboard_settings
+from kortny.dashboard.setup import (
+    LLM_PROVIDER_CHOICES,
+    ValidationOutcome,
+    load_app_manifest,
+    manifest_deep_link,
+    render_env_block,
+    settings_are_complete,
+    settings_error_message,
+    validate_llm_key,
+    validate_slack_token,
+)
 from kortny.dashboard.skills_actions import (
     disable_skill_enablement,
     enable_skill_for_scope,
@@ -199,16 +210,28 @@ templates = Jinja2Templates(directory=TEMPLATE_DIR)
 def create_app(
     settings: DashboardSettings | None = None,
     session_factory: sessionmaker[Session] | None = None,
+    *,
+    setup_mode: bool | None = None,
 ) -> FastAPI:
-    """Create the dashboard app."""
+    """Create the dashboard app.
+
+    HIG-209: when the full runtime ``Settings`` cannot load (a missing required
+    Slack/LLM/Postgres/Composio field), the app can boot in SETUP-ONLY mode
+    where every route serves the first-run wizard. ``setup_mode`` is passed
+    explicitly by the service entrypoint (``create_service_app`` /
+    ``__main__``); when ``None`` it defaults to ``False`` so programmatic callers
+    (tests, embedders) always get the normal app unless they opt in.
+    """
 
     resolved_settings = settings or load_dashboard_settings()
     resolved_session_factory = session_factory or make_session_factory(
         database_url=resolved_settings.postgres_url
     )
+    resolved_setup_mode = bool(setup_mode)
     app = FastAPI(title="Kortny Dashboard", docs_url=None, redoc_url=None)
     app.state.dashboard_settings = resolved_settings
     app.state.session_factory = resolved_session_factory
+    app.state.setup_mode = resolved_setup_mode
     app.add_middleware(
         SessionMiddleware,
         secret_key=resolved_settings.session_secret,
@@ -225,8 +248,207 @@ def create_app(
     templates.env.filters["datetime"] = _datetime
     templates.env.filters["json"] = _json
 
-    register_routes(app)
+    register_setup_routes(app)
+    if resolved_setup_mode:
+        # SETUP-ONLY mode: a catch-all funnels every other route to the wizard
+        # so the operator is never stranded on a 500 while .env is incomplete.
+        register_setup_catch_all(app)
+    else:
+        register_routes(app)
     return app
+
+
+def create_service_app() -> FastAPI:
+    """Service entrypoint factory (used by ``kortny.dashboard.__main__``).
+
+    Derives SETUP-ONLY mode from whether the full runtime ``Settings`` load, so
+    the operator gets the wizard when ``.env`` is incomplete and the normal
+    dashboard once it is complete.
+    """
+
+    return create_app(setup_mode=not settings_are_complete())
+
+
+def _setup_values_from_form(form: Mapping[str, list[str]]) -> dict[str, str]:
+    """Pull wizard field values out of a parsed form into env-key form."""
+
+    def first(key: str) -> str:
+        values = form.get(key)
+        return values[0].strip() if values and isinstance(values[0], str) else ""
+
+    observability = "true" if form.get("observability_enabled") else ""
+    return {
+        "LLM_PROVIDER": first("llm_provider"),
+        "LLM_API_KEY": first("llm_api_key"),
+        "LLM_MODEL": first("llm_model"),
+        "SLACK_APP_NAME": first("app_name"),
+        "SLACK_BOT_TOKEN": first("slack_bot_token"),
+        "SLACK_APP_TOKEN": first("slack_app_token"),
+        "SLACK_SIGNING_SECRET": first("slack_signing_secret"),
+        "COMPOSIO_API_KEY": first("composio_api_key"),
+        "OBSERVABILITY_ENABLED": observability,
+    }
+
+
+def _setup_context(
+    request: Request,
+    *,
+    values: dict[str, str],
+    llm_result: ValidationOutcome | None = None,
+    slack_result: ValidationOutcome | None = None,
+    env_block: str | None = None,
+    notice: str | None = None,
+    notice_tone: str = "success",
+) -> dict[str, object]:
+    setup_mode = bool(getattr(request.app.state, "setup_mode", False))
+    app_name = values.get("SLACK_APP_NAME") or "Kortny"
+    manifest = load_app_manifest(app_name=app_name)
+    return {
+        "setup_mode": setup_mode,
+        "settings_error": settings_error_message() if setup_mode else None,
+        "values": values,
+        "llm_provider_choices": LLM_PROVIDER_CHOICES,
+        "manifest_deep_link": manifest_deep_link(manifest),
+        "llm_result": llm_result,
+        "slack_result": slack_result,
+        "env_block": env_block,
+        "notice": notice,
+        "notice_tone": notice_tone,
+    }
+
+
+def register_setup_routes(app: FastAPI) -> None:
+    """Register the first-run setup wizard (reachable in both app modes)."""
+
+    @app.get("/setup", response_class=HTMLResponse)
+    def setup_wizard(request: Request) -> Response:
+        setup_mode = bool(getattr(request.app.state, "setup_mode", False))
+        # When config is complete, /setup stays admin-only for re-validation.
+        if not setup_mode:
+            principal = _session_principal(request)
+            if principal is None:
+                return RedirectResponse(
+                    url=_login_url_for(request),
+                    status_code=status.HTTP_303_SEE_OTHER,
+                )
+            if principal.role != "admin":
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN)
+        values = _default_setup_values(request)
+        app_name = request.query_params.get("app_name")
+        if app_name:
+            values["SLACK_APP_NAME"] = app_name.strip()
+        return templates.TemplateResponse(
+            request=request,
+            name="setup.html",
+            context=_setup_context(request, values=values),
+        )
+
+    @app.post("/setup/validate-llm", response_class=HTMLResponse)
+    async def setup_validate_llm(request: Request) -> Response:
+        _require_setup_access(request)
+        form = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
+        values = _setup_values_from_form(form)
+        result = validate_llm_key(
+            provider=values["LLM_PROVIDER"],
+            api_key=values["LLM_API_KEY"],
+            model=values["LLM_MODEL"],
+        )
+        return templates.TemplateResponse(
+            request=request,
+            name="setup.html",
+            context=_setup_context(request, values=values, llm_result=result),
+        )
+
+    @app.post("/setup/validate-slack", response_class=HTMLResponse)
+    async def setup_validate_slack(request: Request) -> Response:
+        _require_setup_access(request)
+        form = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
+        values = _setup_values_from_form(form)
+        client_factory = getattr(request.app.state, "setup_slack_client_factory", None)
+        result = validate_slack_token(
+            bot_token=values["SLACK_BOT_TOKEN"],
+            client_factory=client_factory,
+        )
+        return templates.TemplateResponse(
+            request=request,
+            name="setup.html",
+            context=_setup_context(request, values=values, slack_result=result),
+        )
+
+    @app.post("/setup/render-env", response_class=HTMLResponse)
+    async def setup_render_env(request: Request) -> Response:
+        _require_setup_access(request)
+        form = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
+        values = _setup_values_from_form(form)
+        env_block = render_env_block(values)
+        notice = (
+            "Copy these into .env, then restart the app, worker, and ambient "
+            "services. The dashboard cannot apply them to those processes for you."
+        )
+        return templates.TemplateResponse(
+            request=request,
+            name="setup.html",
+            context=_setup_context(
+                request,
+                values=values,
+                env_block=env_block,
+                notice=notice,
+            ),
+        )
+
+
+def register_setup_catch_all(app: FastAPI) -> None:
+    """In SETUP-ONLY mode, funnel all unmatched routes to the wizard."""
+
+    @app.get("/{full_path:path}", response_class=HTMLResponse)
+    def setup_catch_all(request: Request, full_path: str) -> Response:
+        return RedirectResponse(url="/setup", status_code=status.HTTP_303_SEE_OTHER)
+
+
+def _require_setup_access(request: Request) -> None:
+    """Allow setup mutations in setup mode; otherwise require an admin."""
+
+    if bool(getattr(request.app.state, "setup_mode", False)):
+        return
+    principal = _session_principal(request)
+    if principal is None:
+        raise HTTPException(
+            status_code=status.HTTP_303_SEE_OTHER,
+            headers={"Location": _login_url_for(request)},
+        )
+    if principal.role != "admin":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN)
+
+
+def _default_setup_values(request: Request) -> dict[str, str]:
+    """Seed wizard fields from any runtime settings that already loaded."""
+
+    runtime_settings, _error = _load_runtime_settings()
+    if runtime_settings is None:
+        return {
+            "LLM_PROVIDER": "openai",
+            "LLM_API_KEY": "",
+            "LLM_MODEL": "",
+            "SLACK_APP_NAME": "Kortny",
+            "SLACK_BOT_TOKEN": "",
+            "SLACK_APP_TOKEN": "",
+            "SLACK_SIGNING_SECRET": "",
+            "COMPOSIO_API_KEY": "",
+            "OBSERVABILITY_ENABLED": "",
+        }
+    return {
+        "LLM_PROVIDER": runtime_settings.llm_provider.value,
+        "LLM_API_KEY": "",
+        "LLM_MODEL": runtime_settings.llm_model,
+        "SLACK_APP_NAME": runtime_settings.slack_app_name,
+        "SLACK_BOT_TOKEN": "",
+        "SLACK_APP_TOKEN": "",
+        "SLACK_SIGNING_SECRET": "",
+        "COMPOSIO_API_KEY": "",
+        "OBSERVABILITY_ENABLED": (
+            "true" if runtime_settings.observability_enabled else ""
+        ),
+    }
 
 
 def register_routes(app: FastAPI) -> None:

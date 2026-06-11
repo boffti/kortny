@@ -45,6 +45,7 @@ from kortny.observe.assessment import CHANNEL_ASSESSMENT_REQUESTED_MESSAGE
 from kortny.scheduler import ScheduleDraft
 from kortny.slack import SlackIngress, acknowledge_then_handle
 from kortny.slack.ingress import INTENT_CLASSIFIED_MESSAGE, is_bare_app_mention
+from kortny.slack.outbox import slack_install_intro_key
 from kortny.slack.reactions import ACK_REACTION_ADDED_MESSAGE, ReactionChoice
 from kortny.tasks import TaskService
 
@@ -288,6 +289,23 @@ def db_session(engine: Engine) -> Iterator[Session]:
         session.rollback()
         cleanup_database(session)
         session.commit()
+
+
+@pytest.fixture(autouse=True)
+def _existing_default_installation(db_session: Session) -> None:
+    """Pre-seed the default T123 workspace so the HIG-209 first-run intro DM
+    (which fires only for genuinely new installations) does not perturb the
+    pre-existing ingress tests. Tests that exercise the intro DM use a fresh
+    team id so they still observe a new-installation creation."""
+
+    if (
+        db_session.scalar(
+            select(Installation).where(Installation.slack_team_id == "T123")
+        )
+        is None
+    ):
+        db_session.add(Installation(slack_team_id="T123"))
+        db_session.commit()
 
 
 def test_app_mention_creates_task_and_adds_reaction_ack(
@@ -2194,6 +2212,64 @@ def test_reaction_from_non_owner_is_ignored(db_session: Session) -> None:
     assert task.status is TaskStatus.pending
 
 
+def _install_intro_dms(client: FakeSlackClient) -> list[dict[str, Any]]:
+    # The intro DM is the only chat_postMessage addressed to the user (U123),
+    # not the channel (C123). Ack/result messages target the channel/thread.
+    return [call for call in client.calls if call["channel"] == "U123"]
+
+
+def _fresh_team_body(*, event_id: str, team_id: str) -> dict[str, Any]:
+    return {"event_id": event_id, "team_id": team_id}
+
+
+def test_first_installation_posts_intro_dm_once(db_session: Session) -> None:
+    client = FakeSlackClient()
+    team_id = "TIntroFresh1"
+    SlackIngress(session=db_session, client=client).handle_app_mention(
+        body=_fresh_team_body(event_id="EvIntro1", team_id=team_id),
+        event=app_mention_event(text="<@UBOT> hello"),
+    )
+    db_session.commit()
+
+    intro_dms = _install_intro_dms(client)
+    assert len(intro_dms) == 1
+    assert intro_dms[0]["channel"] == "U123"
+    assert "AI coworker" in intro_dms[0]["text"]
+
+    installation = db_session.scalar(
+        select(Installation).where(Installation.slack_team_id == team_id)
+    )
+    assert installation is not None
+    side_effect = db_session.scalar(
+        select(SlackSideEffect).where(
+            SlackSideEffect.idempotency_key
+            == slack_install_intro_key(installation_id=installation.id)
+        )
+    )
+    assert side_effect is not None
+    assert side_effect.purpose == "install_intro"
+
+
+def test_second_event_does_not_repost_intro_dm(db_session: Session) -> None:
+    client = FakeSlackClient()
+    team_id = "TIntroFresh2"
+    ingress = SlackIngress(session=db_session, client=client)
+    ingress.handle_app_mention(
+        body=_fresh_team_body(event_id="EvIntro2a", team_id=team_id),
+        event=app_mention_event(text="<@UBOT> first", ts="1716400000.000010"),
+    )
+    db_session.commit()
+    assert len(_install_intro_dms(client)) == 1
+
+    # A second event for the same (already-created) installation: no second DM.
+    ingress.handle_app_mention(
+        body=_fresh_team_body(event_id="EvIntro2b", team_id=team_id),
+        event=app_mention_event(text="<@UBOT> second", ts="1716400000.000020"),
+    )
+    db_session.commit()
+    assert len(_install_intro_dms(client)) == 1
+
+
 def cleanup_database(session: Session) -> None:
     for model in (
         Artifact,
@@ -2219,7 +2295,13 @@ def create_installation(
     *,
     slack_team_id: str | None = None,
 ) -> Installation:
-    installation = Installation(slack_team_id=slack_team_id or f"T{uuid.uuid4().hex}")
+    team_id = slack_team_id or f"T{uuid.uuid4().hex}"
+    existing = session.scalar(
+        select(Installation).where(Installation.slack_team_id == team_id)
+    )
+    if existing is not None:
+        return existing
+    installation = Installation(slack_team_id=team_id)
     session.add(installation)
     session.flush()
     return installation

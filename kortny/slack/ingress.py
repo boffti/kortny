@@ -81,6 +81,7 @@ from kortny.slack.membership import (
 from kortny.slack.outbox import (
     SlackSideEffectOutbox,
     slack_channel_intro_key,
+    slack_install_intro_key,
     slack_reaction_key,
 )
 from kortny.slack.posting import SlackPoster, SlackPostingClient, SlackThread
@@ -100,6 +101,7 @@ from kortny.slack.schedule_blocks import (
     parse_schedule_action_value,
     schedule_action_blocks,
 )
+from kortny.slack_mrkdwn import normalize_user_facing_text
 from kortny.tasks import TaskIdentity, TaskService
 from kortny.witness.automation import AutomationOutcome, materialize_acceptance
 from kortny.witness.lifecycle import (
@@ -129,6 +131,18 @@ REACTION_REJECT = "no_entry_sign"
 CONFIRMATION_REACTIONS = frozenset({REACTION_CONFIRM, REACTION_REJECT})
 INTENT_CLASSIFIED_MESSAGE = "intent_classification_completed"
 INTENT_CLASSIFICATION_FAILED_MESSAGE = "intent_classification_failed"
+
+
+def _install_intro_text() -> str:
+    """Coworker-voiced first-run intro DM (HIG-209 Part 2)."""
+
+    return (
+        "Hey — I'm Kortny, your new AI coworker. Thanks for setting me up. :wave:\n\n"
+        "Here's a good first thing to try: just DM me something like "
+        '*"summarize what happened in #general today"* and I\'ll get to work.\n\n'
+        "When you're ready, invite me into a channel (`/invite @Kortny`) and I'll "
+        "start helping the whole team there."
+    )
 
 
 def is_bare_app_mention(event: Mapping[str, Any]) -> bool:
@@ -213,6 +227,10 @@ class SlackIngress:
         self.schedule_fallback_parser = schedule_fallback_parser
         self.settings = settings
         self.inbound_events = SlackInboundEventService(session)
+        # HIG-209: installation ids this ingress instance just created, so the
+        # first-run intro DM fires only for genuinely new installations and only
+        # once they reach a real engagement point (task creation / channel join).
+        self._newly_created_installation_ids: set[uuid.UUID] = set()
 
     def handle_schedule_action(
         self,
@@ -760,6 +778,10 @@ class SlackIngress:
 
         team_id = _team_id(body, event)
         installation = self._get_or_create_installation(team_id)
+        self._maybe_intro_new_installation(
+            installation=installation,
+            user_id=_optional_str(event.get("inviter")),
+        )
         inbound_event = self._record_inbound_event(
             body=body,
             event=event,
@@ -1245,6 +1267,10 @@ class SlackIngress:
             slack_user_id=user_id,
             input=input_text,
             source_surface=source,
+        )
+        self._maybe_intro_new_installation(
+            installation=installation,
+            user_id=user_id,
         )
         self.inbound_events.mark_task_created(
             inbound_event,
@@ -1932,11 +1958,25 @@ class SlackIngress:
         ).event
 
     def _get_or_create_installation(self, slack_team_id: str) -> Installation:
+        installation, _created = self._get_or_create_installation_with_state(
+            slack_team_id
+        )
+        return installation
+
+    def _get_or_create_installation_with_state(
+        self, slack_team_id: str
+    ) -> tuple[Installation, bool]:
+        """Return the installation and whether this call created it.
+
+        The created flag drives the HIG-209 first-run intro DM, which fires
+        exactly once per new installation.
+        """
+
         existing = self.session.scalar(
             select(Installation).where(Installation.slack_team_id == slack_team_id)
         )
         if existing is not None:
-            return existing
+            return existing, False
 
         installation = Installation(slack_team_id=slack_team_id)
         try:
@@ -1949,9 +1989,79 @@ class SlackIngress:
             )
             if existing is None:
                 raise
-            return existing
+            return existing, False
 
-        return installation
+        self._newly_created_installation_ids.add(installation.id)
+        return installation, True
+
+    def _maybe_intro_new_installation(
+        self,
+        *,
+        installation: Installation,
+        user_id: str | None,
+    ) -> None:
+        """Fire the first-run intro DM iff this installation was just created.
+
+        Called from genuine engagement points (task creation, channel join) so
+        ignored events (bot DMs, edits, non-soft-mentions) never trigger an
+        intro. The outbox idempotency key guarantees it posts at most once.
+        """
+
+        if installation.id not in self._newly_created_installation_ids:
+            return
+        self._newly_created_installation_ids.discard(installation.id)
+        self._maybe_post_install_intro_dm(
+            installation=installation,
+            user_id=user_id,
+        )
+
+    def _maybe_post_install_intro_dm(
+        self,
+        *,
+        installation: Installation,
+        user_id: str | None,
+    ) -> None:
+        """DM the installing user a one-time coworker intro (HIG-209 Part 2).
+
+        Idempotency is keyed ``install-intro:{installation_id}`` so retries and
+        any later event for the same installation never re-post. Extends the
+        existing channel-onboarding outbox machinery rather than rebuilding it.
+        """
+
+        if not user_id:
+            return
+        chat_post = getattr(self.client, "chat_postMessage", None)
+        if not callable(chat_post):
+            return
+        intro_text = normalize_user_facing_text(_install_intro_text())
+        try:
+            outbox_result = SlackSideEffectOutbox(self.session).deliver(
+                installation_id=installation.id,
+                idempotency_key=slack_install_intro_key(
+                    installation_id=installation.id
+                ),
+                operation="chat_postMessage",
+                purpose="install_intro",
+                target_channel_id=user_id,
+                request={"channel": user_id, "text": intro_text},
+                call=lambda: chat_post(channel=user_id, text=intro_text),
+            )
+        except Exception as exc:
+            logger.info(
+                "slack install intro dm failed installation_id=%s user=%s error_type=%s error=%s",
+                installation.id,
+                user_id,
+                type(exc).__name__,
+                exc,
+            )
+            return
+        logger.info(
+            "slack install intro dm delivered=%s deduped=%s installation_id=%s user=%s",
+            outbox_result.delivered,
+            outbox_result.deduped,
+            installation.id,
+            user_id,
+        )
 
     def _resolve_bot_user_id(self, installation: Installation) -> str | None:
         if installation.bot_user_id:

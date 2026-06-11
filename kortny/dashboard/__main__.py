@@ -7,7 +7,7 @@ import uvicorn
 
 def main() -> None:
     uvicorn.run(
-        "kortny.dashboard.app:create_app",
+        "kortny.dashboard.app:create_service_app",
         factory=True,
         host="0.0.0.0",
         port=8080,

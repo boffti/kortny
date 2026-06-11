@@ -487,6 +487,10 @@ class ComposioCatalogSyncWorker:
         for installation_id in session.scalars(
             select(Installation.id).order_by(Installation.created_at)
         ):
+            # HIG-209 Part 3: cheap pre-pass — requeue any connect-parked tasks
+            # whose toolkit is now connected in scope, then sync that toolkit so
+            # the resumed task's tool resolves on re-run.
+            self._resume_parked_connect_tasks(session, service, installation_id)
             try:
                 results.append(service.sync_installation(installation_id))
             except Exception:
@@ -495,6 +499,35 @@ class ComposioCatalogSyncWorker:
                     installation_id,
                 )
         return tuple(results)
+
+    def _resume_parked_connect_tasks(
+        self,
+        session: Session,
+        service: ComposioCatalogSyncService,
+        installation_id: object,
+    ) -> None:
+        from kortny.composio.connect import resume_parked_connect_tasks
+
+        try:
+            resume = resume_parked_connect_tasks(
+                session, installation_id=installation_id
+            )
+        except Exception:
+            logger.exception(
+                "composio connect resume failed installation_id=%s",
+                installation_id,
+            )
+            return
+        for toolkit_slug in resume.resumed_toolkits:
+            try:
+                service.sync_toolkit(installation_id, toolkit_slug)
+            except Exception:
+                logger.exception(
+                    "composio connect resume toolkit sync failed "
+                    "installation_id=%s toolkit=%s",
+                    installation_id,
+                    toolkit_slug,
+                )
 
     def run_forever(self) -> None:
         while True:

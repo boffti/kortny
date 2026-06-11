@@ -70,6 +70,7 @@ from kortny.approvals import (
 )
 from kortny.autonomy import AutonomyLevel
 from kortny.autonomy_policy import AutonomyPolicyService
+from kortny.composio.connect import ComposioConnectionRequired
 from kortny.db.models import Task, TaskEvent, TaskEventType
 from kortny.embeddings import EmbeddingIndex
 from kortny.llm import ChatMessage, Completion, ToolCall
@@ -328,6 +329,11 @@ class AgentCoordinator:
             run_outcome = "succeeded"
             return result
         except ToolApprovalRequired:
+            run_outcome = "waiting_approval"
+            raise
+        except ComposioConnectionRequired:
+            # HIG-209 Part 3: parking for an in-thread OAuth connect is a wait,
+            # not a failure — mirror the approval-wait outcome.
             run_outcome = "waiting_approval"
             raise
         finally:
@@ -656,6 +662,17 @@ class AgentCoordinator:
                     recovery_action=error_classification.recovery_action.value,
                     error_summary=error_classification.message,
                 )
+
+            # HIG-209 Part 3: a Composio tool that has no connected account in
+            # scope surfaces a wait_auth/missing_connection failure. Rather than
+            # burning recoverable-failure budget, hand off to the worker so it
+            # can post a connect link and park the task on waiting_approval.
+            if error_classification is not None:
+                connect_required = _composio_connect_required(
+                    error_classification, tool_name=tool_call.name
+                )
+                if connect_required is not None:
+                    raise connect_required
 
             self.task_service.raise_if_cancelled(
                 task_obj, phase=f"after_tool_{tool_call.name}"
@@ -1727,6 +1744,36 @@ def _shorten_text(value: str, *, max_chars: int) -> str:
     if max_chars <= 3:
         return value[:max_chars]
     return value[: max_chars - 3].rstrip() + "..."
+
+
+def _composio_connect_required(
+    classification: ClassifiedToolError,
+    *,
+    tool_name: str,
+) -> Exception | None:
+    """Build a ComposioConnectionRequired for a missing-connection wait_auth.
+
+    HIG-209 Part 3: only Composio ``missing_connection`` failures (which carry a
+    ``toolkit_slug`` in their details) park for an in-thread OAuth connect. Other
+    ``wait_auth`` errors keep their existing model-driven recovery.
+    """
+
+    if classification.recovery_action is not RecoveryAction.wait_auth:
+        return None
+    if classification.code != "missing_connection":
+        return None
+    details = classification.details if isinstance(classification.details, dict) else {}
+    if details.get("provider") != "composio":
+        return None
+    toolkit_slug = details.get("toolkit_slug")
+    if not isinstance(toolkit_slug, str) or not toolkit_slug:
+        return None
+    from kortny.composio.connect import ComposioConnectionRequired
+
+    return ComposioConnectionRequired(
+        toolkit_slug=toolkit_slug,
+        tool_name=tool_name,
+    )
 
 
 def _recoverable_tool_error_result(

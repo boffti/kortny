@@ -307,6 +307,12 @@ def slack_channel_intro_key(*, installation_id: uuid.UUID, channel_id: str) -> s
     return f"slack:channel_intro:{installation_id}:{channel_id}"
 
 
+def slack_install_intro_key(*, installation_id: uuid.UUID) -> str:
+    """Return the deterministic outbox key for the first-run install intro DM."""
+
+    return f"install-intro:{installation_id}"
+
+
 def _idempotent_success_response(
     operation: str,
     exc: Exception,

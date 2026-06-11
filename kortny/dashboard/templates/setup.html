@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Setup - Kortny</title>
+    {% include "_theme_init.html" %}
+    <link rel="stylesheet" href="{{ url_for('static', path='/dashboard.css') }}">
+    <script src="{{ url_for('static', path='/theme.js') }}" defer></script>
+  </head>
+  <body class="login-body">
+    <div class="login-theme">
+      {% include "_theme_toggle.html" %}
+    </div>
+    <main class="login-shell" style="max-width: 720px;">
+      <section class="card login-card" aria-labelledby="setup-title" style="text-align: left;">
+        <header>
+          <span class="login-kicker">Kortny</span>
+          <h1 id="setup-title">First-run setup</h1>
+          {% if setup_mode %}
+            <p>Kortny can't start the app, worker, and ambient services until the
+              required configuration is present. Work through the steps below,
+              then paste the rendered <code>.env</code> block and restart.</p>
+            {% if settings_error %}
+              <p class="form-error" role="alert">{{ settings_error }}</p>
+            {% endif %}
+          {% else %}
+            <p>Configuration is complete. Use this page to re-validate your
+              provider key and Slack tokens, or to regenerate the
+              <code>.env</code> block.</p>
+          {% endif %}
+        </header>
+
+        {% if notice %}
+          <p class="badge badge-{{ notice_tone }}" role="status">{{ notice }}</p>
+        {% endif %}
+
+        <!-- Step 1: LLM provider + key + model -->
+        <div class="card" style="margin-top: 1rem;">
+          <h2>1. Model provider</h2>
+          <form class="login-form" method="post" action="/setup/validate-llm">
+            <label>
+              Provider
+              <select class="input" name="llm_provider">
+                {% for choice in llm_provider_choices %}
+                  <option value="{{ choice }}" {{ 'selected' if values.LLM_PROVIDER == choice else '' }}>{{ choice }}</option>
+                {% endfor %}
+              </select>
+            </label>
+            <label>
+              API key
+              <input class="input" name="llm_api_key" type="password" value="{{ values.LLM_API_KEY }}" autocomplete="off">
+            </label>
+            <label>
+              Model
+              <input class="input" name="llm_model" value="{{ values.LLM_MODEL }}" placeholder="e.g. gpt-4o or claude-sonnet-4-5">
+            </label>
+            <button class="btn login-submit" type="submit">Validate</button>
+          </form>
+          {% if llm_result %}
+            <p class="badge badge-{{ 'success' if llm_result.ok else 'danger' }}" role="status">{{ llm_result.message }}</p>
+          {% endif %}
+        </div>
+
+        <!-- Step 2: Slack app via manifest deep-link -->
+        <div class="card" style="margin-top: 1rem;">
+          <h2>2. Slack app</h2>
+          <form class="login-form" method="get" action="/setup">
+            <label>
+              App name
+              <input class="input" name="app_name" value="{{ values.SLACK_APP_NAME }}" placeholder="Kortny">
+            </label>
+            <button class="btn-ghost" type="submit">Update manifest link</button>
+          </form>
+          <p style="margin-top: 0.75rem;">
+            <a class="btn" href="{{ manifest_deep_link }}" target="_blank" rel="noopener">Create Slack app from manifest</a>
+          </p>
+          <p class="muted">Opens Slack's app builder pre-filled with Kortny's scopes
+            and event subscriptions. Create the app, install it, then paste the
+            three credentials below.</p>
+          <form class="login-form" method="post" action="/setup/validate-slack" style="margin-top: 0.75rem;">
+            <input type="hidden" name="app_name" value="{{ values.SLACK_APP_NAME }}">
+            <label>
+              Bot token (xoxb-…)
+              <input class="input" name="slack_bot_token" type="password" value="{{ values.SLACK_BOT_TOKEN }}" autocomplete="off">
+            </label>
+            <label>
+              App token (xapp-…)
+              <input class="input" name="slack_app_token" type="password" value="{{ values.SLACK_APP_TOKEN }}" autocomplete="off">
+            </label>
+            <label>
+              Signing secret
+              <input class="input" name="slack_signing_secret" type="password" value="{{ values.SLACK_SIGNING_SECRET }}" autocomplete="off">
+            </label>
+            <button class="btn login-submit" type="submit">Validate</button>
+          </form>
+          {% if slack_result %}
+            <p class="badge badge-{{ 'success' if slack_result.ok else 'danger' }}" role="status">{{ slack_result.message }}</p>
+          {% endif %}
+        </div>
+
+        <!-- Step 3: Optional integrations -->
+        <div class="card" style="margin-top: 1rem;">
+          <h2>3. Optional integrations</h2>
+          <form class="login-form" method="post" action="/setup/render-env">
+            <input type="hidden" name="llm_provider" value="{{ values.LLM_PROVIDER }}">
+            <input type="hidden" name="llm_api_key" value="{{ values.LLM_API_KEY }}">
+            <input type="hidden" name="llm_model" value="{{ values.LLM_MODEL }}">
+            <input type="hidden" name="app_name" value="{{ values.SLACK_APP_NAME }}">
+            <input type="hidden" name="slack_bot_token" value="{{ values.SLACK_BOT_TOKEN }}">
+            <input type="hidden" name="slack_app_token" value="{{ values.SLACK_APP_TOKEN }}">
+            <input type="hidden" name="slack_signing_secret" value="{{ values.SLACK_SIGNING_SECRET }}">
+            <label>
+              Composio API key (optional)
+              <input class="input" name="composio_api_key" type="password" value="{{ values.COMPOSIO_API_KEY }}" autocomplete="off">
+            </label>
+            <label class="checkbox-label">
+              <input type="checkbox" name="observability_enabled" value="1" {{ 'checked' if values.OBSERVABILITY_ENABLED == 'true' else '' }}>
+              Enable observability (OpenTelemetry / Phoenix)
+            </label>
+            <button class="btn login-submit" type="submit">Render .env block</button>
+          </form>
+        </div>
+
+        <!-- Output: rendered .env block -->
+        {% if env_block %}
+          <div class="card" style="margin-top: 1rem;">
+            <h2>Your .env</h2>
+            <p class="muted">These values must land in <code>.env</code> for the
+              app, worker, and ambient services to boot. The dashboard cannot read
+              them at runtime for you — copy them in and restart.</p>
+            <textarea id="env-block" class="input" rows="12" readonly style="font-family: monospace;">{{ env_block }}</textarea>
+            <button class="btn-ghost" type="button" onclick="navigator.clipboard.writeText(document.getElementById('env-block').value)">Copy</button>
+          </div>
+        {% endif %}
+      </section>
+    </main>
+  </body>
+</html>

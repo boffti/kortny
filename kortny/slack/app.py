@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from kortny.config import Settings, load_settings
 from kortny.db.models import Installation
 from kortny.db.models import LLMProvider as DbLLMProvider
-from kortny.db.session import session_scope
+from kortny.db.session import make_session_factory, session_scope
 from kortny.intent import LLMIntentClassifier, should_classify_channel_message
 from kortny.llm import (
     LLMProvider,
@@ -295,16 +295,21 @@ def create_bolt_app(
 
         acknowledge_then_handle(ack, handle)
 
+    # The event handlers above resolve a default factory lazily inside
+    # session_scope; the surface modules need a concrete one at
+    # registration time (the assistant context store outlives any single
+    # handler call).
+    surface_session_factory = session_factory or make_session_factory()
     if resolved_settings.app_home_enabled:
         register_app_home(
-            app, settings=resolved_settings, session_factory=session_factory
+            app, settings=resolved_settings, session_factory=surface_session_factory
         )
     if resolved_settings.assistant_enabled:
         register_assistant(
-            app, settings=resolved_settings, session_factory=session_factory
+            app, settings=resolved_settings, session_factory=surface_session_factory
         )
     register_witness_actions(
-        app, settings=resolved_settings, session_factory=session_factory
+        app, settings=resolved_settings, session_factory=surface_session_factory
     )
 
     return app

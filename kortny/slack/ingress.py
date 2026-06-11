@@ -19,6 +19,7 @@ from kortny.approvals import (
 )
 from kortny.config import Settings, SettingsError, load_settings
 from kortny.db.models import (
+    AssistantThreadContext,
     Installation,
     Schedule,
     SlackInboundEvent,
@@ -374,6 +375,24 @@ class SlackIngress:
             )
             return None
 
+        # HIG-236 assistant-thread dedup guard: when the assistant surface is on,
+        # a threaded im message whose (channel, thread_ts) is a known assistant
+        # thread is owned by the Assistant middleware (it creates the task). Skip
+        # here so the same message can never produce a second task.
+        assistant_skip_reason = self._assistant_thread_skip_reason(event)
+        if assistant_skip_reason is not None:
+            self.inbound_events.mark_ignored(
+                inbound_event, reason=assistant_skip_reason
+            )
+            logger.info(
+                "slack dm ignored reason=%s event_id=%s channel=%s thread_ts=%s",
+                assistant_skip_reason,
+                body.get("event_id"),
+                event.get("channel"),
+                event.get("thread_ts"),
+            )
+            return None
+
         return self._handle_addressed_message(
             body=body,
             event=event,
@@ -383,6 +402,37 @@ class SlackIngress:
             installation=installation,
             team_id=team_id,
         )
+
+    def _assistant_thread_skip_reason(
+        self,
+        event: Mapping[str, Any],
+    ) -> str | None:
+        """Return a skip reason when the Assistant middleware owns this DM.
+
+        HIG-236: assistant-thread ``message.im`` events arrive threaded
+        (``thread_ts`` set). When the assistant surface is enabled and the
+        thread root is a known assistant thread, the Assistant middleware
+        creates the task; ingress must stay out of the way.
+        """
+
+        settings = self.settings
+        if settings is None or not settings.assistant_enabled:
+            return None
+        thread_ts = event.get("thread_ts")
+        channel_id = event.get("channel")
+        if not (isinstance(thread_ts, str) and thread_ts):
+            return None
+        if not (isinstance(channel_id, str) and channel_id):
+            return None
+        is_known_assistant_thread = self.session.scalar(
+            select(AssistantThreadContext.id).where(
+                AssistantThreadContext.channel_id == channel_id,
+                AssistantThreadContext.thread_ts == thread_ts,
+            )
+        )
+        if is_known_assistant_thread is not None:
+            return "assistant_thread"
+        return None
 
     def handle_channel_message(
         self,

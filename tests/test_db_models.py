@@ -45,6 +45,7 @@ def test_mvp_schema_declares_all_core_tables() -> None:
         "witness_delivery_log",
         "artifacts",
         "model_pricing",
+        "assistant_thread_context",
     }
 
 

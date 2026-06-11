@@ -145,6 +145,10 @@ def create_bolt_app(
                             ingress = SlackIngress(
                                 session=session,
                                 client=client,
+                                # settings arms the assistant-thread dedup
+                                # guard in handle_dm (defense-in-depth behind
+                                # the Assistant middleware's short-circuit).
+                                settings=resolved_settings,
                                 acknowledgement_generator=acknowledgement_generator,
                                 intent_classifier=_intent_classifier(
                                     resolved_settings,

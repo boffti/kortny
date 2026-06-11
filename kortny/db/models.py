@@ -2482,3 +2482,38 @@ class ModelPricing(Base):
             "provider", "model", "effective_from", name="idx_pricing_lookup"
         ),
     )
+
+
+class AssistantThreadContext(Base):
+    """Per-assistant-thread context store (HIG-236).
+
+    Slack assistant-thread ``message.im`` events do not carry the channel the
+    user was viewing when they opened the assistant; the app must persist it.
+    One row per (channel_id, thread_ts) — the Postgres-backed implementation of
+    slack_bolt's ``AssistantThreadContextStore`` upserts here.
+    """
+
+    __tablename__ = "assistant_thread_context"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    channel_id: Mapped[str] = mapped_column(String, nullable=False)
+    thread_ts: Mapped[str] = mapped_column(String, nullable=False)
+    context_json: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "channel_id",
+            "thread_ts",
+            name="uq_assistant_thread_context_channel_thread",
+        ),
+    )

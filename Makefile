@@ -1,4 +1,4 @@
-.PHONY: install lock lint lint-fix format format-check typecheck test test-serial check migrate downgrade compose-up compose-up-observability compose-up-workflow compose-down compose-down-observability compose-down-workflow compose-down-observability-volumes compose-logs compose-logs-observability compose-logs-workflow playground clean
+.PHONY: install lock lint lint-fix format format-check typecheck test test-serial check migrate downgrade compose-up compose-up-observability compose-up-workflow compose-down compose-down-observability compose-down-workflow compose-down-observability-volumes compose-logs compose-logs-observability compose-logs-workflow playground clean seed-sim clean-sim status-sim
 
 install:
 	uv sync
@@ -67,6 +67,18 @@ compose-logs-workflow:
 
 playground:
 	uv run adk web .
+
+# Workspace simulator (runs against the live dev DB inside compose).
+# Usage: make seed-sim CHANNEL=C0123456789 [DAYS=21]
+seed-sim:
+	@test -n "$(CHANNEL)" || { echo "CHANNEL=<slack channel id> is required, e.g. make seed-sim CHANNEL=C0123456789"; exit 1; }
+	docker compose exec worker uv run python -m kortny.simulator seed --channel $(CHANNEL) --days $(or $(DAYS),21)
+
+clean-sim:
+	docker compose exec worker uv run python -m kortny.simulator clean
+
+status-sim:
+	docker compose exec worker uv run python -m kortny.simulator status
 
 clean:
 	rm -rf .mypy_cache .pytest_cache .ruff_cache htmlcov .coverage build dist

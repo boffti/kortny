@@ -324,3 +324,64 @@ def test_modal_close_limit() -> None:
 def test_modal_block_limit() -> None:
     with pytest.raises(ValueError):
         blockkit.modal("Title", [blockkit.divider()] * 101, callback_id="kortny_home_x")
+
+
+def test_card_builds_mrkdwn_objects() -> None:
+    block = blockkit.card(
+        title="Data Brief",
+        subtitle="trusted · workspace",
+        body="Turns a spreadsheet into a brief.",
+        slack_icon="bulb",
+        actions=[blockkit.button("Disable", "kortny_home_disable", value="x")],
+    )
+    assert block["type"] == "card"
+    assert block["title"] == {
+        "type": "mrkdwn",
+        "text": "Data Brief",
+        "verbatim": False,
+    }
+    assert block["subtitle"]["text"] == "trusted · workspace"
+    assert block["body"]["text"] == "Turns a spreadsheet into a brief."
+    assert block["slack_icon"] == {"type": "icon", "name": "bulb"}
+    assert block["actions"][0]["action_id"] == "kortny_home_disable"
+
+
+def test_card_requires_content() -> None:
+    with pytest.raises(ValueError, match="at least one"):
+        blockkit.card(subtitle="only a subtitle")
+
+
+def test_card_rejects_both_icons() -> None:
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        blockkit.card(title="x", icon_url="https://x/icon.png", slack_icon="bulb")
+
+
+def test_card_rejects_too_many_actions() -> None:
+    buttons = [blockkit.button(f"B{i}", f"a{i}") for i in range(4)]
+    with pytest.raises(ValueError, match="at most 3"):
+        blockkit.card(title="x", actions=buttons)
+
+
+def test_card_rejects_long_body() -> None:
+    with pytest.raises(ValueError, match="body exceeds"):
+        blockkit.card(title="x", body="y" * (blockkit.MAX_CARD_BODY_CHARS + 1))
+
+
+def test_carousel_wraps_cards() -> None:
+    cards = [blockkit.card(title=f"Skill {i}") for i in range(3)]
+    block = blockkit.carousel(*cards)
+    assert block["type"] == "carousel"
+    assert [c["title"]["text"] for c in block["elements"]] == [
+        "Skill 0",
+        "Skill 1",
+        "Skill 2",
+    ]
+
+
+def test_carousel_rejects_non_cards_and_overflow() -> None:
+    with pytest.raises(ValueError, match="card blocks"):
+        blockkit.carousel(blockkit.divider())
+    with pytest.raises(ValueError, match="at most 10"):
+        blockkit.carousel(*[blockkit.card(title=str(i)) for i in range(11)])
+    with pytest.raises(ValueError, match="at least one"):
+        blockkit.carousel()

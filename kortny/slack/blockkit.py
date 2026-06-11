@@ -77,8 +77,8 @@ def section(
     return block
 
 
-def context(*elements: str) -> dict:
-    """Context block (mrkdwn elements, ≤10)."""
+def context(*elements: str | dict) -> dict:
+    """Context block (≤10 elements: mrkdwn strings or image elements)."""
 
     if not elements:
         raise ValueError("context requires at least one element")
@@ -89,8 +89,93 @@ def context(*elements: str) -> dict:
         )
     return {
         "type": "context",
-        "elements": [{"type": "mrkdwn", "text": element} for element in elements],
+        "elements": [
+            element
+            if isinstance(element, dict)
+            else {"type": "mrkdwn", "text": element}
+            for element in elements
+        ],
     }
+
+
+def image_element(image_url: str, alt_text: str) -> dict:
+    """Image element for context blocks and section accessories."""
+
+    if not image_url:
+        raise ValueError("image_element requires an image_url")
+    return {"type": "image", "image_url": image_url, "alt_text": alt_text or "image"}
+
+
+MAX_CARD_TITLE_CHARS = 150
+MAX_CARD_BODY_CHARS = 200
+MAX_CARD_ACTIONS = 3
+
+
+def card(
+    *,
+    title: str | None = None,
+    subtitle: str | None = None,
+    body: str | None = None,
+    icon_url: str | None = None,
+    slack_icon: str | None = None,
+    actions: Sequence[dict] = (),
+) -> dict:
+    """Card block (Apr 2026). Verified to render in home views.
+
+    ``title``/``subtitle``/``body`` are mrkdwn objects on the wire (the
+    reference table calls them strings — it is wrong; string fields fail to
+    render). ``icon_url`` and ``slack_icon`` are mutually exclusive.
+    """
+
+    if title is None and body is None and not actions:
+        raise ValueError("card requires at least one of title, body, actions")
+    if icon_url is not None and slack_icon is not None:
+        raise ValueError("card icon_url and slack_icon are mutually exclusive")
+    if len(actions) > MAX_CARD_ACTIONS:
+        raise ValueError(
+            f"card allows at most {MAX_CARD_ACTIONS} actions (got {len(actions)})"
+        )
+    for label, value, limit in (
+        ("title", title, MAX_CARD_TITLE_CHARS),
+        ("subtitle", subtitle, MAX_CARD_TITLE_CHARS),
+        ("body", body, MAX_CARD_BODY_CHARS),
+    ):
+        if value is not None and len(value) > limit:
+            raise ValueError(f"card {label} exceeds {limit} chars (got {len(value)})")
+
+    block: dict = {"type": "card"}
+    for key, value in (("title", title), ("subtitle", subtitle), ("body", body)):
+        if value is not None:
+            block[key] = {"type": "mrkdwn", "text": value, "verbatim": False}
+    if icon_url is not None:
+        block["icon"] = {
+            "type": "image",
+            "image_url": icon_url,
+            "alt_text": "icon",
+        }
+    if slack_icon is not None:
+        block["slack_icon"] = {"type": "icon", "name": slack_icon}
+    if actions:
+        block["actions"] = list(actions)
+    return block
+
+
+MAX_CAROUSEL_CARDS = 10
+
+
+def carousel(*cards: dict) -> dict:
+    """Carousel block: 1-10 card blocks rendered as a horizontal rail."""
+
+    if not cards:
+        raise ValueError("carousel requires at least one card")
+    if len(cards) > MAX_CAROUSEL_CARDS:
+        raise ValueError(
+            f"carousel allows at most {MAX_CAROUSEL_CARDS} cards (got {len(cards)})"
+        )
+    for element in cards:
+        if element.get("type") != "card":
+            raise ValueError("carousel elements must be card blocks")
+    return {"type": "carousel", "elements": list(cards)}
 
 
 def divider() -> dict:

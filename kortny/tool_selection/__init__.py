@@ -1,8 +1,10 @@
 """Tool catalog and selection helpers."""
 
+from kortny.tool_selection.arbitration import arbitrate
 from kortny.tool_selection.budgeting import (
     ToolCatalogCompaction,
     compact_tool_cards,
+    tool_card_embedding_text,
 )
 from kortny.tool_selection.catalog import ToolCatalogService
 from kortny.tool_selection.models import (
@@ -27,5 +29,7 @@ __all__ = [
     "ToolSelection",
     "ToolSelectionResult",
     "ToolSelector",
+    "arbitrate",
     "compact_tool_cards",
+    "tool_card_embedding_text",
 ]

@@ -1,0 +1,1029 @@
+"""HIG-219 Capability Fabric: capability card, skill ranking, planner, worker."""
+
+from __future__ import annotations
+
+import json
+import os
+import uuid
+from collections.abc import Iterator, Sequence
+from pathlib import Path
+from typing import Any, cast
+
+import pytest
+from alembic import command
+from alembic.config import Config
+from sqlalchemy import Engine, delete, select
+from sqlalchemy.orm import Session
+
+from kortny.agent.capabilities import (
+    CapabilityOverview,
+    build_capability_overview,
+)
+from kortny.agent.context import (
+    ContextAssembler,
+    ContextBudget,
+    ContextPackage,
+    ContextSkill,
+)
+from kortny.agent.coordinator import DEFAULT_SYSTEM_PROMPT, AgentCoordinator
+from kortny.agent.execution import ExecutionGuardrailLimits
+from kortny.agent.planner import PLANNER_SYSTEM_PROMPT, ExecutionPlanner
+from kortny.config import Settings
+from kortny.config.settings import LLMProvider as SettingsLLMProvider
+from kortny.db.models import (
+    Installation,
+    McpServer,
+    ProceduralSkill,
+    ProceduralSkillVersion,
+    SkillEnablement,
+    Task,
+    TaskEvent,
+    TaskEventType,
+    ToolEmbedding,
+)
+from kortny.db.session import make_engine, make_session_factory, normalize_database_url
+from kortny.embeddings import EmbeddingIndex
+from kortny.execution.sandbox import ToolSandboxPolicy
+from kortny.llm import ChatMessage, Completion, TokenUsage
+from kortny.tasks import TaskService
+from kortny.tool_selection import ToolCard, ToolSelection, ToolSelectionResult
+from kortny.tools import ToolRegistry
+from kortny.tools.catalog import ToolDescriptor
+from kortny.tools.types import JsonObject, JsonSchema, ToolResult
+from kortny.worker.agent_executor import (
+    AgentTaskExecutor,
+    _semantic_retrieval_query_texts,
+)
+from tests.fake_embeddings import FakeEmbeddingBackend
+
+TEST_POSTGRES_URL = os.environ.get("KORTNY_TEST_POSTGRES_URL")
+
+pytestmark = pytest.mark.skipif(
+    TEST_POSTGRES_URL is None,
+    reason="KORTNY_TEST_POSTGRES_URL is required for capability fabric tests",
+)
+
+
+@pytest.fixture(scope="session")
+def engine() -> Iterator[Engine]:
+    assert TEST_POSTGRES_URL is not None
+
+    config = Config("alembic.ini")
+    config.set_main_option("sqlalchemy.url", normalize_database_url(TEST_POSTGRES_URL))
+    command.upgrade(config, "head")
+
+    engine = make_engine(TEST_POSTGRES_URL)
+    try:
+        yield engine
+    finally:
+        engine.dispose()
+
+
+@pytest.fixture
+def db_session(engine: Engine) -> Iterator[Session]:
+    session_factory = make_session_factory(engine=engine)
+    with session_factory() as session:
+        cleanup_database(session)
+        session.commit()
+        yield session
+        session.rollback()
+        cleanup_database(session)
+        session.commit()
+
+
+def cleanup_database(session: Session) -> None:
+    for model in (
+        ToolEmbedding,
+        SkillEnablement,
+        ProceduralSkillVersion,
+        ProceduralSkill,
+        McpServer,
+        TaskEvent,
+        Task,
+        Installation,
+    ):
+        session.execute(delete(model))
+
+
+def create_installation(session: Session) -> Installation:
+    installation = Installation(slack_team_id=f"T{uuid.uuid4().hex}")
+    session.add(installation)
+    session.flush()
+    return installation
+
+
+def create_task(
+    session: Session,
+    installation: Installation | None = None,
+    *,
+    input_text: str = "summarize this thread",
+) -> Task:
+    installation = installation or create_installation(session)
+    message_ts = f"{uuid.uuid4().int % 10**6}.{uuid.uuid4().int % 10**6}"
+    return TaskService(session).create_task(
+        installation_id=installation.id,
+        slack_event_id=f"Ev{uuid.uuid4().hex}",
+        slack_channel_id="C123",
+        slack_thread_ts=message_ts,
+        slack_message_ts=message_ts,
+        slack_user_id="U123",
+        input=input_text,
+    )
+
+
+def create_enabled_skill(
+    session: Session,
+    installation: Installation,
+    *,
+    slug: str,
+    name: str,
+    description: str,
+) -> ProceduralSkill:
+    skill = ProceduralSkill(
+        slug=slug,
+        owner_type="system",
+        status="active",
+        trust_level="trusted",
+        visibility="catalog",
+        provenance="kortny",
+    )
+    session.add(skill)
+    session.flush()
+    session.add(
+        ProceduralSkillVersion(
+            skill_id=skill.id,
+            version="1.0.0",
+            status="active",
+            name=name,
+            description=description,
+            instructions_md="## Steps\n1. Do the thing.",
+            content_sha256="0" * 64,
+            created_by="test",
+        )
+    )
+    session.add(
+        SkillEnablement(
+            installation_id=installation.id,
+            skill_id=skill.id,
+            scope_type="workspace",
+            scope_id=None,
+            added_by="dashboard:test",
+        )
+    )
+    session.flush()
+    return skill
+
+
+def make_descriptor(
+    name: str,
+    *,
+    category: str = "Research",
+    enabled: bool = True,
+    disabled_reason: str | None = None,
+) -> ToolDescriptor:
+    return ToolDescriptor(
+        name=name,
+        namespace=f"native.{category.casefold()}",
+        integration="",
+        category=category,
+        display_name=name,
+        description=f"{name} description.",
+        parameters={"type": "object", "properties": {}},
+        capabilities=("diagnostic",),
+        side_effect="read",
+        approval="none",
+        required_env_vars=(),
+        required_slack_scopes=(),
+        plan_gates=(),
+        result_budget="normal",
+        notes=(),
+        can_replace_native_tools=(),
+        sandbox=ToolSandboxPolicy(),
+        enabled=enabled,
+        disabled_reason=disabled_reason,
+        required_args=(),
+        optional_args=(),
+    )
+
+
+def make_overview() -> CapabilityOverview:
+    return CapabilityOverview(
+        native_categories=("Research", "Documents"),
+        disabled_native=(("web_search", "Missing env var BRAVE_SEARCH_API_KEY"),),
+        composio_toolkits=("github", "linear"),
+        mcp_servers=(("context7", "enabled"), ("legacy", "disabled")),
+    )
+
+
+def make_context_package(
+    *,
+    skill_similarities: tuple[tuple[str, float], ...] = (),
+    selected_skills: tuple[ContextSkill, ...] = (),
+) -> ContextPackage:
+    return ContextPackage(
+        messages=(ChatMessage(role="user", content="do the thing"),),
+        selected_facts=(),
+        selected_prior_tasks=(),
+        selected_episodes=(),
+        selected_artifacts=(),
+        selected_graph_entities=(),
+        selected_graph_edges=(),
+        acknowledgement=None,
+        budget=ContextBudget(
+            system_prompt_chars=0,
+            known_facts_max_chars=0,
+            known_facts_chars=0,
+            thread_context_max_chars=1,
+            prior_context_chars=0,
+            thread_context_recent_tasks=1,
+            thread_transcript_limit=0,
+            episode_context_max_chars=0,
+            episode_context_chars=0,
+            episode_context_limit=0,
+            graph_context_max_chars=0,
+            graph_context_chars=0,
+            graph_context_max_items=0,
+            graph_context_max_hops=0,
+        ),
+        omissions=(),
+        skill_similarities=skill_similarities,
+        selected_skills=selected_skills,
+    )
+
+
+def make_context_skill(slug: str, description: str) -> ContextSkill:
+    return ContextSkill(
+        skill_id=uuid.uuid4(),
+        version_id=uuid.uuid4(),
+        slug=slug,
+        name=slug.title(),
+        description=description,
+        trust_level="trusted",
+        scope_type="workspace",
+    )
+
+
+class FakeLLM:
+    """Coordinator/planner LLM stub that records prompts."""
+
+    def __init__(self, content: str = "All done.") -> None:
+        self.content = content
+        self.calls: list[tuple[ChatMessage, ...]] = []
+
+    def complete(
+        self,
+        *,
+        task_id: uuid.UUID,
+        messages: Sequence[ChatMessage],
+        tools: Sequence[JsonSchema] = (),
+        response_format: JsonObject | None = None,
+        prompt_name: str | None = None,
+        prompt_source: str = "code",
+    ) -> Completion:
+        del task_id, tools, response_format, prompt_name, prompt_source
+        self.calls.append(tuple(messages))
+        return Completion(
+            content=self.content,
+            tool_calls=(),
+            usage=TokenUsage(input_tokens=5, output_tokens=5),
+            model="test-model",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Capability card
+# ---------------------------------------------------------------------------
+
+
+def test_build_capability_overview_from_sources(db_session: Session) -> None:
+    descriptors = (
+        make_descriptor("web_search", enabled=False, disabled_reason="Missing key"),
+        make_descriptor("pdf_generator", category="Documents"),
+        make_descriptor("echo", category="Documents"),
+    )
+    cards = (
+        ToolCard(
+            registry_name="composio_linear_search",
+            provider="composio",
+            display_name="Linear search",
+            description="Search Linear issues.",
+            capabilities=("external_tool",),
+            side_effect="read",
+            toolkit_slug="linear",
+        ),
+        ToolCard(
+            registry_name="composio_linear_create",
+            provider="composio",
+            display_name="Linear create",
+            description="Create Linear issues.",
+            capabilities=("external_tool",),
+            side_effect="write",
+            toolkit_slug="linear",
+        ),
+        ToolCard(
+            registry_name="mcp__context7__query",
+            provider="mcp",
+            display_name="context7 query",
+            description="Query docs.",
+            capabilities=("external_tool",),
+            side_effect="read",
+            toolkit_slug="context7",
+        ),
+    )
+    installation = create_installation(db_session)
+    server = McpServer(
+        installation_id=installation.id,
+        name="context7",
+        transport="streamable_http",
+        url="https://example.test/mcp",
+        status="enabled",
+        created_by="test",
+    )
+
+    overview = build_capability_overview(
+        native_descriptors=descriptors,
+        external_cards=cards,
+        mcp_rows=(server,),
+    )
+
+    assert overview.native_categories == ("Documents",)
+    assert overview.disabled_native == (("web_search", "Missing key"),)
+    assert overview.composio_toolkits == ("linear",)
+    assert overview.mcp_servers == (("context7", "enabled"),)
+
+
+def test_capability_card_is_second_message_after_system_prompt(
+    db_session: Session,
+) -> None:
+    task = create_task(db_session)
+    package = ContextAssembler(
+        session=db_session,
+        system_prompt="system prompt",
+        capability_overview=make_overview(),
+    ).build_for_task(task)
+
+    assert package.messages[0].content == "system prompt"
+    second = package.messages[1].content
+    assert second is not None
+    assert second.startswith("<capabilities>")
+    assert "Connected: native tool categories: Research, Documents." in second
+    assert "Connected: Composio toolkits: github, linear." in second
+    assert "Connected: MCP servers: context7." in second
+    assert (
+        "Unavailable (needs setup): web_search "
+        "(Missing env var BRAVE_SEARCH_API_KEY); legacy (MCP server disabled)."
+    ) in second
+
+
+def test_capability_card_overflow_is_budgeted_with_omission(
+    db_session: Session,
+) -> None:
+    task = create_task(db_session)
+    overview = CapabilityOverview(
+        native_categories=(),
+        disabled_native=tuple(
+            (f"tool_{index}", "Missing required environment variable EXAMPLE_KEY")
+            for index in range(40)
+        ),
+        composio_toolkits=(),
+        mcp_servers=(),
+    )
+    package = ContextAssembler(
+        session=db_session,
+        system_prompt="system prompt",
+        capability_overview=overview,
+    ).build_for_task(task)
+
+    capabilities_message = package.messages[1].content
+    assert capabilities_message is not None
+    assert len(capabilities_message) <= 1200
+    assert "[capabilities truncated at configured budget]" in capabilities_message
+    assert any(
+        omission.kind == "capabilities" and omission.reason == "budget_compacted"
+        for omission in package.omissions
+    )
+
+
+def test_absent_overview_keeps_legacy_message_list(db_session: Session) -> None:
+    task = create_task(db_session)
+
+    with_overview = ContextAssembler(
+        session=db_session,
+        system_prompt="system prompt",
+        capability_overview=make_overview(),
+    ).build_for_task(task)
+    without_overview = ContextAssembler(
+        session=db_session,
+        system_prompt="system prompt",
+    ).build_for_task(task)
+
+    assert not any(
+        (message.content or "").startswith("<capabilities>")
+        for message in without_overview.messages
+    )
+    assert len(with_overview.messages) == len(without_overview.messages) + 1
+    assert [message.content for message in without_overview.messages] == [
+        message.content
+        for message in with_overview.messages
+        if not (message.content or "").startswith("<capabilities>")
+    ]
+
+
+def test_system_prompt_contains_capability_upsell_rule() -> None:
+    assert "Consult the <capabilities> section." in DEFAULT_SYSTEM_PROMPT
+    assert "Never respond with a flat refusal." in DEFAULT_SYSTEM_PROMPT
+
+
+# ---------------------------------------------------------------------------
+# Skill-first planning: ranking, execution hint, events, planner payload
+# ---------------------------------------------------------------------------
+
+
+def setup_two_skills(session: Session, installation: Installation) -> None:
+    create_enabled_skill(
+        session,
+        installation,
+        slug="website-scrape-weekly",
+        name="Website Scrape Weekly",
+        description="Use when the task involves scraping a website for updates.",
+    )
+    create_enabled_skill(
+        session,
+        installation,
+        slug="issue-tracker-triage",
+        name="Issue Tracker Triage",
+        description="Use when the task involves triaging issues and bugs.",
+    )
+
+
+def test_skill_ranking_orders_skills_and_sets_skill_direct_hint(
+    db_session: Session,
+) -> None:
+    installation = create_installation(db_session)
+    setup_two_skills(db_session, installation)
+    task = create_task(
+        db_session,
+        installation,
+        input_text="check our issue tracker for urgent bugs",
+    )
+
+    package = ContextAssembler(
+        session=db_session,
+        embedding_index=EmbeddingIndex(db_session, FakeEmbeddingBackend()),
+    ).build_for_task(task)
+
+    assert package.skill_similarities
+    assert package.skill_similarities[0][0] == "issue-tracker-triage"
+    assert package.execution_hint == "skill_direct"
+    assert package.matched_skill_slug == "issue-tracker-triage"
+    assert [skill.slug for skill in package.selected_skills] == [
+        "issue-tracker-triage",
+        "website-scrape-weekly",
+    ]
+    skills_message = next(
+        message.content
+        for message in package.messages
+        if message.content and "<available_skills>" in message.content
+    )
+    assert (
+        "Highly relevant skill for this task: issue-tracker-triage. "
+        "Load it with load_skill and follow it before doing the work yourself."
+    ) in skills_message
+    triage_index = skills_message.index("issue-tracker-triage")
+    scrape_index = skills_message.index("website-scrape-weekly")
+    assert triage_index < scrape_index
+
+
+def test_skill_ranking_below_threshold_keeps_hint_unset(db_session: Session) -> None:
+    installation = create_installation(db_session)
+    setup_two_skills(db_session, installation)
+    task = create_task(
+        db_session,
+        installation,
+        input_text="frobnicate the quux",
+    )
+
+    package = ContextAssembler(
+        session=db_session,
+        embedding_index=EmbeddingIndex(db_session, FakeEmbeddingBackend()),
+        skill_direct_threshold=0.60,
+    ).build_for_task(task)
+
+    assert package.skill_similarities
+    assert package.execution_hint is None
+    assert package.matched_skill_slug is None
+    skills_message = next(
+        message.content
+        for message in package.messages
+        if message.content and "<available_skills>" in message.content
+    )
+    assert "Highly relevant skill" not in skills_message
+
+
+def test_no_embedding_index_preserves_legacy_skill_order(db_session: Session) -> None:
+    installation = create_installation(db_session)
+    setup_two_skills(db_session, installation)
+    task = create_task(
+        db_session,
+        installation,
+        input_text="check our issue tracker for urgent bugs",
+    )
+
+    package = ContextAssembler(session=db_session).build_for_task(task)
+    legacy_slugs = [skill.slug for skill in package.selected_skills]
+
+    assert package.skill_similarities == ()
+    assert package.execution_hint is None
+    assert package.matched_skill_slug is None
+    assert sorted(legacy_slugs) == ["issue-tracker-triage", "website-scrape-weekly"]
+
+
+def test_thirty_slot_skill_budget_is_filled_by_similarity(db_session: Session) -> None:
+    installation = create_installation(db_session)
+    for index in range(31):
+        create_enabled_skill(
+            db_session,
+            installation,
+            slug=f"filler-skill-{index:02d}",
+            name=f"Filler Skill {index:02d}",
+            description="Use when the task involves nothing in particular.",
+        )
+    create_enabled_skill(
+        db_session,
+        installation,
+        slug="issue-tracker-triage",
+        name="Issue Tracker Triage",
+        description="Use when the task involves triaging issues and bugs.",
+    )
+    task = create_task(
+        db_session,
+        installation,
+        input_text="check our issue tracker for urgent bugs",
+    )
+
+    package = ContextAssembler(
+        session=db_session,
+        embedding_index=EmbeddingIndex(db_session, FakeEmbeddingBackend()),
+    ).build_for_task(task)
+
+    assert len(package.selected_skills) == 30
+    assert package.selected_skills[0].slug == "issue-tracker-triage"
+    assert any(
+        omission.kind == "skills" and omission.reason == "skills_context_max_skills"
+        for omission in package.omissions
+    )
+
+
+def test_coordinator_records_skill_ranking_event(db_session: Session) -> None:
+    installation = create_installation(db_session)
+    setup_two_skills(db_session, installation)
+    task = create_task(
+        db_session,
+        installation,
+        input_text="check our issue tracker for urgent bugs",
+    )
+    assembler = ContextAssembler(
+        session=db_session,
+        embedding_index=EmbeddingIndex(db_session, FakeEmbeddingBackend()),
+    )
+
+    result = AgentCoordinator(
+        session=db_session,
+        llm=FakeLLM(),
+        registry=ToolRegistry([]),
+        context_assembler=assembler,
+    ).run(task)
+
+    assert result.result_summary == "All done."
+    event = next(
+        event
+        for event in db_session.scalars(
+            select(TaskEvent)
+            .where(TaskEvent.task_id == task.id, TaskEvent.type == TaskEventType.log)
+            .order_by(TaskEvent.seq)
+        )
+        if event.payload.get("message") == "skill_ranking"
+    )
+    assert event.payload["execution_hint"] == "skill_direct"
+    assert event.payload["matched_skill_slug"] == "issue-tracker-triage"
+    ranked = event.payload["ranked"]
+    assert ranked[0]["slug"] == "issue-tracker-triage"
+    assert 0.0 <= ranked[0]["similarity"] <= 1.0
+
+
+def test_no_skill_ranking_event_without_embedding_index(db_session: Session) -> None:
+    installation = create_installation(db_session)
+    setup_two_skills(db_session, installation)
+    task = create_task(
+        db_session,
+        installation,
+        input_text="check our issue tracker for urgent bugs",
+    )
+
+    AgentCoordinator(
+        session=db_session,
+        llm=FakeLLM(),
+        registry=ToolRegistry([]),
+        context_assembler=ContextAssembler(session=db_session),
+    ).run(task)
+
+    assert not any(
+        event.payload.get("message") == "skill_ranking"
+        for event in db_session.scalars(
+            select(TaskEvent).where(TaskEvent.task_id == task.id)
+        )
+    )
+
+
+def test_planner_payload_includes_matched_skills(db_session: Session) -> None:
+    task = create_task(db_session, input_text="triage the tracker backlog")
+    package = make_context_package(
+        skill_similarities=(
+            ("issue-tracker-triage", 0.82),
+            ("website-scrape-weekly", 0.5),
+            ("low-relevance", 0.2),
+        ),
+        selected_skills=(
+            make_context_skill("issue-tracker-triage", "Triage issues and bugs."),
+            make_context_skill("website-scrape-weekly", "Scrape websites weekly."),
+            make_context_skill("low-relevance", "Unrelated."),
+        ),
+    )
+    llm = FakeLLM(
+        content=json.dumps(
+            {
+                "objective": "Triage the tracker backlog",
+                "steps": [{"description": "Load the matching skill"}],
+            }
+        )
+    )
+
+    ExecutionPlanner().create_plan(
+        task=task,
+        llm=llm,
+        tool_schemas=({"name": "load_skill", "description": "Load a skill"},),
+        limits=ExecutionGuardrailLimits(),
+        intent_decision=None,
+        reason="test",
+        context_package=package,
+    )
+
+    user_payload = json.loads(llm.calls[0][1].content or "{}")
+    assert user_payload["matched_skills"] == [
+        {
+            "slug": "issue-tracker-triage",
+            "description": "Triage issues and bugs.",
+            "similarity": 0.82,
+        },
+        {
+            "slug": "website-scrape-weekly",
+            "description": "Scrape websites weekly.",
+            "similarity": 0.5,
+        },
+    ]
+    assert "make the FIRST step load_skill" in PLANNER_SYSTEM_PROMPT
+
+
+def test_planner_payload_unchanged_without_matched_skills(db_session: Session) -> None:
+    task = create_task(db_session, input_text="triage the tracker backlog")
+    llm = FakeLLM(
+        content=json.dumps(
+            {
+                "objective": "Triage the tracker backlog",
+                "steps": [{"description": "Look things up"}],
+            }
+        )
+    )
+
+    ExecutionPlanner().create_plan(
+        task=task,
+        llm=llm,
+        tool_schemas=({"name": "web_search", "description": "Search"},),
+        limits=ExecutionGuardrailLimits(),
+        intent_decision=None,
+        reason="test",
+        context_package=None,
+    )
+
+    user_payload = json.loads(llm.calls[0][1].content or "{}")
+    assert "matched_skills" not in user_payload
+    assert set(user_payload) == {"task_input", "intent_decision", "available_tools"}
+
+
+# ---------------------------------------------------------------------------
+# Worker: semantic retrieval caps candidates + event payload fields
+# ---------------------------------------------------------------------------
+
+
+class StaticExternalTool:
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.description = "Static external tool."
+        self.parameters: JsonSchema = {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        }
+
+    def invoke(self, args: JsonObject) -> ToolResult:
+        del args
+        return ToolResult(output={"results": []})
+
+
+class StaticToolSelector:
+    def __init__(self, result: ToolSelectionResult) -> None:
+        self.result = result
+        self.calls: list[dict[str, Any]] = []
+
+    def select(
+        self,
+        *,
+        task_id: uuid.UUID,
+        task_input: str,
+        native_cards: Sequence[ToolCard],
+        external_cards: Sequence[ToolCard],
+        intent_classification: str | None = None,
+        likely_tools: Sequence[str] = (),
+        toolkit_affinity: Sequence[str] = (),
+    ) -> ToolSelectionResult:
+        self.calls.append(
+            {
+                "task_input": task_input,
+                "native_cards": native_cards,
+                "external_cards": external_cards,
+            }
+        )
+        return self.result
+
+
+def make_settings() -> Settings:
+    assert TEST_POSTGRES_URL is not None
+    return Settings.model_validate(
+        {
+            "SLACK_BOT_TOKEN": "xoxb-test",
+            "SLACK_APP_TOKEN": "xapp-test",
+            "SLACK_SIGNING_SECRET": "signing-secret",
+            "LLM_PROVIDER": SettingsLLMProvider.openrouter,
+            "LLM_API_KEY": "test-key",
+            "LLM_MODEL": "openai/gpt-test",
+            "COMPOSIO_API_KEY": "composio-key",
+            "POSTGRES_URL": TEST_POSTGRES_URL,
+            # The fake backend is injected directly on the executor; "local"
+            # exercises the production code path without touching fastembed.
+            "KORTNY_EMBEDDINGS_BACKEND": "local",
+            "KORTNY_TOOL_RETRIEVAL_TOP_K": 15,
+            "TOOL_SELECTOR_MAX_EXTERNAL_CANDIDATES": 24,
+        }
+    )
+
+
+def external_card(index: int) -> ToolCard:
+    return ToolCard(
+        registry_name=f"composio_filler_{index}",
+        provider="composio",
+        display_name=f"Filler {index}",
+        description="Generic integration tool.",
+        capabilities=("external_tool",),
+        side_effect="read",
+        toolkit_slug="filler",
+    )
+
+
+def linear_external_card() -> ToolCard:
+    return ToolCard(
+        registry_name="composio_linear_search_issues",
+        provider="composio",
+        display_name="Linear issue search",
+        description="Find and list Linear issues, tickets, and bugs.",
+        capabilities=("issue_tracking", "external_tool"),
+        side_effect="read",
+        toolkit_slug="linear",
+    )
+
+
+def test_worker_semantic_retrieval_caps_candidates_and_records_payload(
+    db_session: Session,
+    tmp_path: Path,
+) -> None:
+    task = create_task(
+        db_session,
+        input_text="check our issue tracker for anything urgent",
+    )
+    task_service = TaskService(db_session)
+    settings = make_settings()
+    cards = tuple(external_card(index) for index in range(30)) + (
+        linear_external_card(),
+    )
+    selector = StaticToolSelector(
+        ToolSelectionResult(
+            selected_tools=(
+                ToolSelection(
+                    registry_name="composio_linear_search_issues",
+                    confidence=0.9,
+                    reason="Issue tracker request.",
+                ),
+            ),
+            route_reason="test_selection",
+        )
+    )
+    executor = AgentTaskExecutor(settings=settings, tool_selector=selector)
+    # Inject the deterministic fake backend; tests must never load fastembed.
+    executor._embedding_backend = FakeEmbeddingBackend()
+    executor._embedding_backend_resolved = True
+
+    tools = executor._select_runtime_tools(
+        settings=settings,
+        session=db_session,
+        task=task,
+        task_service=task_service,
+        native_tools=[],
+        external_tools=[StaticExternalTool(card.registry_name) for card in cards],
+        external_cards=cards,
+    )
+
+    # Acceptance: selector candidate count <= 15 when retrieval is active.
+    assert len(selector.calls) == 1
+    selector_cards = selector.calls[0]["external_cards"]
+    assert len(selector_cards) <= 15
+    # Paraphrase: the Linear card survives the cap without the literal word.
+    assert "composio_linear_search_issues" in {
+        card.registry_name for card in selector_cards
+    }
+    assert selector_cards[0].registry_name == "composio_linear_search_issues"
+    assert [tool.name for tool in tools] == ["composio_linear_search_issues"]
+
+    event = next(
+        event
+        for event in db_session.scalars(
+            select(TaskEvent)
+            .where(TaskEvent.task_id == task.id, TaskEvent.type == TaskEventType.log)
+            .order_by(TaskEvent.seq)
+        )
+        if event.payload.get("message") == "tool_selection_completed"
+    )
+    assert event.payload["semantic_retrieval_used"] is True
+    assert event.payload["selector_candidate_count"] <= 15
+    semantic_top = event.payload["semantic_top"]
+    assert 1 <= len(semantic_top) <= 5
+    assert semantic_top[0]["registry_name"] == "composio_linear_search_issues"
+    assert isinstance(semantic_top[0]["similarity"], float)
+    assert event.payload["arbitration"] == []
+
+
+def test_worker_disabled_embeddings_keep_legacy_selection_path(
+    db_session: Session,
+) -> None:
+    task = create_task(db_session, input_text="check our issue tracker")
+    task_service = TaskService(db_session)
+    settings = Settings.model_validate(
+        {
+            "SLACK_BOT_TOKEN": "xoxb-test",
+            "SLACK_APP_TOKEN": "xapp-test",
+            "SLACK_SIGNING_SECRET": "signing-secret",
+            "LLM_PROVIDER": SettingsLLMProvider.openrouter,
+            "LLM_API_KEY": "test-key",
+            "LLM_MODEL": "openai/gpt-test",
+            "COMPOSIO_API_KEY": "composio-key",
+            "POSTGRES_URL": TEST_POSTGRES_URL,
+            "KORTNY_EMBEDDINGS_BACKEND": "disabled",
+        }
+    )
+    cards = (linear_external_card(),)
+    selector = StaticToolSelector(
+        ToolSelectionResult(
+            selected_tools=(
+                ToolSelection(
+                    registry_name="composio_linear_search_issues",
+                    confidence=0.9,
+                    reason="Issue tracker request.",
+                ),
+            ),
+            route_reason="test_selection",
+        )
+    )
+    executor = AgentTaskExecutor(settings=settings, tool_selector=selector)
+
+    executor._select_runtime_tools(
+        settings=settings,
+        session=db_session,
+        task=task,
+        task_service=task_service,
+        native_tools=[],
+        external_tools=[StaticExternalTool(card.registry_name) for card in cards],
+        external_cards=cards,
+    )
+
+    event = next(
+        event
+        for event in db_session.scalars(
+            select(TaskEvent).where(TaskEvent.task_id == task.id)
+        )
+        if event.payload.get("message") == "tool_selection_completed"
+    )
+    assert event.payload["semantic_retrieval_used"] is False
+    assert "semantic_top" not in event.payload
+    assert db_session.scalars(select(ToolEmbedding)).all() == []
+
+
+def test_semantic_query_texts_include_intent_fragment_objectives() -> None:
+    decision = {
+        "objective": "Compile a brief",
+        "primary_intent": {
+            "type": "task_request",
+            "objective": "Find top open items in the issue tracker",
+            "should_execute": True,
+        },
+        "secondary_intents": [
+            {
+                "type": "task_request",
+                "objective": "Get NVDA price action today",
+                "should_execute": True,
+            },
+            {
+                "type": "task_request",
+                "objective": "Skipped fragment",
+                "should_execute": False,
+            },
+        ],
+    }
+
+    queries = _semantic_retrieval_query_texts(
+        decision=decision,
+        base_query="Put together a quick brief",
+    )
+
+    assert queries[0] == "Put together a quick brief\n\nObjective: Compile a brief"
+    assert "Find top open items in the issue tracker" in queries
+    assert "Get NVDA price action today" in queries
+    assert "Skipped fragment" not in queries
+
+
+def test_semantic_query_texts_without_decision_returns_base_query() -> None:
+    assert _semantic_retrieval_query_texts(
+        decision=None,
+        base_query="hello",
+    ) == ["hello"]
+
+
+class _StubRankIndex:
+    """Per-query canned rankings to exercise the multi-fragment merge."""
+
+    def __init__(self, rankings: dict[str, list[tuple[str, float]]]) -> None:
+        self.rankings = rankings
+        self.ensure_calls = 0
+
+    def ensure(self, kind: str, items: object) -> None:
+        self.ensure_calls += 1
+
+    def rank(
+        self,
+        kind: str,
+        query_text: str,
+        ref_keys: object,
+        *,
+        top_k: int,
+    ) -> list[tuple[str, float]]:
+        return self.rankings.get(query_text, [])[:top_k]
+
+
+def test_semantic_tool_scores_merges_fragment_queries_with_guarantee() -> None:
+    settings = make_settings()
+    executor = AgentTaskExecutor(settings=settings)
+    # Base query is dominated by docs tools; each fragment's top hits must
+    # survive the merge even when their similarity trails the base ranking.
+    stub = _StubRankIndex(
+        {
+            "brief": [
+                ("composio_notion_search", 0.90),
+                ("composio_confluence_get_tasks", 0.85),
+            ],
+            "issue tracker items": [("composio_linear_search_issues", 0.55)],
+            "NVDA price": [("composio_twelve_data_get_eod", 0.50)],
+        }
+    )
+    executor._embedding_backend_resolved = True
+    executor._embedding_backend = FakeEmbeddingBackend()
+    executor_index = cast(Any, stub)
+    executor._embedding_index_for = (  # type: ignore[method-assign]
+        lambda **kwargs: executor_index
+    )
+
+    ranked = executor._semantic_tool_scores(
+        settings=settings,
+        session=cast(Any, None),
+        query_texts=["brief", "issue tracker items", "NVDA price"],
+        external_cards=(
+            external_card(1),
+            external_card(2),
+            linear_external_card(),
+        ),
+    )
+
+    assert ranked is not None
+    names = [name for name, _ in ranked]
+    assert "composio_linear_search_issues" in names
+    assert "composio_twelve_data_get_eod" in names
+    assert names[0] == "composio_notion_search"
+    scores = dict(ranked)
+    assert scores["composio_notion_search"] == 0.90
+    assert stub.ensure_calls == 1

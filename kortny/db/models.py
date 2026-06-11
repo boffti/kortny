@@ -13,6 +13,7 @@ from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
 
+from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     BigInteger,
     Boolean,
@@ -2193,6 +2194,47 @@ class McpServerTool(Base):
             "server_id",
             "enabled",
         ),
+    )
+
+
+class ToolEmbedding(Base):
+    """Semantic embedding for one tool card or skill (HIG-219).
+
+    ``embedding`` is an untyped ``vector`` so rows from models with different
+    dimensions can coexist; queries cast the query vector at runtime and always
+    filter on ``model``.
+    """
+
+    __tablename__ = "tool_embeddings"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    ref_key: Mapped[str] = mapped_column(Text, nullable=False)
+    model: Mapped[str] = mapped_column(Text, nullable=False)
+    dim: Mapped[int] = mapped_column(Integer, nullable=False)
+    content_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    embedding: Mapped[list[float]] = mapped_column(Vector(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "kind in ('tool_card', 'skill')",
+            name="ck_tool_embeddings_kind",
+        ),
+        UniqueConstraint(
+            "kind",
+            "ref_key",
+            "model",
+            name="uq_tool_embeddings_kind_ref_key_model",
+        ),
+        Index("idx_tool_embeddings_kind_model", "kind", "model"),
     )
 
 

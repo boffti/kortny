@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Protocol, cast
@@ -14,6 +14,7 @@ from slack_sdk import WebClient
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from kortny.agent.capabilities import CapabilityOverview, build_capability_overview
 from kortny.agent.coordinator import DEFAULT_SYSTEM_PROMPT, AgentRunResult
 from kortny.agent.execution import ExecutionGuardrailLimits
 from kortny.agent.runtime import CustomAgentRuntime
@@ -37,6 +38,7 @@ from kortny.db.models import (
     TaskStatus,
 )
 from kortny.db.models import LLMProvider as DbLLMProvider
+from kortny.embeddings import EmbeddingBackend, EmbeddingIndex, create_embedding_backend
 from kortny.execution import task_workspace
 from kortny.knowledge_graph import (
     KG_CHANNEL_PROFILE_PROJECTED_MESSAGE,
@@ -111,14 +113,21 @@ from kortny.tool_selection import (
     ToolSelection,
     ToolSelectionResult,
     ToolSelector,
+    arbitrate,
     compact_tool_cards,
+    tool_card_embedding_text,
 )
 from kortny.tools import JsonObject, Tool, ToolRegistry, WebSearchTool
-from kortny.tools.catalog import native_slack_context_hint_names
+from kortny.tools.catalog import (
+    native_slack_context_hint_names,
+    runtime_native_tool_names,
+    tool_descriptor_from_class,
+)
 from kortny.tools.native_runtime import (
     NativeToolBuildContext,
     build_native_inventory_tools,
     build_native_tools,
+    native_tool_classes_by_name,
 )
 from kortny.tools.schedules import ListSchedulesTool
 from kortny.tools.slack_channel_history import (
@@ -255,6 +264,13 @@ class AgentTaskExecutor:
         # ``execute`` finally so per-task resources (e.g. MCP sessions and their
         # subprocesses) never leak. Reset at the start of every ``execute``.
         self._active_external_providers: list[ExternalToolProvider] = []
+        # Embedding backend is loaded once per executor process (model load is
+        # expensive); the per-task EmbeddingIndex wraps it with the live session.
+        self._embedding_backend: EmbeddingBackend | None = None
+        self._embedding_backend_resolved = False
+        # Capability overview built per task in _build_registry, consumed when
+        # constructing the custom runtime's context assembler.
+        self._capability_overview: CapabilityOverview | None = None
 
     def execute(
         self,
@@ -265,6 +281,7 @@ class AgentTaskExecutor:
     ) -> TaskExecutionResult:
         settings = self.settings or load_settings()
         self._active_external_providers = []
+        self._capability_overview = None
         try:
             logger.info("agent executor started task_id=%s", task.id)
             with task_workspace(task.id, base_dir=self.workspace_base_dir) as workspace:
@@ -978,6 +995,12 @@ class AgentTaskExecutor:
             tool_result_prompt_max_chars=settings.tool_result_prompt_max_chars,
             thread_transcript_provider=self._build_thread_transcript_provider(settings),
             guardrail_limits=ExecutionGuardrailLimits.for_depth(depth.response_depth),
+            capability_overview=self._capability_overview,
+            embedding_index=self._embedding_index_for(
+                settings=settings,
+                session=session,
+            ),
+            skill_direct_threshold=settings.skill_direct_similarity_threshold,
         ).run(task)
 
     def _record_semantic_router_shadow(
@@ -1316,6 +1339,12 @@ class AgentTaskExecutor:
                 reason=skip_external_reason["reason"],
                 classification=skip_external_reason.get("classification"),
             )
+            self._capability_overview = self._build_capability_overview(
+                settings=settings,
+                session=session,
+                task=task,
+                external_cards=(),
+            )
             return ToolRegistry(native_tools)
 
         external_providers = self._build_external_tool_providers(
@@ -1327,6 +1356,12 @@ class AgentTaskExecutor:
             tool for provider in external_providers for tool in provider.runtime_tools()
         ]
         external_cards = ToolCatalogService().external_cards(external_providers)
+        self._capability_overview = self._build_capability_overview(
+            settings=settings,
+            session=session,
+            task=task,
+            external_cards=external_cards,
+        )
         tools = self._select_runtime_tools(
             settings=settings,
             session=session,
@@ -1372,6 +1407,107 @@ class AgentTaskExecutor:
             )
             return None
 
+    def _build_capability_overview(
+        self,
+        *,
+        settings: Settings,
+        session: Session,
+        task: Task,
+        external_cards: tuple[Any, ...],
+    ) -> CapabilityOverview | None:
+        """Build the installation capability overview; never fails the task."""
+
+        try:
+            classes_by_name = native_tool_classes_by_name()
+            native_descriptors = tuple(
+                tool_descriptor_from_class(classes_by_name[name], settings=settings)
+                for name in runtime_native_tool_names()
+                if name in classes_by_name
+            )
+            mcp_rows = tuple(
+                session.scalars(
+                    select(McpServer)
+                    .where(McpServer.installation_id == task.installation_id)
+                    .order_by(McpServer.name)
+                )
+            )
+            return build_capability_overview(
+                native_descriptors=native_descriptors,
+                external_cards=external_cards,
+                mcp_rows=mcp_rows,
+            )
+        except Exception:
+            logger.warning(
+                "capability overview build failed task_id=%s",
+                task.id,
+                exc_info=True,
+            )
+            return None
+
+    def _embedding_index_for(
+        self,
+        *,
+        settings: Settings,
+        session: Session,
+    ) -> EmbeddingIndex | None:
+        """Return a session-bound EmbeddingIndex, or None when unavailable."""
+
+        if not self._embedding_backend_resolved:
+            self._embedding_backend = create_embedding_backend(settings)
+            self._embedding_backend_resolved = True
+        if self._embedding_backend is None:
+            return None
+        return EmbeddingIndex(session, self._embedding_backend)
+
+    def _semantic_tool_scores(
+        self,
+        *,
+        settings: Settings,
+        session: Session,
+        query_texts: Sequence[str],
+        external_cards: tuple[Any, ...],
+    ) -> list[tuple[str, float]] | None:
+        """Rank external cards semantically; None falls back to lexical only.
+
+        Each query (task input + one per intent fragment) is ranked
+        independently and merged by max similarity; every query's top hits are
+        guaranteed a slot so minority intents survive the overall top-K cut.
+        """
+
+        index = self._embedding_index_for(settings=settings, session=session)
+        if index is None or not query_texts:
+            return None
+        index.ensure(
+            "tool_card",
+            [
+                (card.registry_name, tool_card_embedding_text(card))
+                for card in external_cards
+            ],
+        )
+        top_k = settings.tool_retrieval_top_k
+        ref_keys = [card.registry_name for card in external_cards]
+        merged: dict[str, float] = {}
+        guaranteed: set[str] = set()
+        for query_text in query_texts:
+            ranked = index.rank("tool_card", query_text, ref_keys, top_k=top_k)
+            if ranked is None:
+                continue
+            guaranteed.update(name for name, _ in ranked[:3])
+            for name, similarity in ranked:
+                if similarity > merged.get(name, -1.0):
+                    merged[name] = similarity
+        if not merged:
+            return None
+        ordered = sorted(merged.items(), key=lambda item: item[1], reverse=True)
+        kept = [item for item in ordered if item[0] in guaranteed]
+        for item in ordered:
+            if len(kept) >= top_k:
+                break
+            if item[0] not in guaranteed:
+                kept.append(item)
+        kept.sort(key=lambda item: item[1], reverse=True)
+        return kept
+
     def _select_runtime_tools(
         self,
         *,
@@ -1391,14 +1527,36 @@ class AgentTaskExecutor:
         if not external_cards:
             return native_tools
 
-        selector_cards, compaction = compact_tool_cards(
-            task_input=_tool_selection_task_input(
-                session=session,
-                task=task,
-                base_input=task.input,
+        tool_selection_task_input = _tool_selection_task_input(
+            session=session,
+            task=task,
+            base_input=task.input,
+        )
+        raw_intent = _latest_intent_decision(session, task)
+        effective_decision = effective_intent_decision(raw_intent)
+        semantic_ranked = self._semantic_tool_scores(
+            settings=settings,
+            session=session,
+            query_texts=_semantic_retrieval_query_texts(
+                decision=effective_decision,
+                base_query=tool_selection_task_input,
             ),
+            external_cards=external_cards,
+        )
+        semantic_scores = dict(semantic_ranked) if semantic_ranked is not None else None
+        max_candidates = settings.tool_selector_max_external_candidates
+        if semantic_scores is not None:
+            # Fragment-guaranteed hits may exceed top_k; never cut them back out.
+            max_candidates = min(
+                max(settings.tool_retrieval_top_k, len(semantic_scores)),
+                max_candidates,
+            )
+
+        selector_cards, compaction = compact_tool_cards(
+            task_input=tool_selection_task_input,
             cards=external_cards,
-            max_candidates=settings.tool_selector_max_external_candidates,
+            max_candidates=max_candidates,
+            semantic_scores=semantic_scores,
         )
         if compaction.compacted:
             task_service.append_event(
@@ -1426,8 +1584,6 @@ class AgentTaskExecutor:
             task=task,
             task_service=task_service,
         )
-        raw_intent = _latest_intent_decision(session, task)
-        effective_decision = effective_intent_decision(raw_intent)
         selector_intent_classification: str | None = None
         selector_likely_tools: list[str] = []
         selector_toolkit_affinity: list[str] = []
@@ -1445,11 +1601,6 @@ class AgentTaskExecutor:
                 selector_toolkit_affinity = [
                     item for item in raw_affinity if isinstance(item, str) and item
                 ]
-        tool_selection_task_input = _tool_selection_task_input(
-            session=session,
-            task=task,
-            base_input=task.input,
-        )
         try:
             selection = selector.select(
                 task_id=task.id,
@@ -1486,6 +1637,7 @@ class AgentTaskExecutor:
             selection=selection,
             selector_cards=selector_cards,
         )
+        selection, arbitration_log = arbitrate(selection, selector_cards)
 
         self._record_tool_selection(
             task=task,
@@ -1496,6 +1648,8 @@ class AgentTaskExecutor:
             intent_classification=selector_intent_classification,
             intent_likely_tools=selector_likely_tools,
             intent_toolkit_affinity=selector_toolkit_affinity,
+            semantic_ranked=semantic_ranked,
+            arbitration_log=arbitration_log,
         )
         selected_external_names = set(selection.selected_names)
         suppressed_native_names = set(selection.suppressed_native_tools)
@@ -1549,11 +1703,25 @@ class AgentTaskExecutor:
         intent_classification: str | None = None,
         intent_likely_tools: list[str] | None = None,
         intent_toolkit_affinity: list[str] | None = None,
+        semantic_ranked: list[tuple[str, float]] | None = None,
+        arbitration_log: list[dict[str, object]] | None = None,
     ) -> None:
         payload: JsonObject = {
             "message": "tool_selection_completed",
             "candidate_count": candidate_count,
             "selector_candidate_count": selector_candidate_count,
+            "semantic_retrieval_used": semantic_ranked is not None,
+            **(
+                {
+                    "semantic_top": [
+                        {"registry_name": registry_name, "similarity": similarity}
+                        for registry_name, similarity in semantic_ranked[:5]
+                    ]
+                }
+                if semantic_ranked is not None
+                else {}
+            ),
+            "arbitration": list(arbitration_log or []),
             "selected_tools": [
                 {
                     "registry_name": item.registry_name,
@@ -3198,6 +3366,48 @@ def _tool_selection_task_input(
                 f"{_compact_tool_selection_text(prior.result_summary)}"
             )
     return "\n".join(lines)
+
+
+MAX_SEMANTIC_FRAGMENT_QUERIES = 4
+
+
+def _semantic_retrieval_query_texts(
+    *,
+    decision: Mapping[str, Any] | None,
+    base_query: str,
+) -> list[str]:
+    """Build retrieval queries: base input plus one per actionable intent fragment.
+
+    A single averaged embedding loses minority intents in multi-intent asks
+    ("brief: issue tracker + NVDA + Notion docs" ranked only docs tools), so
+    each fragment objective is retrieved independently and merged upstream.
+    """
+
+    if decision is None:
+        return [base_query]
+    queries = [base_query]
+    objective = decision.get("objective")
+    if isinstance(objective, str) and objective:
+        queries[0] = f"{base_query}\n\nObjective: {objective}"
+
+    fragments: list[Any] = []
+    primary = decision.get("primary_intent")
+    if isinstance(primary, Mapping):
+        fragments.append(primary)
+    secondary = decision.get("secondary_intents")
+    if isinstance(secondary, list):
+        fragments.extend(item for item in secondary if isinstance(item, Mapping))
+    for fragment in fragments[:MAX_SEMANTIC_FRAGMENT_QUERIES]:
+        if fragment.get("should_execute") is False:
+            continue
+        fragment_objective = fragment.get("objective")
+        if (
+            isinstance(fragment_objective, str)
+            and fragment_objective
+            and fragment_objective not in queries
+        ):
+            queries.append(fragment_objective)
+    return queries
 
 
 def _should_include_prior_context_for_tool_selection(

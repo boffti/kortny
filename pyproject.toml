@@ -10,6 +10,7 @@ dependencies = [
     "alembic>=1.13",
     "cryptography>=48.0",
     "fastapi>=0.136",
+    "fastembed>=0.8.0",
     "google-adk>=2.0",
     "google-cloud-storage>=3.11.0",
     "httpx>=0.27",
@@ -20,6 +21,7 @@ dependencies = [
     "opentelemetry-api>=1.28",
     "opentelemetry-exporter-otlp-proto-http>=1.28",
     "opentelemetry-sdk>=1.28",
+    "pgvector>=0.3",
     "psycopg[binary]>=3.2",
     "pydantic>=2.7",
     "pydantic-settings>=2.3",
@@ -92,6 +94,11 @@ exclude = [
     "^build/",
     "^dist/",
 ]
+
+[[tool.mypy.overrides]]
+# pgvector ships no py.typed marker; its SQLAlchemy Vector type is Any-typed.
+module = ["pgvector.*"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

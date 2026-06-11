@@ -4591,5 +4591,7 @@ def make_settings(brave_search_api_key: str = "brave-key") -> Settings:
             "KORTNY_WORKFLOW_BACKEND": "inline",
             "BRAVE_SEARCH_API_KEY": brave_search_api_key,
             "POSTGRES_URL": "postgresql://kortny:kortny@localhost/kortny",
+            # Tests must never load a real embedding model (HIG-219).
+            "KORTNY_EMBEDDINGS_BACKEND": "disabled",
         }
     )

@@ -19,8 +19,10 @@ from typing import Protocol
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from kortny.agent.capabilities import CapabilityOverview
 from kortny.agent.context import (
     DEFAULT_KNOWN_FACTS_MAX_CHARS,
+    DEFAULT_SKILL_DIRECT_THRESHOLD,
     DEFAULT_THREAD_CONTEXT_MAX_CHARS,
     DEFAULT_THREAD_CONTEXT_RECENT_TASKS,
     DEFAULT_THREAD_TRANSCRIPT_LIMIT,
@@ -64,6 +66,7 @@ from kortny.approvals import (
     approval_key_for,
 )
 from kortny.db.models import Task, TaskEvent, TaskEventType
+from kortny.embeddings import EmbeddingIndex
 from kortny.llm import ChatMessage, Completion, ToolCall
 from kortny.llm.routing import latest_intent_decision
 from kortny.observability import (
@@ -176,6 +179,10 @@ DEFAULT_SYSTEM_PROMPT = (
     "or file - never paste large code or HTML into Slack. Use deploy_site only "
     "when the user explicitly asks to deploy or publish externally; it always "
     "asks for approval first. "
+    "Consult the <capabilities> section. When a request needs an integration "
+    "that is not connected, say plainly which integration would enable it "
+    "(e.g. 'connect Jira and I can do this') and offer the closest alternative "
+    "you CAN do now. Never respond with a flat refusal. "
     "When answering with text, format for Slack mrkdwn rather than GitHub "
     "Markdown: use *bold*, <https://example.com|label> links, simple line-break "
     "lists, and avoid Markdown headings."
@@ -243,6 +250,9 @@ class AgentCoordinator:
         execution_planner: ExecutionPlanner | None = None,
         approval_policy: ToolApprovalPolicy | None = None,
         tool_result_prompt_max_chars: int = DEFAULT_TOOL_RESULT_PROMPT_MAX_CHARS,
+        capability_overview: CapabilityOverview | None = None,
+        embedding_index: EmbeddingIndex | None = None,
+        skill_direct_threshold: float = DEFAULT_SKILL_DIRECT_THRESHOLD,
     ) -> None:
         if max_turns < 1:
             raise ValueError("max_turns must be at least 1")
@@ -284,6 +294,9 @@ class AgentCoordinator:
                 known_facts_max_chars=known_facts_max_chars,
                 context_engine_id=DEFAULT_CONTEXT_ENGINE_INFO.id,
                 context_engine_name=DEFAULT_CONTEXT_ENGINE_INFO.name,
+                capability_overview=capability_overview,
+                embedding_index=embedding_index,
+                skill_direct_threshold=skill_direct_threshold,
             )
             self.context_engine = DefaultContextEngine(self.context_assembler)
 
@@ -295,8 +308,13 @@ class AgentCoordinator:
         run_outcome = "failed"
         try:
             context_package = self._initial_context(task_obj)
+            self._record_skill_ranking(task_obj, context_package)
             messages = list(context_package.messages)
-            result = self._run_with_context(task_obj, messages)
+            result = self._run_with_context(
+                task_obj,
+                messages,
+                context_package=context_package,
+            )
             run_outcome = "succeeded"
             return result
         except ToolApprovalRequired:
@@ -314,10 +332,16 @@ class AgentCoordinator:
         self,
         task_obj: Task,
         messages: list[ChatMessage],
+        *,
+        context_package: ContextPackage | None = None,
     ) -> AgentRunResult:
         schemas = self.registry.schemas()
         artifact_count = 0
-        plan = self._create_execution_plan(task_obj, schemas)
+        plan = self._create_execution_plan(
+            task_obj,
+            schemas,
+            context_package=context_package,
+        )
         self._append_execution_log(
             task_obj,
             "execution_plan_created",
@@ -955,10 +979,34 @@ class AgentCoordinator:
             artifact_count=artifact_count,
         )
 
+    def _record_skill_ranking(
+        self,
+        task: Task,
+        package: ContextPackage,
+    ) -> None:
+        """Record the semantic skill ranking when one was computed."""
+
+        if not package.skill_similarities:
+            return
+        self._append_log(
+            task,
+            "skill_ranking",
+            {
+                "ranked": [
+                    {"slug": slug, "similarity": similarity}
+                    for slug, similarity in package.skill_similarities
+                ],
+                "execution_hint": package.execution_hint,
+                "matched_skill_slug": package.matched_skill_slug,
+            },
+        )
+
     def _create_execution_plan(
         self,
         task: Task,
         schemas: Sequence[JsonSchema],
+        *,
+        context_package: ContextPackage | None = None,
     ) -> ExecutionPlan:
         default_plan = make_default_execution_plan(
             task_id=task.id,
@@ -984,6 +1032,7 @@ class AgentCoordinator:
                 limits=self.guardrail_limits,
                 intent_decision=intent_decision,
                 reason=gate.reason,
+                context_package=context_package,
             )
         except Exception as exc:
             default_plan.planner_source = "planner_fallback"

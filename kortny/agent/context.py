@@ -9,10 +9,12 @@ import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
 from decimal import Decimal
+from typing import TYPE_CHECKING
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from kortny.agent.capabilities import CapabilityOverview, render_capability_overview
 from kortny.agent.thread_context import (
     ThreadTranscriptMessage,
     ThreadTranscriptProvider,
@@ -24,6 +26,7 @@ from kortny.db.models import (
     TaskEvent,
     TaskEventType,
 )
+from kortny.embeddings import EmbeddingIndex
 from kortny.knowledge_graph import (
     DestinationSurface,
     GraphContextPack,
@@ -37,6 +40,9 @@ from kortny.memory import EpisodeService, Fact, RelevantEpisode, WorkspaceStateS
 from kortny.observability import observe_task_event, set_span_attributes, start_span
 from kortny.tasks import TaskService
 
+if TYPE_CHECKING:
+    from kortny.skills.service import EnabledSkill
+
 DEFAULT_THREAD_CONTEXT_MAX_CHARS = 12_000
 DEFAULT_THREAD_CONTEXT_RECENT_TASKS = 3
 DEFAULT_THREAD_TRANSCRIPT_LIMIT = 30
@@ -48,6 +54,9 @@ DEFAULT_GRAPH_CONTEXT_MAX_ITEMS = 12
 DEFAULT_GRAPH_CONTEXT_MAX_HOPS = 2
 DEFAULT_SKILLS_CONTEXT_MAX_CHARS = 4_000
 DEFAULT_SKILLS_CONTEXT_MAX_SKILLS = 30
+DEFAULT_CAPABILITIES_CONTEXT_MAX_CHARS = 1_200
+DEFAULT_SKILL_DIRECT_THRESHOLD = 0.60
+EXECUTION_HINT_SKILL_DIRECT = "skill_direct"
 DEFAULT_CONTEXT_ENGINE_ID = "kortny.context_assembler"
 DEFAULT_CONTEXT_ENGINE_NAME = "ContextAssembler"
 IMMEDIATE_PRIOR_INPUT_MAX_CHARS = 500
@@ -197,6 +206,9 @@ class ContextPackage:
     selected_skills: tuple[ContextSkill, ...] = ()
     context_engine_id: str = DEFAULT_CONTEXT_ENGINE_ID
     context_engine_name: str = DEFAULT_CONTEXT_ENGINE_NAME
+    skill_similarities: tuple[tuple[str, float], ...] = ()
+    execution_hint: str | None = None
+    matched_skill_slug: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -235,6 +247,15 @@ class _SkillsContext:
     content: str | None
     selected_skills: tuple[ContextSkill, ...]
     omissions: tuple[ContextOmission, ...]
+    skill_similarities: tuple[tuple[str, float], ...] = ()
+    execution_hint: str | None = None
+    matched_skill_slug: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _CapabilitiesContext:
+    content: str | None
+    omissions: tuple[ContextOmission, ...]
 
 
 class ContextAssembler:
@@ -258,6 +279,9 @@ class ContextAssembler:
         graph_context_max_hops: int = DEFAULT_GRAPH_CONTEXT_MAX_HOPS,
         context_engine_id: str = DEFAULT_CONTEXT_ENGINE_ID,
         context_engine_name: str = DEFAULT_CONTEXT_ENGINE_NAME,
+        capability_overview: CapabilityOverview | None = None,
+        embedding_index: EmbeddingIndex | None = None,
+        skill_direct_threshold: float = DEFAULT_SKILL_DIRECT_THRESHOLD,
     ) -> None:
         if thread_context_max_chars < 1:
             raise ValueError("thread_context_max_chars must be at least 1")
@@ -297,6 +321,9 @@ class ContextAssembler:
         self.graph_context_max_hops = graph_context_max_hops
         self.context_engine_id = context_engine_id
         self.context_engine_name = context_engine_name
+        self.capability_overview = capability_overview
+        self.embedding_index = embedding_index
+        self.skill_direct_threshold = skill_direct_threshold
         self.workspace_state_service = WorkspaceStateService(
             session,
             task_service=self.task_service,
@@ -319,6 +346,12 @@ class ContextAssembler:
         messages: list[ChatMessage] = []
         if self.system_prompt:
             messages.append(ChatMessage(role="system", content=self.system_prompt))
+
+        capabilities_context = self._capabilities_context()
+        if capabilities_context.content:
+            messages.append(
+                ChatMessage(role="system", content=capabilities_context.content)
+            )
 
         acknowledgement = self._acknowledgement_context(task)
         if acknowledgement is not None:
@@ -377,7 +410,8 @@ class ContextAssembler:
                 graph_context_max_hops=self.graph_context_max_hops,
             ),
             omissions=(
-                known_facts.omissions
+                capabilities_context.omissions
+                + known_facts.omissions
                 + prior_context.omissions
                 + episode_context.omissions
                 + graph_context.omissions
@@ -386,6 +420,9 @@ class ContextAssembler:
             selected_skills=skills_context.selected_skills,
             context_engine_id=self.context_engine_id,
             context_engine_name=self.context_engine_name,
+            skill_similarities=skills_context.skill_similarities,
+            execution_hint=skills_context.execution_hint,
+            matched_skill_slug=skills_context.matched_skill_slug,
         )
         self._record_context_assembled(task, package)
         set_span_attributes(
@@ -792,6 +829,26 @@ class ContextAssembler:
             ),
         )
 
+    def _capabilities_context(self) -> _CapabilitiesContext:
+        """Render the installation capability card within its budget."""
+
+        if self.capability_overview is None:
+            return _CapabilitiesContext(content=None, omissions=())
+        rendered = render_capability_overview(self.capability_overview)
+        if not rendered:
+            return _CapabilitiesContext(content=None, omissions=())
+        if len(rendered) > DEFAULT_CAPABILITIES_CONTEXT_MAX_CHARS:
+            rendered = _fit_context_to_budget(
+                rendered,
+                DEFAULT_CAPABILITIES_CONTEXT_MAX_CHARS,
+                context_name="capabilities",
+            )
+            return _CapabilitiesContext(
+                content=rendered,
+                omissions=(ContextOmission("capabilities", "budget_compacted", 1),),
+            )
+        return _CapabilitiesContext(content=rendered, omissions=())
+
     def _skills_context(self, task: Task) -> _SkillsContext:
         """Build the L1 name+description block for skills enabled in scope."""
 
@@ -806,6 +863,22 @@ class ContextAssembler:
             return _SkillsContext(content=None, selected_skills=(), omissions=())
         if not enabled:
             return _SkillsContext(content=None, selected_skills=(), omissions=())
+
+        skill_similarities = self._rank_skills(task, enabled)
+        if skill_similarities:
+            similarity_by_slug = dict(skill_similarities)
+            enabled = sorted(
+                enabled,
+                key=lambda item: -similarity_by_slug.get(item.slug, -1.0),
+            )
+        execution_hint: str | None = None
+        matched_skill_slug: str | None = None
+        if (
+            skill_similarities
+            and skill_similarities[0][1] >= self.skill_direct_threshold
+        ):
+            execution_hint = EXECUTION_HINT_SKILL_DIRECT
+            matched_skill_slug = skill_similarities[0][0]
 
         omissions: list[ContextOmission] = []
         if len(enabled) > DEFAULT_SKILLS_CONTEXT_MAX_SKILLS:
@@ -854,14 +927,54 @@ class ContextAssembler:
             )
         if not selected:
             return _SkillsContext(
-                content=None, selected_skills=(), omissions=tuple(omissions)
+                content=None,
+                selected_skills=(),
+                omissions=tuple(omissions),
+                skill_similarities=skill_similarities,
             )
+        if matched_skill_slug is not None and any(
+            skill.slug == matched_skill_slug for skill in selected
+        ):
+            lines.append(
+                f"Highly relevant skill for this task: {matched_skill_slug}. "
+                "Load it with load_skill and follow it before doing the work "
+                "yourself."
+            )
+        else:
+            execution_hint = None
+            matched_skill_slug = None
         lines.append("</available_skills>")
         return _SkillsContext(
             content="\n".join(lines),
             selected_skills=tuple(selected),
             omissions=tuple(omissions),
+            skill_similarities=skill_similarities,
+            execution_hint=execution_hint,
+            matched_skill_slug=matched_skill_slug,
         )
+
+    def _rank_skills(
+        self,
+        task: Task,
+        enabled: Sequence[EnabledSkill],
+    ) -> tuple[tuple[str, float], ...]:
+        """Rank enabled skills by semantic similarity to the task input."""
+
+        if self.embedding_index is None or not enabled:
+            return ()
+        items = [
+            (skill.slug, f"{skill.name}. {skill.description}") for skill in enabled
+        ]
+        self.embedding_index.ensure("skill", items)
+        ranked = self.embedding_index.rank(
+            "skill",
+            task.input,
+            [slug for slug, _ in items],
+            top_k=DEFAULT_SKILLS_CONTEXT_MAX_SKILLS,
+        )
+        if ranked is None:
+            return ()
+        return tuple(ranked)
 
     def _fetch_thread_transcript(
         self,

@@ -198,11 +198,27 @@ class Settings(BaseSettings):
         default=Decimal("0.600"),
         validation_alias="KORTNY_WITNESS_AUTOPILOT_MIN_CONFIDENCE",
     )
+    embeddings_backend: Literal["local", "disabled"] = Field(
+        default="local", validation_alias="KORTNY_EMBEDDINGS_BACKEND"
+    )
+    embeddings_model: str = Field(
+        default="BAAI/bge-small-en-v1.5",
+        validation_alias="KORTNY_EMBEDDINGS_MODEL",
+        min_length=1,
+    )
+    tool_retrieval_top_k: int = Field(
+        default=15, validation_alias="KORTNY_TOOL_RETRIEVAL_TOP_K"
+    )
+    skill_direct_similarity_threshold: float = Field(
+        default=0.60, validation_alias="KORTNY_SKILL_DIRECT_THRESHOLD"
+    )
     tool_selector_max_external_candidates: int = Field(
         default=24, validation_alias="TOOL_SELECTOR_MAX_EXTERNAL_CANDIDATES"
     )
+    # 12k proved too small live: ~35 native cards alone exceed it, which used
+    # to trim every external candidate out of the selector prompt.
     tool_selector_max_prompt_chars: int = Field(
-        default=12000, validation_alias="TOOL_SELECTOR_MAX_PROMPT_CHARS"
+        default=24000, validation_alias="TOOL_SELECTOR_MAX_PROMPT_CHARS"
     )
     tool_result_prompt_max_chars: int = Field(
         default=8000, validation_alias="TOOL_RESULT_PROMPT_MAX_CHARS"
@@ -474,6 +490,20 @@ class Settings(BaseSettings):
     def _valid_witness_scan_interval_seconds(cls, value: int) -> int:
         if value < 0:
             raise ValueError("KORTNY_WITNESS_SCAN_INTERVAL_SECONDS cannot be negative")
+        return value
+
+    @field_validator("tool_retrieval_top_k")
+    @classmethod
+    def _valid_tool_retrieval_top_k(cls, value: int) -> int:
+        if value < 1 or value > 200:
+            raise ValueError("KORTNY_TOOL_RETRIEVAL_TOP_K must be between 1 and 200")
+        return value
+
+    @field_validator("skill_direct_similarity_threshold")
+    @classmethod
+    def _valid_skill_direct_similarity_threshold(cls, value: float) -> float:
+        if value < 0 or value > 1:
+            raise ValueError("KORTNY_SKILL_DIRECT_THRESHOLD must be between 0 and 1")
         return value
 
     @field_validator("tool_selector_max_external_candidates")

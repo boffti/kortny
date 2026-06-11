@@ -1,6 +1,8 @@
 services:
   postgres:
-    image: postgres:16-alpine
+    # pgvector required for tool/skill embeddings (HIG-219); bookworm pinned
+    # because the unsuffixed pg16 tag tracks trixie.
+    image: pgvector/pgvector:pg16-bookworm
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-kortny}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-kortny}
@@ -80,6 +82,7 @@ services:
       KORTNY_ARTIFACTS_DIR: ${KORTNY_ARTIFACTS_DIR:-/data/artifacts}
       KORTNY_PUBLIC_BASE_URL: ${KORTNY_PUBLIC_BASE_URL:-}
       KORTNY_PREVIEW_SIGNING_SECRET: ${KORTNY_PREVIEW_SIGNING_SECRET:-}
+      FASTEMBED_CACHE_PATH: ${FASTEMBED_CACHE_PATH:-/data/fastembed-cache}
       POSTGRES_URL: postgresql://${POSTGRES_USER:-kortny}:${POSTGRES_PASSWORD:-kortny}@postgres:5432/${POSTGRES_DB:-kortny}
       UV_CACHE_DIR: /tmp/uv-cache
       UV_LINK_MODE: copy
@@ -88,6 +91,7 @@ services:
       - .:/app
       - uv-cache:/tmp/uv-cache
       - task-artifacts:/data/artifacts
+      - fastembed-cache:/data/fastembed-cache
 
   scheduler:
     image: ghcr.io/astral-sh/uv:python3.11-bookworm-slim
@@ -248,6 +252,7 @@ services:
       KORTNY_ARTIFACTS_DIR: ${KORTNY_ARTIFACTS_DIR:-/data/artifacts}
       KORTNY_PUBLIC_BASE_URL: ${KORTNY_PUBLIC_BASE_URL:-}
       KORTNY_PREVIEW_SIGNING_SECRET: ${KORTNY_PREVIEW_SIGNING_SECRET:-}
+      FASTEMBED_CACHE_PATH: ${FASTEMBED_CACHE_PATH:-/data/fastembed-cache}
       POSTGRES_URL: postgresql://${POSTGRES_USER:-kortny}:${POSTGRES_PASSWORD:-kortny}@postgres:5432/${POSTGRES_DB:-kortny}
       UV_CACHE_DIR: /tmp/uv-cache
       UV_LINK_MODE: copy
@@ -256,6 +261,7 @@ services:
       - .:/app
       - uv-cache:/tmp/uv-cache
       - task-artifacts:/data/artifacts
+      - fastembed-cache:/data/fastembed-cache
 
   sandbox-docker-proxy:
     image: ${DOCKER_SOCKET_PROXY_IMAGE:-tecnativa/docker-socket-proxy:latest}
@@ -331,6 +337,7 @@ volumes:
   phoenix-data:
   uv-cache:
   task-artifacts:
+  fastembed-cache:
 
 networks:
   sandbox-control:

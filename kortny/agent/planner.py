@@ -6,7 +6,7 @@ import json
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Literal, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
@@ -22,7 +22,12 @@ from kortny.db.models import Task
 from kortny.llm import ChatMessage, Completion
 from kortny.tools.types import JsonObject, JsonSchema
 
+if TYPE_CHECKING:
+    from kortny.agent.context import ContextPackage
+
 EXECUTION_PLANNER_RESPONSE_FORMAT: JsonObject = {"type": "json_object"}
+MATCHED_SKILL_MIN_SIMILARITY = 0.45
+MATCHED_SKILLS_MAX = 3
 EXECUTION_PLANNER_PROMPT_NAME = "kortny.execution_planner"
 RECOVERY_PLANNER_RESPONSE_FORMAT: JsonObject = {"type": "json_object"}
 RECOVERY_PLANNER_PROMPT_NAME = "kortny.execution_recovery_planner"
@@ -35,6 +40,8 @@ runtime plan for the coordinator, not a user-facing explanation.
 Rules:
 - Use only tool names from available_tools.
 - Prefer discovery/list/search steps before tools that require unknown IDs.
+- If matched_skills covers the objective, make the FIRST step load_skill with
+  that slug, then follow the skill's instructions.
 - Include missing_inputs only when the runtime cannot discover the input.
 - Include fallback_notes for alternative tools or narrower retries.
 - Include risk_notes for side effects, privacy, scope, cost, or destructive risk.
@@ -255,9 +262,18 @@ class ExecutionPlanner:
         limits: ExecutionGuardrailLimits,
         intent_decision: Mapping[str, object] | None,
         reason: str,
+        context_package: ContextPackage | None = None,
     ) -> ExecutionPlan:
         """Ask the model for a private plan and convert it to an ExecutionPlan."""
 
+        plan_request: JsonObject = {
+            "task_input": task.input,
+            "intent_decision": intent_decision,
+            "available_tools": _tool_summary(tool_schemas),
+        }
+        matched_skills = _matched_skills_payload(context_package)
+        if matched_skills:
+            plan_request["matched_skills"] = matched_skills
         completion = llm.complete(
             task_id=task.id,
             messages=(
@@ -265,11 +281,7 @@ class ExecutionPlanner:
                 ChatMessage(
                     role="user",
                     content=json.dumps(
-                        {
-                            "task_input": task.input,
-                            "intent_decision": intent_decision,
-                            "available_tools": _tool_summary(tool_schemas),
-                        },
+                        plan_request,
                         separators=(",", ":"),
                         sort_keys=True,
                     ),
@@ -524,6 +536,34 @@ def render_recovery_plan_context(recovery_plan: RecoveryPlan) -> str:
         lines.append(f"user_message_guidance: {recovery_plan.user_message_guidance}")
     lines.append("</private_recovery_plan>")
     return "\n".join(lines)
+
+
+def _matched_skills_payload(
+    context_package: ContextPackage | None,
+) -> list[JsonObject]:
+    """Return the planner's matched_skills entries from a context package."""
+
+    if context_package is None or not context_package.skill_similarities:
+        return []
+    descriptions = {
+        skill.slug: skill.description for skill in context_package.selected_skills
+    }
+    matched: list[JsonObject] = []
+    for slug, similarity in context_package.skill_similarities:
+        if similarity < MATCHED_SKILL_MIN_SIMILARITY:
+            continue
+        if slug not in descriptions:
+            continue
+        matched.append(
+            {
+                "slug": slug,
+                "description": descriptions[slug],
+                "similarity": similarity,
+            }
+        )
+        if len(matched) >= MATCHED_SKILLS_MAX:
+            break
+    return matched
 
 
 def _tool_summary(tool_schemas: Sequence[JsonSchema]) -> list[JsonObject]:

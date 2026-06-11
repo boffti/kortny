@@ -7,7 +7,8 @@ from typing import Protocol
 
 from sqlalchemy.orm import Session
 
-from kortny.agent.context import ContextAssembler
+from kortny.agent.capabilities import CapabilityOverview
+from kortny.agent.context import DEFAULT_SKILL_DIRECT_THRESHOLD, ContextAssembler
 from kortny.agent.context_engine import ContextEngine
 from kortny.agent.coordinator import (
     DEFAULT_TOOL_RESULT_PROMPT_MAX_CHARS,
@@ -20,6 +21,7 @@ from kortny.agent.planner import ExecutionPlanner
 from kortny.agent.thread_context import ThreadTranscriptProvider
 from kortny.approvals import ToolApprovalPolicy
 from kortny.db.models import Task
+from kortny.embeddings import EmbeddingIndex
 from kortny.tasks import TaskService
 from kortny.tools import ToolRegistry
 
@@ -54,6 +56,9 @@ class CustomAgentRuntime:
         execution_planner: ExecutionPlanner | None = None,
         approval_policy: ToolApprovalPolicy | None = None,
         tool_result_prompt_max_chars: int = DEFAULT_TOOL_RESULT_PROMPT_MAX_CHARS,
+        capability_overview: CapabilityOverview | None = None,
+        embedding_index: EmbeddingIndex | None = None,
+        skill_direct_threshold: float = DEFAULT_SKILL_DIRECT_THRESHOLD,
     ) -> None:
         self.coordinator = AgentCoordinator(
             session=session,
@@ -73,6 +78,9 @@ class CustomAgentRuntime:
             execution_planner=execution_planner,
             approval_policy=approval_policy,
             tool_result_prompt_max_chars=tool_result_prompt_max_chars,
+            capability_overview=capability_overview,
+            embedding_index=embedding_index,
+            skill_direct_threshold=skill_direct_threshold,
         )
 
     def run(self, task: Task | uuid.UUID) -> AgentRunResult:

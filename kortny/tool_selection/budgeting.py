@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 from kortny.tool_selection.models import ToolCard
+
+SEMANTIC_SCORE_WEIGHT = 0.6
+LEXICAL_SCORE_WEIGHT = 0.4
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,12 +44,18 @@ def compact_tool_cards(
     task_input: str,
     cards: tuple[ToolCard, ...],
     max_candidates: int,
+    semantic_scores: Mapping[str, float] | None = None,
 ) -> tuple[tuple[ToolCard, ...], ToolCatalogCompaction]:
-    """Return a bounded, relevance-ranked selector catalog."""
+    """Return a bounded, relevance-ranked selector catalog.
+
+    When ``semantic_scores`` (registry_name -> cosine similarity) is provided,
+    each card's final score is a hybrid of semantic retrieval and the lexical
+    heuristic; when it is None, behavior is exactly the legacy lexical path.
+    """
 
     if max_candidates < 1:
         raise ValueError("max_candidates must be at least 1")
-    if len(cards) <= max_candidates:
+    if semantic_scores is None and len(cards) <= max_candidates:
         return cards, ToolCatalogCompaction(
             original_candidate_count=len(cards),
             selected_candidate_count=len(cards),
@@ -57,10 +67,22 @@ def compact_tool_cards(
         )
 
     scored = [
-        (_score_tool_card(task_input, card), index, card)
+        (_hybrid_tool_card_score(task_input, card, semantic_scores), index, card)
         for index, card in enumerate(cards)
     ]
     ranked = sorted(scored, key=lambda item: (-item[0], item[1]))
+    if len(cards) <= max_candidates:
+        # Semantic path within budget: keep every card, relevance-ordered so
+        # downstream prompt tail-trimming drops the least relevant first.
+        return tuple(item[2] for item in ranked), ToolCatalogCompaction(
+            original_candidate_count=len(cards),
+            selected_candidate_count=len(cards),
+            omitted_candidate_count=0,
+            max_candidates=max_candidates,
+            selected_candidate_names=tuple(item[2].registry_name for item in ranked),
+            omitted_candidate_names=(),
+            reason="within_budget",
+        )
     selected_ranked = ranked[:max_candidates]
     # Keep relevance order (most relevant first): the selector prompt fitter
     # trims candidates from the tail, so tail position must mean "least
@@ -78,6 +100,28 @@ def compact_tool_cards(
         omitted_candidate_names=tuple(card.registry_name for card in omitted),
         reason="relevance_cap",
     )
+
+
+def tool_card_embedding_text(card: ToolCard) -> str:
+    """Compose the canonical embedding text for one external tool card."""
+
+    return (
+        f"{card.display_name}. {card.description} "
+        f"Capabilities: {', '.join(card.capabilities)}. "
+        f"Toolkit: {card.toolkit_slug}."
+    )
+
+
+def _hybrid_tool_card_score(
+    task_input: str,
+    card: ToolCard,
+    semantic_scores: Mapping[str, float] | None,
+) -> float:
+    lexical = _score_tool_card(task_input, card)
+    if semantic_scores is None:
+        return lexical
+    semantic = semantic_scores.get(card.registry_name, 0.0)
+    return SEMANTIC_SCORE_WEIGHT * semantic + LEXICAL_SCORE_WEIGHT * lexical
 
 
 def _score_tool_card(task_input: str, card: ToolCard) -> float:

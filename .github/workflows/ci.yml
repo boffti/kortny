@@ -49,7 +49,8 @@ jobs:
     timeout-minutes: 30
     services:
       postgres:
-        image: postgres:16
+        # pgvector-enabled Postgres: migration 0029 runs CREATE EXTENSION vector.
+        image: pgvector/pgvector:pg16-bookworm
         env:
           POSTGRES_USER: kortny
           POSTGRES_PASSWORD: kortny

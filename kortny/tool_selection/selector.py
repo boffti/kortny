@@ -23,6 +23,10 @@ TOOL_SELECTOR_RESPONSE_FORMAT: JsonObject = {"type": "json_object"}
 DEFAULT_TOOL_SELECTOR_MAX_PROMPT_CHARS = 12000
 MIN_PROMPT_DESCRIPTION_CHARS = 80
 MIN_PROMPT_TASK_CHARS = 300
+# The fit loop never trims the external candidate list below this floor: the
+# native-card section alone can exceed the whole budget (observed live), and
+# trimming externals to zero silently turns the selector into a no-op.
+MIN_EXTERNAL_PROMPT_CANDIDATES = 8
 TOOL_SELECTOR_SYSTEM_PROMPT = """You are Kortny's tool selection preflight.
 
 Select external tools only when they are materially useful for the user's Slack task.
@@ -329,13 +333,14 @@ def _fit_selector_payload(
     )
     prompt_chars = _selector_prompt_chars(payload)
     while prompt_chars > max_prompt_chars:
-        if len(candidates) > 1:
-            candidates.pop()
-        elif description_chars > MIN_PROMPT_DESCRIPTION_CHARS:
+        # Shrink descriptions (native + external) before dropping candidates;
+        # candidates are relevance-ordered so the tail goes first, but never
+        # below the floor — an over-budget prompt beats an empty candidate list.
+        if description_chars > MIN_PROMPT_DESCRIPTION_CHARS:
             description_chars = max(
                 MIN_PROMPT_DESCRIPTION_CHARS, description_chars // 2
             )
-        elif candidates:
+        elif len(candidates) > MIN_EXTERNAL_PROMPT_CANDIDATES:
             candidates.pop()
         elif len(prompt_task_input) > MIN_PROMPT_TASK_CHARS:
             prompt_task_input = _truncate_text(
@@ -419,6 +424,7 @@ def _payload_registry_name(payload: JsonObject) -> str:
 
 
 MAX_FORCED_TOOLKIT_SELECTIONS = 4
+EXPLICIT_REQUEST_REASON_PREFIX = "user explicitly named"
 
 
 def _explicitly_requested_selections(
@@ -451,7 +457,7 @@ def _explicitly_requested_selections(
             ToolSelection(
                 registry_name=card.registry_name,
                 confidence=0.9,
-                reason=f"user explicitly named {card.toolkit_slug}",
+                reason=f"{EXPLICIT_REQUEST_REASON_PREFIX} {card.toolkit_slug}",
             )
         )
     return tuple(forced)

@@ -10,6 +10,7 @@ from kortny.tool_selection import (
     ToolCatalogService,
     compact_tool_cards,
 )
+from kortny.tool_selection.selector import MIN_EXTERNAL_PROMPT_CANDIDATES
 from kortny.tools import EchoTool
 from kortny.tools.types import JsonObject, JsonSchema
 
@@ -166,7 +167,6 @@ def test_llm_selector_trims_prompt_payload_to_budget() -> None:
     )
 
     assert result.prompt_chars is not None
-    assert result.prompt_chars <= 2200
     assert result.prompt_char_budget == 2200
     assert result.budget_omitted_candidate_names
     assert result.route_reason == "no_external_needed+prompt_budget_trimmed"
@@ -174,6 +174,52 @@ def test_llm_selector_trims_prompt_payload_to_budget() -> None:
     assert user_content is not None
     user_payload = json.loads(user_content)
     assert len(user_payload["external_candidates"]) < len(cards)
+    # Trimming never strips externals below the floor, even if the prompt
+    # stays over budget (the native section alone can exceed small budgets).
+    assert len(user_payload["external_candidates"]) == MIN_EXTERNAL_PROMPT_CANDIDATES
+
+
+def test_llm_selector_never_trims_externals_to_zero() -> None:
+    cards = tuple(
+        ToolCard(
+            registry_name=f"composio_tool_{index}",
+            provider="composio",
+            display_name=f"Tool {index}",
+            description="Search large enterprise systems. " * 40,
+            capabilities=("workspace_search", "document_search"),
+            side_effect="read",
+            toolkit_slug="other",
+            tool_slugs=(f"OTHER_TOOL_{index}",),
+            required_fields=("query",),
+        )
+        for index in range(12)
+    )
+    provider = FakeSelectorLLM(
+        content="""
+        {
+          "selected_tools": [],
+          "suppressed_native_tools": [],
+          "rejected_tools": [],
+          "route_reason": "no_external_needed"
+        }
+        """
+    )
+
+    # Budget smaller than the system prompt itself: old behavior emptied the
+    # candidate list and the selector answered "no external tools available".
+    result = LLMToolSelector(provider, max_prompt_chars=1000).select(
+        task_id=uuid.uuid4(),
+        task_input="summarize recent channel decisions",
+        native_cards=(native_slack_history_card(),),
+        external_cards=cards,
+    )
+
+    user_content = provider.messages[0][1].content
+    assert user_content is not None
+    user_payload = json.loads(user_content)
+    assert len(user_payload["external_candidates"]) == MIN_EXTERNAL_PROMPT_CANDIDATES
+    assert result.prompt_chars is not None
+    assert result.prompt_chars > 1000
 
 
 def test_compact_tool_cards_keeps_relevant_candidates_under_budget() -> None:
@@ -439,3 +485,178 @@ class FakeSelectorLLM:
             usage=TokenUsage(input_tokens=10, output_tokens=10),
             model="test-selector",
         )
+
+
+def test_compact_tool_cards_semantic_paraphrase_retrieves_linear_card() -> None:
+    # Acceptance (HIG-219): "check our issue tracker" must surface the Linear
+    # card even though the input never says "linear" — pure word overlap fails
+    # here, seeded fake embeddings succeed.
+    from kortny.tool_selection import tool_card_embedding_text
+    from tests.fake_embeddings import FakeEmbeddingBackend
+
+    linear = ToolCard(
+        registry_name="composio_linear_search_issues",
+        provider="composio",
+        display_name="Linear issue search",
+        description="Find and list Linear issues, tickets, and bugs.",
+        capabilities=("issue_tracking", "external_tool"),
+        side_effect="read",
+        toolkit_slug="linear",
+    )
+    unrelated = tuple(
+        ToolCard(
+            registry_name=f"composio_other_{index}",
+            provider="composio",
+            display_name=f"Other {index}",
+            description="Generic integration tool.",
+            capabilities=("external_tool",),
+            side_effect="read",
+            toolkit_slug="other",
+        )
+        for index in range(10)
+    )
+    cards = unrelated + (linear,)
+
+    backend = FakeEmbeddingBackend()
+    query = "can you check our issue tracker for anything urgent?"
+    query_vector = backend.embed_query(query)
+    semantic_scores = {
+        card.registry_name: sum(
+            a * b
+            for a, b in zip(
+                query_vector,
+                backend.embed_passages([tool_card_embedding_text(card)])[0],
+                strict=True,
+            )
+        )
+        for card in cards
+    }
+
+    selected, compaction = compact_tool_cards(
+        task_input=query,
+        cards=cards,
+        max_candidates=5,
+        semantic_scores=semantic_scores,
+    )
+
+    assert compaction.compacted is True
+    assert selected[0].registry_name == "composio_linear_search_issues"
+
+
+def test_compact_tool_cards_hybrid_blends_semantic_and_lexical() -> None:
+    semantic_favorite = ToolCard(
+        registry_name="composio_semantic_pick",
+        provider="composio",
+        display_name="Semantic pick",
+        description="Generic integration tool.",
+        capabilities=("external_tool",),
+        side_effect="read",
+        toolkit_slug="zzz",
+    )
+    lexical_favorite = ToolCard(
+        registry_name="composio_acme_tool",
+        provider="composio",
+        display_name="Acme tool",
+        description="Generic integration tool.",
+        capabilities=("external_tool",),
+        side_effect="read",
+        toolkit_slug="acme",
+    )
+    cards = (semantic_favorite, lexical_favorite)
+    task_input = "use acme for this request"
+
+    # Without semantic scores, the lexical toolkit match wins.
+    lexical_only, _ = compact_tool_cards(
+        task_input=task_input,
+        cards=cards,
+        max_candidates=1,
+    )
+    assert lexical_only[0].registry_name == "composio_acme_tool"
+
+    # A strong semantic score (0.6 weight) overrides the lexical favorite
+    # (0.4 weight): 0.6*0.9 + 0.4*0.05 > 0.6*0.0 + 0.4*0.54.
+    hybrid, _ = compact_tool_cards(
+        task_input=task_input,
+        cards=cards,
+        max_candidates=1,
+        semantic_scores={"composio_semantic_pick": 0.9},
+    )
+    assert hybrid[0].registry_name == "composio_semantic_pick"
+
+
+def test_compact_tool_cards_none_semantic_scores_matches_legacy_exactly() -> None:
+    cards = tuple(
+        ToolCard(
+            registry_name=f"composio_other_{index}",
+            provider="composio",
+            display_name=f"Other {index}",
+            description="Generic integration tool.",
+            capabilities=("external_tool",),
+            side_effect="read",
+            toolkit_slug="other",
+        )
+        for index in range(10)
+    ) + (firecrawl_card(),)
+
+    legacy_selected, legacy_compaction = compact_tool_cards(
+        task_input="Use Firecrawl to search recent AI observability tooling",
+        cards=cards,
+        max_candidates=3,
+    )
+    explicit_selected, explicit_compaction = compact_tool_cards(
+        task_input="Use Firecrawl to search recent AI observability tooling",
+        cards=cards,
+        max_candidates=3,
+        semantic_scores=None,
+    )
+
+    assert explicit_selected == legacy_selected
+    assert explicit_compaction == legacy_compaction
+
+    # Within budget + no semantic scores: cards pass through untouched in
+    # registration order, exactly as before HIG-219.
+    within, within_compaction = compact_tool_cards(
+        task_input="anything",
+        cards=cards[:2],
+        max_candidates=10,
+        semantic_scores=None,
+    )
+    assert within == cards[:2]
+    assert within_compaction.reason == "within_budget"
+
+
+def test_compact_tool_cards_semantic_within_budget_reorders_by_relevance() -> None:
+    cards = (
+        ToolCard(
+            registry_name="composio_low",
+            provider="composio",
+            display_name="Low",
+            description="Generic integration tool.",
+            capabilities=("external_tool",),
+            side_effect="read",
+            toolkit_slug="other",
+        ),
+        ToolCard(
+            registry_name="composio_high",
+            provider="composio",
+            display_name="High",
+            description="Generic integration tool.",
+            capabilities=("external_tool",),
+            side_effect="read",
+            toolkit_slug="other",
+        ),
+    )
+
+    selected, compaction = compact_tool_cards(
+        task_input="anything",
+        cards=cards,
+        max_candidates=10,
+        semantic_scores={"composio_high": 0.9, "composio_low": 0.1},
+    )
+
+    assert [card.registry_name for card in selected] == [
+        "composio_high",
+        "composio_low",
+    ]
+    assert compaction.omitted_candidate_count == 0
+    assert compaction.reason == "within_budget"

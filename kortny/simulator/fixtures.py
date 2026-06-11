@@ -16,7 +16,8 @@ witness → automation) must discover:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, time, timedelta
 from datetime import date as date_cls
 
@@ -48,6 +49,10 @@ class SimMessage:
     text: str
     pattern: str
     thread_slug: str | None = None
+    # Compact Slack-style files summary (id, name, filetype, size). Entries
+    # carry the SIM_MARKER_KEY flag so the HIG-231 ambient-file gate never
+    # tries to download a file id that does not exist in Slack.
+    files: tuple[Mapping[str, object], ...] = field(default=())
 
     @property
     def message_ts(self) -> str:
@@ -193,6 +198,11 @@ def build_story(*, now: datetime, days: int) -> tuple[SimMessage, ...]:
         for message in _vendor_decision_messages(window_start, days)
         if window_start <= message.sent_at <= now
     )
+    messages.extend(
+        message
+        for message in _file_share_messages(window_start, days)
+        if window_start <= message.sent_at <= now
+    )
 
     messages.sort(key=lambda message: (message.sent_at, message.slug))
     return tuple(messages)
@@ -314,6 +324,36 @@ def _vendor_decision_messages(
             text="Let's revisit next week, swamped with the rack move.",
             pattern="unresolved_decision",
             thread_slug=root_slug,
+        ),
+    )
+
+
+def _file_share_messages(
+    window_start: datetime,
+    days: int,
+) -> tuple[SimMessage, ...]:
+    """An untagged xlsx drop near the end of the window (HIG-231 bait)."""
+
+    date = (window_start + timedelta(days=max(days - 2, 1))).date()
+    return (
+        SimMessage(
+            slug=f"file-share-pnl-{date.isoformat()}",
+            persona=PRIYA,
+            sent_at=_at(date, 15, 10),
+            text=(
+                "Dropping the desk PnL breakdown spreadsheet here in case "
+                "anyone wants the raw numbers before the review."
+            ),
+            pattern="file_share",
+            files=(
+                {
+                    "id": "FSIMPNL001",
+                    "name": "desk-pnl-breakdown.xlsx",
+                    "filetype": "xlsx",
+                    "size": 48_128,
+                    SIM_MARKER_KEY: True,
+                },
+            ),
         ),
     )
 

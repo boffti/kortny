@@ -226,6 +226,34 @@ class Settings(BaseSettings):
         default=True,
         validation_alias="KORTNY_WITNESS_AUTOMATION_ENABLED",
     )
+    witness_channel_posts_per_week: int = Field(
+        default=1,
+        validation_alias="KORTNY_WITNESS_CHANNEL_POSTS_PER_WEEK",
+        description=(
+            "Sliding-window budget for proactive Witness posts per channel "
+            "(7-day window). 0 disables channel delivery entirely."
+        ),
+    )
+    witness_drafts_per_channel_per_day: int = Field(
+        default=1,
+        validation_alias="KORTNY_WITNESS_DRAFTS_PER_CHANNEL_PER_DAY",
+        description=(
+            "Sliding-window budget for autopilot draft deliverables per "
+            "channel (24-hour window). 0 disables the draft tier."
+        ),
+    )
+    ambient_files_enabled: bool = Field(
+        default=True,
+        validation_alias="KORTNY_AMBIENT_FILES_ENABLED",
+    )
+    ambient_file_max_mb: int = Field(
+        default=15,
+        validation_alias="KORTNY_AMBIENT_FILE_MAX_MB",
+    )
+    ambient_file_briefs_per_day: int = Field(
+        default=1,
+        validation_alias="KORTNY_AMBIENT_FILE_BRIEFS_PER_DAY",
+    )
     consolidator_enabled: bool = Field(
         default=True,
         validation_alias="KORTNY_CONSOLIDATOR_ENABLED",
@@ -595,6 +623,40 @@ class Settings(BaseSettings):
         if value is not None and (value < 0 or value > 23):
             raise ValueError(
                 "KORTNY_WITNESS_QUIET_HOURS_START/END must be an hour 0-23 (UTC)"
+            )
+        return value
+
+    @field_validator("witness_channel_posts_per_week")
+    @classmethod
+    def _valid_witness_channel_posts_per_week(cls, value: int) -> int:
+        if value < 0 or value > 25:
+            raise ValueError(
+                "KORTNY_WITNESS_CHANNEL_POSTS_PER_WEEK must be between 0 and 25"
+            )
+        return value
+
+    @field_validator("witness_drafts_per_channel_per_day")
+    @classmethod
+    def _valid_witness_drafts_per_channel_per_day(cls, value: int) -> int:
+        if value < 0 or value > 25:
+            raise ValueError(
+                "KORTNY_WITNESS_DRAFTS_PER_CHANNEL_PER_DAY must be between 0 and 25"
+            )
+        return value
+
+    @field_validator("ambient_file_max_mb")
+    @classmethod
+    def _valid_ambient_file_max_mb(cls, value: int) -> int:
+        if value < 1 or value > 200:
+            raise ValueError("KORTNY_AMBIENT_FILE_MAX_MB must be between 1 and 200")
+        return value
+
+    @field_validator("ambient_file_briefs_per_day")
+    @classmethod
+    def _valid_ambient_file_briefs_per_day(cls, value: int) -> int:
+        if value < 0 or value > 20:
+            raise ValueError(
+                "KORTNY_AMBIENT_FILE_BRIEFS_PER_DAY must be between 0 and 20"
             )
         return value
 

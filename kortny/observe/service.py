@@ -16,6 +16,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from kortny.db.models import Installation, ObservationEvent, ObservePolicy
+from kortny.observe.ambient_files import summarize_event_files
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +98,16 @@ class ObserveService:
             )
 
         files = _event_files(event)
+        visibility_metadata: dict[str, Any] = {
+            "scope_type": "channel",
+            "scope_id": channel_id,
+            "channel_type": event.get("channel_type"),
+            "subtype": event.get("subtype"),
+            "file_count": len(files),
+            "policy_id": str(policy.id) if policy.id is not None else None,
+        }
+        if files:
+            visibility_metadata["files"] = summarize_event_files(files)
         observation = ObservationEvent(
             installation_id=installation.id,
             slack_team_id=slack_team_id,
@@ -109,14 +120,7 @@ class ObserveService:
             file_id=_first_file_id(files),
             raw_payload_checksum=_payload_checksum({"body": body, "event": event}),
             text_preview=_text_preview(event.get("text")),
-            visibility_metadata={
-                "scope_type": "channel",
-                "scope_id": channel_id,
-                "channel_type": event.get("channel_type"),
-                "subtype": event.get("subtype"),
-                "file_count": len(files),
-                "policy_id": str(policy.id) if policy.id is not None else None,
-            },
+            visibility_metadata=visibility_metadata,
         )
         try:
             with self.session.begin_nested():

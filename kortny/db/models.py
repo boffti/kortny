@@ -1795,7 +1795,9 @@ class WitnessDeliveryLog(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "decision in ('notify', 'question', 'draft', 'silent', 'digest')",
+            "decision in ('notify', 'question', 'draft', 'silent', 'digest', "
+            "'channel_sent', 'channel_deferred', 'draft_executed', "
+            "'ambient_file_brief')",
             name="ck_witness_delivery_log_decision",
         ),
         Index(

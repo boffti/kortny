@@ -519,17 +519,37 @@ def _seed_observation_events(
             if message.thread_slug is not None
             else None
         )
+        sim_file_id: str | None = None
+        if message.files:
+            raw_file_id = message.files[0].get("id")
+            if isinstance(raw_file_id, str):
+                sim_file_id = raw_file_id
+        visibility_metadata: dict[str, Any] = {
+            "scope_type": "channel",
+            "scope_id": channel_id,
+            "channel_type": "channel",
+            "subtype": None,
+            "file_count": len(message.files),
+            "policy_id": str(policy_id) if policy_id else None,
+            SIM_MARKER_KEY: True,
+            "sim_source": SIM_SOURCE,
+            "sim_pattern": message.pattern,
+            "persona_display_name": message.persona.display_name,
+            "persona_role": message.persona.role,
+        }
+        if message.files:
+            visibility_metadata["files"] = [dict(entry) for entry in message.files]
         session.add(
             ObservationEvent(
                 installation_id=installation.id,
                 slack_team_id=installation.slack_team_id,
                 channel_id=channel_id,
                 user_id=message.persona.user_id,
-                event_type="message",
+                event_type="file_share" if message.files else "message",
                 slack_event_id=event_id,
                 message_ts=message.message_ts,
                 thread_ts=thread_ts,
-                file_id=None,
+                file_id=sim_file_id,
                 raw_payload_checksum=_checksum(
                     {
                         "source": SIM_SOURCE,
@@ -539,19 +559,7 @@ def _seed_observation_events(
                     }
                 ),
                 text_preview=message.text,
-                visibility_metadata={
-                    "scope_type": "channel",
-                    "scope_id": channel_id,
-                    "channel_type": "channel",
-                    "subtype": None,
-                    "file_count": 0,
-                    "policy_id": str(policy_id) if policy_id else None,
-                    SIM_MARKER_KEY: True,
-                    "sim_source": SIM_SOURCE,
-                    "sim_pattern": message.pattern,
-                    "persona_display_name": message.persona.display_name,
-                    "persona_role": message.persona.role,
-                },
+                visibility_metadata=visibility_metadata,
                 observed_at=message.sent_at,
                 created_at=message.sent_at,
             )

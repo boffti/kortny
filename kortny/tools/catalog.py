@@ -770,6 +770,22 @@ def low_risk_native_write_tool_names() -> frozenset[str]:
     )
 
 
+def auto_approved_native_tool_names() -> frozenset[str]:
+    """Return native tools the catalog explicitly marks ``approval='none'``.
+
+    Includes auto-approved sandbox/code tools whose ``side_effect`` is
+    ``destructive`` but which run inside the isolated runner (code_exec,
+    sandbox_*). These stay auto-approved at every autonomy level and never enter
+    the HIG-223 ladder — the sandbox, not a human gate, is their safety boundary.
+    """
+
+    return frozenset(
+        name
+        for name, metadata in NATIVE_TOOL_METADATA.items()
+        if metadata.approval == "none"
+    )
+
+
 def native_tool_integration_map() -> dict[str, str]:
     """Return tool name to integration family mapping derived from metadata."""
 

@@ -30,6 +30,7 @@ from kortny.agent.thread_context import ThreadTranscriptMessage
 from kortny.approvals import TOOL_APPROVAL_REQUIRED_MESSAGE
 from kortny.db.models import (
     Artifact,
+    AutonomyPolicy,
     EncryptedSecret,
     Episode,
     Installation,
@@ -646,6 +647,9 @@ def test_coordinator_gates_sensitive_tool_before_invocation(
     db_session: Session,
 ) -> None:
     task = create_task(db_session, input_text="create an issue")
+    # HIG-223: an external create auto-approves at the balanced default, so pin
+    # this workspace to conservative to exercise the explicit approval gate.
+    _set_conservative_autonomy(db_session, task)
     tool = DangerousExternalTool()
     llm = FakeLLM(
         [
@@ -691,6 +695,7 @@ def test_coordinator_uses_prior_approval_for_same_tool_signature(
     db_session: Session,
 ) -> None:
     task = create_task(db_session, input_text="create an issue")
+    _set_conservative_autonomy(db_session, task)
     tool = DangerousExternalTool()
     tool_call = ToolCall(
         id="call-create",
@@ -2871,6 +2876,7 @@ def cleanup_database(session: Session) -> None:
         Task,
         ModelPricing,
         EncryptedSecret,
+        AutonomyPolicy,
         Installation,
     ):
         session.execute(delete(model))
@@ -2909,6 +2915,18 @@ def create_task(
         task.created_at = created_at
         session.flush()
     return task
+
+
+def _set_conservative_autonomy(session: Session, task: Task) -> None:
+    session.add(
+        AutonomyPolicy(
+            installation_id=task.installation_id,
+            scope_type="workspace",
+            scope_id=None,
+            level="conservative",
+        )
+    )
+    session.flush()
 
 
 def record_intent_decision(

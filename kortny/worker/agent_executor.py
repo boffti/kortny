@@ -996,6 +996,7 @@ class AgentTaskExecutor:
             task_service=task_service,
             system_prompt=self.system_prompt,
             tool_result_prompt_max_chars=settings.tool_result_prompt_max_chars,
+            autonomy_default_level=settings.autonomy_default_level,
             thread_transcript_provider=self._build_thread_transcript_provider(settings),
             guardrail_limits=ExecutionGuardrailLimits.for_depth(depth.response_depth),
             capability_overview=self._capability_overview,

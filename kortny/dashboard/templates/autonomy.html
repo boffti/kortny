@@ -1,0 +1,145 @@
+{% extends "base.html" %}
+
+{% block title %}Autonomy - Kortny Dashboard{% endblock %}
+
+{% block content %}
+  <section class="page-heading">
+    <div>
+      <h1>Autonomy</h1>
+      <p>How freely Kortny acts. Reads, sandbox runs, and local artifacts are always free. Conservative gates every write; balanced auto-runs external create/update with an audit trail and gates irreversible or outward actions; autonomous gates only irreversible and outward (delete, send, publish, deploy, payments) actions.</p>
+    </div>
+  </section>
+
+  {% if notice %}
+    <div class="notice notice-{{ notice_tone }}" role="status">{{ notice }}</div>
+  {% endif %}
+
+  {% if autonomy.installation_id is none %}
+    <section class="card">
+      <p class="empty-state">No installation is available yet. Autonomy policies appear once Kortny is connected to a workspace.</p>
+    </section>
+  {% else %}
+    <section class="card" aria-label="Workspace autonomy default">
+      <header>
+        <h2>Workspace default</h2>
+        <p>Applies to every channel without an override.
+          {% if autonomy.workspace_is_default %}
+            <span class="badge badge-neutral">using fallback ({{ autonomy.default_level }})</span>
+          {% endif %}
+        </p>
+      </header>
+      <form method="post" action="/autonomy/workspace" class="inline-form">
+        <input type="hidden" name="next" value="{{ autonomy_return_path }}">
+        <select class="input" name="level" aria-label="Workspace autonomy level">
+          {% for level in autonomy.levels %}
+            <option value="{{ level }}" {{ "selected" if level == autonomy.workspace_level else "" }}>{{ level }}</option>
+          {% endfor %}
+        </select>
+        <button type="submit" class="btn">Save default</button>
+      </form>
+    </section>
+
+    <section class="card" aria-label="Per-channel autonomy overrides">
+      <header>
+        <h2>Channel overrides</h2>
+        <p>A channel override beats the workspace default. Narrowest scope wins.</p>
+      </header>
+
+      <form method="post" action="/autonomy/channel" class="inline-form">
+        <input type="hidden" name="next" value="{{ autonomy_return_path }}">
+        <input type="text" name="channel_id" maxlength="64" placeholder="Channel ID (e.g. C0123ABC)" required>
+        <select class="input" name="level" aria-label="Channel autonomy level">
+          {% for level in autonomy.levels %}
+            <option value="{{ level }}">{{ level }}</option>
+          {% endfor %}
+        </select>
+        <button type="submit" class="btn">Add override</button>
+      </form>
+
+      {% if autonomy.channel_rows %}
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Channel</th>
+              <th>Level</th>
+              <th>Updated</th>
+              <th>By</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in autonomy.channel_rows %}
+              <tr>
+                <td><code>{{ row.channel_id }}</code></td>
+                <td>
+                  <form method="post" action="/autonomy/channel" class="inline-form">
+                    <input type="hidden" name="next" value="{{ autonomy_return_path }}">
+                    <input type="hidden" name="channel_id" value="{{ row.channel_id }}">
+                    <select class="input compact-input" name="level" aria-label="Level for {{ row.channel_id }}">
+                      {% for level in autonomy.levels %}
+                        <option value="{{ level }}" {{ "selected" if level == row.level else "" }}>{{ level }}</option>
+                      {% endfor %}
+                    </select>
+                    <button type="submit" class="btn-ghost">Save</button>
+                  </form>
+                </td>
+                <td>{{ row.updated_at.strftime('%Y-%m-%d %H:%M') }}</td>
+                <td>{{ row.updated_by_user_id or '—' }}</td>
+                <td>
+                  <form method="post" action="/autonomy/channel/clear" class="inline-form">
+                    <input type="hidden" name="next" value="{{ autonomy_return_path }}">
+                    <input type="hidden" name="channel_id" value="{{ row.channel_id }}">
+                    <button type="submit" class="btn-ghost">Remove</button>
+                  </form>
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% else %}
+        <p class="empty-state">No channel overrides. Every channel uses the workspace default.</p>
+      {% endif %}
+    </section>
+
+    <section class="card" aria-label="Recent autonomy decisions">
+      <header>
+        <h2>Audit trail</h2>
+        <p>Recent auto-approved Tier-1 (external create/update) calls. Reads and explicit-approval prompts are not listed here.</p>
+      </header>
+      {% if autonomy.audit_rows %}
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Channel</th>
+              <th>Tool</th>
+              <th>Risk</th>
+              <th>Level</th>
+              <th>Reasons</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in autonomy.audit_rows %}
+              <tr>
+                <td>{{ row.occurred_at.strftime('%Y-%m-%d %H:%M') }}</td>
+                <td><code>{{ row.channel_id }}</code></td>
+                <td><code>{{ row.tool }}</code></td>
+                <td><span class="badge badge-accent">{{ row.risk }}</span></td>
+                <td><span class="badge badge-neutral">{{ row.autonomy_level }}</span></td>
+                <td>
+                  {% for reason in row.reasons %}
+                    <span class="badge badge-neutral">{{ reason }}</span>
+                  {% else %}
+                    —
+                  {% endfor %}
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% else %}
+        <p class="empty-state">No auto-approved Tier-1 decisions recorded yet.</p>
+      {% endif %}
+    </section>
+  {% endif %}
+{% endblock %}

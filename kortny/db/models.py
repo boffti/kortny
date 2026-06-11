@@ -1217,6 +1217,62 @@ class ObservePolicy(Base):
     )
 
 
+class AutonomyPolicy(Base):
+    """Scoped autonomy-ladder level (HIG-223).
+
+    Resolution: channel override -> workspace default -> 'balanced'. Mirrors the
+    ObservePolicy scoping shape (unique per installation + scope_type + scope_id).
+    """
+
+    __tablename__ = "autonomy_policies"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    installation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("installations.id", ondelete="CASCADE"), nullable=False
+    )
+    scope_type: Mapped[str] = mapped_column(String, nullable=False)
+    scope_id: Mapped[str | None] = mapped_column(String)
+    level: Mapped[str] = mapped_column(String, nullable=False)
+    updated_by_user_id: Mapped[str | None] = mapped_column(String)
+    created_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "scope_type in ('workspace', 'channel')",
+            name="ck_autonomy_policies_scope_type",
+        ),
+        CheckConstraint(
+            "level in ('conservative', 'balanced', 'autonomous')",
+            name="ck_autonomy_policies_level",
+        ),
+        CheckConstraint(
+            "(scope_type = 'workspace' and scope_id is null) or "
+            "(scope_type = 'channel' and scope_id is not null)",
+            name="ck_autonomy_policies_scope_id",
+        ),
+        Index(
+            "idx_autonomy_policies_scope_unique",
+            "installation_id",
+            "scope_type",
+            text("coalesce(scope_id, '')"),
+            unique=True,
+        ),
+        Index(
+            "idx_autonomy_policies_lookup",
+            "installation_id",
+            "scope_type",
+            "scope_id",
+        ),
+    )
+
+
 class ObservationEvent(Base):
     __tablename__ = "observation_events"
 

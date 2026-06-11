@@ -1,4 +1,25 @@
-"""Human approval policy for sensitive tool calls."""
+"""Human approval policy for sensitive tool calls.
+
+Approval is the *policy* half of the HIG-223 autonomy ladder; risk
+classification (the *which tier* half) lives in :mod:`kortny.autonomy`. The
+``requirement_for`` seam takes the resolved autonomy level plus a
+:class:`~kortny.autonomy.RiskAssessment` and maps tier x level to a concrete
+approval requirement.
+
+Tier x level matrix (as implemented in ``_requirement_from_ladder``):
+
+    tier \\ level    conservative   balanced       autonomous
+    -----------------------------------------------------------
+    free             none           none           none
+    implicit         user           none+audit     none+audit
+    explicit         user           user           user
+
+Tier-1 (implicit) auto-approvals — balanced + autonomous — are recorded by the
+coordinator as ``tool_autonomy_decision`` audit events. Hard native gates
+(deploy_site, forget_fact, sandbox workbench session, admin untrusted skill
+scripts) are unconditional and stay gated at every level; sandbox code_exec
+stays auto-approved at every level.
+"""
 
 from __future__ import annotations
 
@@ -6,13 +27,17 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Protocol, TypeAlias
 
+from kortny.autonomy import AutonomyLevel, AutonomyTier, RiskAssessment
 from kortny.tools.catalog import (
+    ToolSideEffect,
+    auto_approved_native_tool_names,
     low_risk_native_write_tool_names,
     native_tool_names_by_approval,
     read_only_native_tool_names,
 )
 
 JsonObject: TypeAlias = dict[str, Any]
+ToolSideEffectLiteral: TypeAlias = ToolSideEffect
 
 
 class Tool(Protocol):
@@ -25,6 +50,7 @@ class Tool(Protocol):
 TOOL_APPROVAL_REQUIRED_MESSAGE = "tool_approval_required"
 TOOL_APPROVAL_WAITING_MESSAGE = "tool_approval_waiting"
 TOOL_APPROVAL_DECISION_MESSAGE = "tool_approval_decision"
+TOOL_AUTONOMY_DECISION_MESSAGE = "tool_autonomy_decision"
 TOOL_APPROVAL_PROMPT_PURPOSE = "tool_approval_request"
 TOOL_APPROVAL_REJECTED_PURPOSE = "tool_approval_rejected"
 TOOL_APPROVAL_REACTION_INSTRUCTION = (
@@ -42,11 +68,21 @@ class ApprovalScope(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class ToolApprovalRequirement:
-    """Approval policy output for one tool call."""
+    """Approval policy output for one tool call.
+
+    ``autonomy_tier`` / ``autonomy_level`` / ``autonomy_reasons`` carry the
+    HIG-223 ladder decision so the coordinator can emit a ``tool_autonomy_decision``
+    audit event on auto-approved Tier-1 calls. ``audit_autonomy`` marks the
+    requirements that should be audited (auto-approved implicit-tier calls).
+    """
 
     scope: ApprovalScope
     reason: str
     risk: str
+    autonomy_tier: AutonomyTier | None = None
+    autonomy_level: AutonomyLevel | None = None
+    autonomy_reasons: tuple[str, ...] = ()
+    audit_autonomy: bool = False
 
     @property
     def required(self) -> bool:
@@ -99,12 +135,23 @@ class ToolApprovalPolicy:
     before execution.
     """
 
-    def requirement_for(self, tool: Tool, args: JsonObject) -> ToolApprovalRequirement:
-        del args
+    def requirement_for(
+        self,
+        tool: Tool,
+        args: JsonObject,
+        *,
+        autonomy_level: AutonomyLevel = AutonomyLevel.balanced,
+        risk: RiskAssessment | None = None,
+    ) -> ToolApprovalRequirement:
         tool_name = tool.name.casefold()
+        if tool_name in READ_ONLY_NATIVE_TOOLS or tool_name in SELF_GATED_NATIVE_TOOLS:
+            return NO_APPROVAL_REQUIRED
+        # Native tools the catalog explicitly marks approval='none' (slack
+        # replies, schedule mutations, sandbox writes, and auto-approved
+        # sandbox/code execution) stay auto-approved at every level — their
+        # blast radius is scoped or sandboxed, so they never enter the ladder.
         if (
-            tool_name in READ_ONLY_NATIVE_TOOLS
-            or tool_name in SELF_GATED_NATIVE_TOOLS
+            tool_name in AUTO_APPROVED_NATIVE_TOOLS
             or tool_name in LOW_RISK_NATIVE_WRITE_TOOLS
         ):
             return NO_APPROVAL_REQUIRED
@@ -145,20 +192,72 @@ class ToolApprovalPolicy:
                 risk="sandboxed_code_execution",
                 reason=(f"{tool.name} can execute untrusted code in Kortny's sandbox."),
             )
-        if _tool_is_explicitly_read_only(tool):
-            return NO_APPROVAL_REQUIRED
-        risky_verbs = _risky_verbs(tool)
-        if risky_verbs:
-            verb = sorted(risky_verbs)[0]
+
+        # External / unclassified tools flow through the HIG-223 autonomy ladder.
+        assessment = risk if risk is not None else assess_tool_risk(tool, args)
+        return self._requirement_from_ladder(
+            tool=tool,
+            autonomy_level=autonomy_level,
+            assessment=assessment,
+        )
+
+    def _requirement_from_ladder(
+        self,
+        *,
+        tool: Tool,
+        autonomy_level: AutonomyLevel,
+        assessment: RiskAssessment,
+    ) -> ToolApprovalRequirement:
+        tier = assessment.tier
+        if tier is AutonomyTier.free:
+            return ToolApprovalRequirement(
+                scope=ApprovalScope.none,
+                risk="read_only",
+                reason=f"{tool.name} is read-only or generates a local artifact.",
+                autonomy_tier=tier,
+                autonomy_level=autonomy_level,
+                autonomy_reasons=assessment.reasons,
+                audit_autonomy=False,
+            )
+
+        if tier is AutonomyTier.explicit:
             return ToolApprovalRequirement(
                 scope=ApprovalScope.user,
-                risk="external_side_effect",
+                risk="irreversible_or_outward",
                 reason=(
-                    f"{tool.name} appears to perform a {verb} action against an "
-                    "external service."
+                    f"{tool.name} performs an irreversible, outward, or bulk "
+                    "action that needs your go-ahead."
                 ),
+                autonomy_tier=tier,
+                autonomy_level=autonomy_level,
+                autonomy_reasons=assessment.reasons,
+                audit_autonomy=False,
             )
-        return NO_APPROVAL_REQUIRED
+
+        # tier is implicit (external create/update).
+        if autonomy_level is AutonomyLevel.conservative:
+            return ToolApprovalRequirement(
+                scope=ApprovalScope.user,
+                risk="external_write",
+                reason=(
+                    f"{tool.name} writes to an external service; conservative "
+                    "autonomy gates every write."
+                ),
+                autonomy_tier=tier,
+                autonomy_level=autonomy_level,
+                autonomy_reasons=assessment.reasons,
+                audit_autonomy=False,
+            )
+        # balanced / autonomous auto-approve implicit writes, with an audit trail.
+        return ToolApprovalRequirement(
+            scope=ApprovalScope.none,
+            risk="external_write",
+            reason=f"{tool.name} writes to an external service (auto-approved).",
+            autonomy_tier=tier,
+            autonomy_level=autonomy_level,
+            autonomy_reasons=assessment.reasons,
+            audit_autonomy=True,
+        )
 
 
 NO_APPROVAL_REQUIRED = ToolApprovalRequirement(
@@ -170,6 +269,7 @@ NO_APPROVAL_REQUIRED = ToolApprovalRequirement(
 READ_ONLY_NATIVE_TOOLS = read_only_native_tool_names()
 SELF_GATED_NATIVE_TOOLS = native_tool_names_by_approval("self_gated")
 LOW_RISK_NATIVE_WRITE_TOOLS = low_risk_native_write_tool_names()
+AUTO_APPROVED_NATIVE_TOOLS = auto_approved_native_tool_names()
 USER_APPROVAL_NATIVE_TOOLS = native_tool_names_by_approval("user_approval")
 ADMIN_APPROVAL_NATIVE_TOOLS = native_tool_names_by_approval("admin_approval")
 SANDBOXED_CODE_NATIVE_TOOLS = frozenset({"code_exec"})
@@ -269,6 +369,66 @@ def approval_rejected_text(request: ToolApprovalRequest | None) -> str:
     if request is None:
         return "Okay, I won't run that action."
     return f"Okay, I won't run *{request.tool_name}*."
+
+
+def assess_tool_risk(tool: Tool, args: JsonObject) -> RiskAssessment:
+    """Build a :class:`RiskAssessment` for any tool, native or external.
+
+    Native tools use their catalog metadata directly. External Composio/MCP
+    tools synthesise a ``ToolMetadata`` from their surfaced hints — MCP
+    ``readOnlyHint``/``destructiveHint`` and Composio read-only tags / verb
+    slugs map onto ``side_effect`` (read/write/destructive) and capability
+    words — before running the deterministic classifier.
+    """
+
+    from kortny.autonomy import classify_tool_risk
+    from kortny.tools.catalog import NATIVE_TOOL_METADATA, ToolMetadata
+
+    native = NATIVE_TOOL_METADATA.get(tool.name)
+    if native is not None:
+        return classify_tool_risk(native, args)
+
+    side_effect, capabilities = _external_tool_risk_shape(tool)
+    synthetic = ToolMetadata(
+        name=tool.name,
+        namespace="external.tool",
+        category="External",
+        display_name=tool.name,
+        capabilities=capabilities,
+        side_effect=side_effect,
+    )
+    return classify_tool_risk(synthetic, args)
+
+
+def _external_tool_risk_shape(
+    tool: Tool,
+) -> tuple[ToolSideEffectLiteral, tuple[str, ...]]:
+    """Infer (side_effect, capability words) for an external tool's hints."""
+
+    inner = getattr(tool, "tool", None)
+
+    # MCP read-only / destructive annotation hints take precedence when present.
+    read_only_hint = getattr(inner, "read_only_hint", None)
+    destructive_hint = getattr(inner, "destructive_hint", None)
+    server_tool = getattr(tool, "server_tool", None)
+    if read_only_hint is None and server_tool is not None:
+        read_only_hint = getattr(server_tool, "read_only_hint", None)
+    if destructive_hint is None and server_tool is not None:
+        destructive_hint = getattr(server_tool, "destructive_hint", None)
+
+    verbs = _risky_verbs(tool)
+
+    if destructive_hint is True or (verbs & _DESTRUCTIVE_VERBS):
+        return "destructive", tuple(sorted(verbs)) or ("delete",)
+    if _tool_is_explicitly_read_only(tool) or read_only_hint is True:
+        return "read", ()
+    if verbs:
+        return "write", tuple(sorted(verbs))
+    # Unknown shape: conservative — unknown write-ish defaults to implicit.
+    return "write", ("unknown_external_write",)
+
+
+_DESTRUCTIVE_VERBS = frozenset({"delete", "remove", "archive", "cancel"})
 
 
 def _tool_is_explicitly_read_only(tool: Tool) -> bool:

@@ -121,7 +121,13 @@ class McpExternalToolProvider:
 
 
 def _tool_card(server: McpServer, tool: McpServerTool) -> ToolCard:
-    side_effect = "read" if tool.read_only_hint else "write"
+    # HIG-223: readOnlyHint -> read, destructiveHint -> destructive, else write.
+    if tool.read_only_hint:
+        side_effect = "read"
+    elif tool.destructive_hint:
+        side_effect = "destructive"
+    else:
+        side_effect = "write"
     capabilities = _capabilities(server, tool)
     return ToolCard(
         registry_name=mcp_runtime_tool_name(server.name, tool.name),

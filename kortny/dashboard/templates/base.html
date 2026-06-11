@@ -44,6 +44,10 @@
                 <svg class="nav-icon" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" x2="18" y1="20" y2="10"/><line x1="12" x2="12" y1="20" y2="4"/><line x1="6" x2="6" y1="20" y2="14"/></svg>
                 <span>Usage</span>
               </a>
+              <a class="nav-item {{ 'active' if active_page == 'autonomy' else '' }}" href="/autonomy" {% if active_page == 'autonomy' %}aria-current="page"{% endif %}>
+                <svg class="nav-icon" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10"/></svg>
+                <span>Autonomy</span>
+              </a>
               <a class="nav-item {{ 'active' if active_page == 'system' else '' }}" href="/system" {% if active_page == 'system' %}aria-current="page"{% endif %}>
                 <svg class="nav-icon" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" x2="4" y1="21" y2="14"/><line x1="4" x2="4" y1="10" y2="3"/><line x1="12" x2="12" y1="21" y2="12"/><line x1="12" x2="12" y1="8" y2="3"/><line x1="20" x2="20" y1="21" y2="16"/><line x1="20" x2="20" y1="12" y2="3"/><line x1="2" x2="6" y1="14" y2="14"/><line x1="10" x2="14" y1="8" y2="8"/><line x1="18" x2="22" y1="16" y2="16"/></svg>
                 <span>System</span>
@@ -170,6 +174,7 @@
               <a class="nav-item {{ 'active' if active_page == 'schedules' else '' }}" href="/schedules" {% if active_page == 'schedules' %}aria-current="page"{% endif %}>Schedules</a>
               <a class="nav-item {{ 'active' if active_page == 'playground' else '' }}" href="/playground" {% if active_page == 'playground' %}aria-current="page"{% endif %}>Playground</a>
               <a class="nav-item {{ 'active' if active_page == 'usage' else '' }}" href="/usage" {% if active_page == 'usage' %}aria-current="page"{% endif %}>Usage</a>
+              <a class="nav-item {{ 'active' if active_page == 'autonomy' else '' }}" href="/autonomy" {% if active_page == 'autonomy' %}aria-current="page"{% endif %}>Autonomy</a>
               <a class="nav-item {{ 'active' if active_page == 'system' else '' }}" href="/system" {% if active_page == 'system' %}aria-current="page"{% endif %}>System</a>
               <a class="nav-item {{ 'active' if active_page == 'users' else '' }}" href="/users" {% if active_page == 'users' %}aria-current="page"{% endif %}>Users</a>
               <a class="nav-item {{ 'active' if active_page == 'admin_users' else '' }}" href="/admin/users" {% if active_page == 'admin_users' %}aria-current="page"{% endif %}>Access</a>

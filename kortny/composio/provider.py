@@ -96,11 +96,11 @@ class ComposioExternalToolProvider:
                     toolkit_slug=connection.toolkit_slug,
                     limit=self.per_toolkit_limit,
                 )
-                allowed_tools = tuple(
-                    tool
-                    for tool in _merge_tools(raw_tools, fallback_tools)
-                    if _is_read_only(tool)
-                )
+                # HIG-223: surface write tools at all autonomy levels. The
+                # approval gate (kortny.approvals) — not this provider — decides
+                # whether a write needs explicit approval, so we no longer drop
+                # non-read-only tools here.
+                allowed_tools = _merge_tools(raw_tools, fallback_tools)
             except ComposioCatalogError as exc:
                 log_observation(
                     logger,
@@ -163,7 +163,7 @@ def _tool_card(entry: _ToolkitCatalog, tool: ComposioTool) -> ToolCard:
         display_name=f"{tool.name} via Composio",
         description=_card_description(toolkit_slug=toolkit_slug, tool=tool),
         capabilities=capabilities,
-        side_effect="read",
+        side_effect=_side_effect(tool),
         toolkit_slug=toolkit_slug,
         tool_slugs=(tool.slug,),
         tool_count=1,
@@ -176,10 +176,31 @@ def _tool_card(entry: _ToolkitCatalog, tool: ComposioTool) -> ToolCard:
 
 def _card_description(*, toolkit_slug: str, tool: ComposioTool) -> str:
     required = ", ".join(_required_fields(tool.input_parameters)) or "none"
+    access = "read-only" if _is_read_only(tool) else "write-capable"
     return (
-        f"Scoped read-only Composio tool from {toolkit_slug}: {tool.slug}. "
+        f"Scoped {access} Composio tool from {toolkit_slug}: {tool.slug}. "
         f"{tool.description or tool.name} Required fields: {required}."
     )
+
+
+def _side_effect(tool: ComposioTool) -> str:
+    """Map Composio verb/tag detection to a coarse side_effect for the card.
+
+    Read tools surface as ``read``; destructive verbs (delete/remove/...) as
+    ``destructive``; other write verbs as ``write``. The deterministic
+    classifier (kortny.autonomy) does the precise tiering at approval time.
+    """
+
+    if _is_read_only(tool):
+        return "read"
+    slug_parts = {
+        part.casefold()
+        for part in tool.slug.replace("-", "_").split("_")
+        if part.strip()
+    }
+    if slug_parts & DESTRUCTIVE_VERBS:
+        return "destructive"
+    return "write"
 
 
 def _capabilities(
@@ -269,3 +290,4 @@ WRITE_VERBS = frozenset(
         "write",
     }
 )
+DESTRUCTIVE_VERBS = frozenset({"delete", "remove", "archive", "cancel", "destroy"})

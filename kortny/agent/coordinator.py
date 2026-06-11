@@ -60,11 +60,16 @@ from kortny.agent.thread_context import ThreadTranscriptProvider
 from kortny.approvals import (
     TOOL_APPROVAL_DECISION_MESSAGE,
     TOOL_APPROVAL_REQUIRED_MESSAGE,
+    TOOL_AUTONOMY_DECISION_MESSAGE,
     ToolApprovalPolicy,
     ToolApprovalRequest,
     ToolApprovalRequired,
+    ToolApprovalRequirement,
     approval_key_for,
+    assess_tool_risk,
 )
+from kortny.autonomy import AutonomyLevel
+from kortny.autonomy_policy import AutonomyPolicyService
 from kortny.db.models import Task, TaskEvent, TaskEventType
 from kortny.embeddings import EmbeddingIndex
 from kortny.llm import ChatMessage, Completion, ToolCall
@@ -249,6 +254,7 @@ class AgentCoordinator:
         guardrail_limits: ExecutionGuardrailLimits | None = None,
         execution_planner: ExecutionPlanner | None = None,
         approval_policy: ToolApprovalPolicy | None = None,
+        autonomy_default_level: str = AutonomyLevel.balanced.value,
         tool_result_prompt_max_chars: int = DEFAULT_TOOL_RESULT_PROMPT_MAX_CHARS,
         capability_overview: CapabilityOverview | None = None,
         embedding_index: EmbeddingIndex | None = None,
@@ -279,6 +285,10 @@ class AgentCoordinator:
         self.max_turns = self.guardrail_limits.max_turns
         self.execution_planner = execution_planner or ExecutionPlanner()
         self.approval_policy = approval_policy or ToolApprovalPolicy()
+        self.autonomy_policy_service = AutonomyPolicyService(
+            session, default_level=autonomy_default_level
+        )
+        self._autonomy_level_cache: dict[uuid.UUID, AutonomyLevel] = {}
         self.tool_result_prompt_max_chars = tool_result_prompt_max_chars
         if context_engine is not None:
             self.context_engine = context_engine
@@ -1208,8 +1218,23 @@ class AgentCoordinator:
         step_id: str,
     ) -> None:
         tool = self.registry.get(tool_call.name)
-        requirement = self.approval_policy.requirement_for(tool, arguments)
+        autonomy_level = self._resolve_autonomy_level(task_obj)
+        assessment = assess_tool_risk(tool, arguments)
+        requirement = self.approval_policy.requirement_for(
+            tool,
+            arguments,
+            autonomy_level=autonomy_level,
+            risk=assessment,
+        )
         if not requirement.required:
+            if requirement.audit_autonomy:
+                self._record_autonomy_decision(
+                    task_obj=task_obj,
+                    tool_call=tool_call,
+                    requirement=requirement,
+                    turn=turn,
+                    step_id=step_id,
+                )
             return
 
         key = approval_key_for(tool_call.name, attempt.normalized_args_hash)
@@ -1280,6 +1305,63 @@ class AgentCoordinator:
             .limit(1)
         )
         return event is not None and event.payload.get("decision") == "approved"
+
+    def _resolve_autonomy_level(self, task: Task) -> AutonomyLevel:
+        cached = self._autonomy_level_cache.get(task.id)
+        if cached is not None:
+            return cached
+        level = self.autonomy_policy_service.resolve_level(
+            installation_id=task.installation_id,
+            channel_id=task.slack_channel_id,
+        )
+        self._autonomy_level_cache[task.id] = level
+        return level
+
+    def _record_autonomy_decision(
+        self,
+        *,
+        task_obj: Task,
+        tool_call: ToolCall,
+        requirement: ToolApprovalRequirement,
+        turn: int,
+        step_id: str,
+    ) -> None:
+        """Append the HIG-223 audit event for an auto-approved Tier-1 call."""
+
+        tier = (
+            requirement.autonomy_tier.value
+            if requirement.autonomy_tier is not None
+            else None
+        )
+        level = (
+            requirement.autonomy_level.value
+            if requirement.autonomy_level is not None
+            else None
+        )
+        self.task_service.append_event(
+            task_obj,
+            TaskEventType.log,
+            {
+                "message": TOOL_AUTONOMY_DECISION_MESSAGE,
+                "tool": tool_call.name,
+                "risk": tier,
+                "autonomy_level": level,
+                "reasons": list(requirement.autonomy_reasons),
+                "turn": turn,
+                "step_id": step_id,
+            },
+        )
+        log_observation(
+            logger,
+            "tool_autonomy_decision",
+            task=task_obj,
+            tool=tool_call.name,
+            risk=tier,
+            autonomy_level=level,
+            reasons=list(requirement.autonomy_reasons),
+            turn=turn,
+            step_id=step_id,
+        )
 
     def _record_recoverable_failure(
         self,

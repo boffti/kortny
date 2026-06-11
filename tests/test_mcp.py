@@ -25,6 +25,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from kortny.approvals import ApprovalScope, ToolApprovalPolicy
+from kortny.autonomy import AutonomyLevel, AutonomyTier
 from kortny.db.models import Installation, McpServer, McpServerTool, Task, TaskEvent
 from kortny.db.session import make_engine, make_session_factory, normalize_database_url
 from kortny.mcp.client import (
@@ -333,7 +334,10 @@ class TestMcpExecuteTool:
         requirement = policy.requirement_for(read_tool, {})
         assert requirement.scope is ApprovalScope.none
 
-    def test_write_tool_requires_approval(self) -> None:
+    def test_write_tool_auto_audits_at_balanced(self) -> None:
+        # HIG-223: a non-destructive MCP write maps to the implicit tier, so the
+        # balanced default auto-approves it with an audit trail instead of
+        # gating. Conservative still gates it (see classifier/approval tests).
         policy = ToolApprovalPolicy()
         write_tool = self._tool(
             tool_name="write_note",
@@ -344,10 +348,48 @@ class TestMcpExecuteTool:
                 "required": ["text"],
             },
         )
-        # "write" verb in the name triggers the external-tool risky-verb path.
         requirement = policy.requirement_for(write_tool, {})
+        assert requirement.required is False
+        assert requirement.scope is ApprovalScope.none
+        assert requirement.audit_autonomy is True
+        assert requirement.autonomy_tier is AutonomyTier.implicit
+
+    def test_write_tool_gated_at_conservative(self) -> None:
+        policy = ToolApprovalPolicy()
+        write_tool = self._tool(
+            tool_name="write_note",
+            read_only=None,
+            schema={
+                "type": "object",
+                "properties": {"text": {"type": "string"}},
+                "required": ["text"],
+            },
+        )
+        requirement = policy.requirement_for(
+            write_tool, {}, autonomy_level=AutonomyLevel.conservative
+        )
         assert requirement.required is True
         assert requirement.scope is ApprovalScope.user
+
+    def test_destructive_hint_requires_approval_every_level(self) -> None:
+        policy = ToolApprovalPolicy()
+        delete_tool = self._tool(
+            tool_name="delete_note",
+            read_only=None,
+            schema={
+                "type": "object",
+                "properties": {"id": {"type": "string"}},
+                "required": ["id"],
+            },
+        )
+        # destructive_hint=True on the server tool forces the explicit tier.
+        delete_tool.server_tool.destructive_hint = True
+        for level in AutonomyLevel:
+            requirement = policy.requirement_for(
+                delete_tool, {"id": "n1"}, autonomy_level=level
+            )
+            assert requirement.required is True
+            assert requirement.scope is ApprovalScope.user
 
     def test_big_payload_is_bounded(self) -> None:
         server = _stdio_server()

@@ -166,6 +166,10 @@ class Settings(BaseSettings):
         default=True,
         validation_alias="KORTNY_WITNESS_ENABLED",
     )
+    autonomy_default_level: str = Field(
+        default="balanced",
+        validation_alias="KORTNY_AUTONOMY_DEFAULT_LEVEL",
+    )
     app_home_enabled: bool = Field(
         default=True,
         validation_alias="KORTNY_APP_HOME_ENABLED",

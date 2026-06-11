@@ -50,6 +50,12 @@ from kortny.dashboard.auth import (
     SlackOpenIDClient,
     upsert_dashboard_user,
 )
+from kortny.dashboard.autonomy_actions import (
+    clear_channel_level,
+    set_channel_level,
+    set_workspace_level,
+)
+from kortny.dashboard.autonomy_data import get_autonomy_dashboard
 from kortny.dashboard.data import (
     DEFAULT_PAGE_SIZE,
     MAX_PAGE_SIZE,
@@ -3450,6 +3456,116 @@ def register_routes(app: FastAPI) -> None:
                 "system": system_health,
             },
         )
+
+    def _autonomy_default_level() -> str:
+        runtime_settings, _ = _load_runtime_settings()
+        if runtime_settings is None:
+            return "balanced"
+        return runtime_settings.autonomy_default_level
+
+    @app.get("/autonomy", response_class=HTMLResponse)
+    def autonomy(
+        request: Request,
+        principal: Annotated[DashboardPrincipal, Depends(require_admin)],
+        session: Annotated[Session, Depends(get_session)],
+        notice: Annotated[str | None, Query()] = None,
+        notice_tone: Annotated[str, Query()] = "success",
+    ) -> Response:
+        installation_id = _dashboard_installation_id(session, principal)
+        dashboard = get_autonomy_dashboard(
+            session,
+            installation_id=installation_id,
+            default_level=_autonomy_default_level(),
+        )
+        return templates.TemplateResponse(
+            request=request,
+            name="autonomy.html",
+            context={
+                **_dashboard_context(principal, active_page="autonomy"),
+                "autonomy": dashboard,
+                "autonomy_return_path": _request_path(request),
+                "notice": notice,
+                "notice_tone": _notice_tone(notice_tone),
+            },
+        )
+
+    @app.post("/autonomy/workspace")
+    async def autonomy_set_workspace(
+        request: Request,
+        principal: Annotated[DashboardPrincipal, Depends(require_admin)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> Response:
+        form = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
+        next_path = _safe_next_path(form.get("next", ["/autonomy"])[0])
+        installation_id = _dashboard_installation_id(session, principal)
+        if installation_id is None:
+            return _redirect_with_notice(
+                next_path, "No installation is available.", tone="danger"
+            )
+        try:
+            set_workspace_level(
+                session,
+                installation_id=installation_id,
+                level=form.get("level", [""])[0],
+                by_user_id=dashboard_actor(principal.display_name),
+            )
+        except ValueError as exc:
+            return _redirect_with_notice(next_path, str(exc), tone="danger")
+        session.commit()
+        return _redirect_with_notice(next_path, "Workspace autonomy level updated.")
+
+    @app.post("/autonomy/channel")
+    async def autonomy_set_channel(
+        request: Request,
+        principal: Annotated[DashboardPrincipal, Depends(require_admin)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> Response:
+        form = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
+        next_path = _safe_next_path(form.get("next", ["/autonomy"])[0])
+        installation_id = _dashboard_installation_id(session, principal)
+        if installation_id is None:
+            return _redirect_with_notice(
+                next_path, "No installation is available.", tone="danger"
+            )
+        try:
+            set_channel_level(
+                session,
+                installation_id=installation_id,
+                channel_id=form.get("channel_id", [""])[0],
+                level=form.get("level", [""])[0],
+                by_user_id=dashboard_actor(principal.display_name),
+            )
+        except ValueError as exc:
+            return _redirect_with_notice(next_path, str(exc), tone="danger")
+        session.commit()
+        return _redirect_with_notice(next_path, "Channel autonomy override saved.")
+
+    @app.post("/autonomy/channel/clear")
+    async def autonomy_clear_channel(
+        request: Request,
+        principal: Annotated[DashboardPrincipal, Depends(require_admin)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> Response:
+        form = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
+        next_path = _safe_next_path(form.get("next", ["/autonomy"])[0])
+        installation_id = _dashboard_installation_id(session, principal)
+        if installation_id is None:
+            return _redirect_with_notice(
+                next_path, "No installation is available.", tone="danger"
+            )
+        try:
+            removed = clear_channel_level(
+                session,
+                installation_id=installation_id,
+                channel_id=form.get("channel_id", [""])[0],
+            )
+        except ValueError as exc:
+            return _redirect_with_notice(next_path, str(exc), tone="danger")
+        session.commit()
+        notice = (
+            "Channel override removed." if removed else "No channel override to remove."
+        )
+        return _redirect_with_notice(next_path, notice, tone="neutral")
 
     @app.get("/schedules", response_class=HTMLResponse)
     def schedules(

@@ -130,8 +130,7 @@ Beware: pydantic-settings fills any field you don't pass explicitly from `.env`.
 - `migrate` — runs `alembic upgrade head` before app/worker boot
 - `app` — Slack Bolt event handler (`kortny.slack`)
 - `worker` — task executor (`kortny.worker`)
-- `scheduler` — schedule materializer (`kortny.scheduler`)
-- `witness` — autopilot/opportunity worker (`kortny.witness`)
+- `ambient` — merged poller service (`kortny.ambient`): hosts the scheduler materializer, witness runner, and consolidator worker as supervised threads in one process, with per-loop crash isolation + exponential restart backoff (HIG-234). Replaces the former `scheduler` / `witness` / `consolidator` services. Advisory locks make multiple instances safe, so the split entrypoints (`python -m kortny.scheduler` / `kortny.witness` / `kortny.consolidator`) still run individually as the scale-out path — peel any loop back into its own container with no double-work.
 - `dashboard` — FastAPI operator UI (`kortny.dashboard.app`, port 8080)
 - `sandbox-docker-proxy` + `sandbox-runner` — code-execution sandbox (runner on 8090; containers reach Docker only through the socket proxy)
 - `temporal` + `temporal-worker` — optional durable workflow engine (profile: `temporal`)

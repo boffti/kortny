@@ -124,18 +124,24 @@ Worth knowing:
 <details>
 <summary><b>What <code>docker compose up</code> starts</b></summary>
 
-| Service | What it does |
-|---|---|
-| `postgres` | All state: tasks, events, memory, costs |
-| `migrate` | Runs Alembic migrations before anything boots |
-| `app` | Slack Socket Mode ingress (Bolt) |
-| `worker` | Task executor — the LLM + tool loop |
-| `scheduler` | Materializes scheduled tasks |
-| `witness` | Proactive opportunity scanner (bounded autopilot) |
-| `dashboard` | Operator UI at `localhost:8080` |
-| `sandbox-runner` + `sandbox-docker-proxy` | Isolated code execution |
+The default stack is **7 long-running containers + one-shot `migrate`** — every line is something you can see, name, and reason about (no black box):
 
-Optional profiles: `--profile observability` (Phoenix trace UI at `localhost:6006`), `--profile temporal` (experimental durable workflow backend, UI at `localhost:8233`).
+| Service | What it does | What breaks without it | Profile |
+|---|---|---|---|
+| `postgres` | All state: tasks, events, memory, costs, schedules | Everything — the whole system | default |
+| `migrate` | Runs Alembic migrations, then exits (one-shot) | Schema drifts; app/worker boot against a stale DB | default |
+| `app` | Slack Socket Mode ingress (Bolt) | Slack events never become tasks | default |
+| `worker` | Task executor — the LLM + tool loop | Tasks queue but never run | default |
+| `ambient` | Supervises three near-idle pollers in one process: **scheduler** (materializes due schedules), **witness** (proactive opportunity scanner), **consolidator** (sleep-time memory/graph consolidation) | Scheduled tasks stop firing, no proactive suggestions, memory stops consolidating into the graph — the request path still works | default |
+| `dashboard` | Operator UI at `localhost:8080` — tasks, traces, costs, memory, schedules, sandbox runs | No web console (system keeps running headless) | default |
+| `sandbox-runner` | HTTP service that launches throwaway code-exec containers | Code execution / the sandboxed coding workbench is unavailable | default |
+| `sandbox-docker-proxy` | Restricted Docker-socket proxy the runner reaches the Docker API through | `sandbox-runner` can't start containers | default |
+| `phoenix` | Local OTEL trace UI at `localhost:6006` | No local trace UI (tracing still exports if an endpoint is set) | `observability` |
+| `temporal` + `temporal-worker` | Experimental durable workflow backend (UI at `localhost:8233`) | Falls back to the inline worker (the default) | `temporal` |
+
+Sandbox code execution is **on by default** — it's the flagship coworker capability, not a profile add-on. To opt out (e.g. a host that doesn't want code exec), set `KORTNY_SANDBOX_EXECUTION_ENABLED=false` or drop the two `sandbox-*` services via a `compose.override.yaml`.
+
+The three pollers used to be three separate containers; they're now supervised threads inside one `ambient` process with per-loop crash isolation and restart backoff. Each loop still guards its work with a Postgres advisory lock, so the split entrypoints (`python -m kortny.scheduler` / `kortny.witness` / `kortny.consolidator`) remain the scale-out path — run any of them as its own container to peel a loop back out, no double-work.
 
 Witness is on by default and intentionally bounded: it only auto-starts non-interruptive, read-only proactive tasks (one per tick), requires channel membership before posting, and never DMs unless `KORTNY_WITNESS_DELIVER_PRIVATE=true`.
 
@@ -194,8 +200,7 @@ flowchart LR
         APP["Slack ingress<br/>(Bolt, Socket Mode)"]
         PG[("Postgres<br/>tasks · memory · costs")]
         WORKER["Worker<br/>LLM + tool loop"]
-        SCHED["Scheduler"]
-        WITNESS["Witness<br/>proactive scanner"]
+        AMBIENT["Ambient<br/>scheduler · witness · consolidator"]
         DASH["Dashboard :8080<br/>tasks · traces · costs · previews"]
         RUNNER["Sandbox runner"]
         SBX["Hardened sandbox containers<br/>no network · caps dropped"]
@@ -203,8 +208,7 @@ flowchart LR
     SLACK(("Slack")) <--> APP
     APP --> PG
     WORKER --> PG
-    SCHED --> PG
-    WITNESS --> PG
+    AMBIENT --> PG
     DASH --> PG
     WORKER --> RUNNER --> SBX
     WORKER -.->|"inference (your keys)"| LLM(("LLM provider"))

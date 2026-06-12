@@ -126,6 +126,8 @@ def test_settings_loads_required_environment(monkeypatch: pytest.MonkeyPatch) ->
     assert settings.witness_autopilot_enabled is True
     assert settings.witness_autopilot_limit == 1
     assert settings.witness_autopilot_min_confidence == Decimal("0.600")
+    assert settings.witness_recurring_min_reinforcements == 3
+    assert settings.witness_recurring_min_span_days == 14
     assert settings.composio_api_key == "composio-key"
     assert settings.composio_catalog_enabled is True
     assert settings.composio_catalog_limit == 60
@@ -182,6 +184,8 @@ def test_settings_loads_optional_environment(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setenv("KORTNY_WITNESS_AUTOPILOT_ENABLED", "false")
     monkeypatch.setenv("KORTNY_WITNESS_AUTOPILOT_LIMIT", "3")
     monkeypatch.setenv("KORTNY_WITNESS_AUTOPILOT_MIN_CONFIDENCE", "0.725")
+    monkeypatch.setenv("KORTNY_WITNESS_RECURRING_MIN_REINFORCEMENTS", "4")
+    monkeypatch.setenv("KORTNY_WITNESS_RECURRING_MIN_SPAN_DAYS", "21")
     monkeypatch.setenv("OBSERVABILITY_CAPTURE_CONTENT", "summaries")
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://otel:4318")
     monkeypatch.setenv(
@@ -237,6 +241,8 @@ def test_settings_loads_optional_environment(monkeypatch: pytest.MonkeyPatch) ->
     assert settings.witness_autopilot_enabled is False
     assert settings.witness_autopilot_limit == 3
     assert settings.witness_autopilot_min_confidence == Decimal("0.725")
+    assert settings.witness_recurring_min_reinforcements == 4
+    assert settings.witness_recurring_min_span_days == 21
     assert settings.observability_capture_content == "summaries"
     assert settings.otel_exporter_otlp_endpoint == "http://otel:4318"
     assert (

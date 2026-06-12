@@ -3578,6 +3578,8 @@ def test_dashboard_witness_page_shows_candidates_and_filters(
         confidence_score=Decimal("0.770"),
         confidence_reason="Channel assessment found recurring report quality issues.",
         status="candidate",
+        reinforcement_count=3,
+        first_observed_at=datetime(2026, 5, 28, tzinfo=UTC),
         metadata_json={"channel_name": "ops-desk"},
     )
     other_candidate = WitnessOpportunityCandidate(
@@ -3610,6 +3612,9 @@ def test_dashboard_witness_page_shows_candidates_and_filters(
     assert "Opportunity Candidates" in response.text
     assert "Data quality watch: flag unresolved placeholders" in response.text
     assert "77% confidence" in response.text
+    # HIG-197: reinforcement count + first-observed date are visible on the row.
+    assert "Observed 3x" in response.text
+    assert "First seen" in response.text
     assert "#ops-desk" in response.text
     assert "Aneesh Melkot" in response.text
     assert "Report had {TICKER} placeholders" in response.text

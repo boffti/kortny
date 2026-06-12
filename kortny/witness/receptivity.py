@@ -29,9 +29,16 @@ GLOBAL_COOLDOWN_FACTOR = 0.5
 ACCEPTANCE_BOOST_FACTOR = 1.15
 ACCEPTANCE_WINDOW_DAYS = 30
 
-CONFIDENCE_REINFORCEMENT_BASE = Decimal("0.6")
-CONFIDENCE_REINFORCEMENT_STEP = Decimal("0.1")
-CONFIDENCE_EVIDENCE_STEP = Decimal("0.05")
+# HIG-197 composed-confidence multiplier. The floor is 1.0 (a single-scan
+# candidate keeps its raw LLM self-report unchanged); repeated observation and a
+# widening span earn a modest, saturating boost. Evidence amplifies the
+# reinforcement/span signal rather than acting on its own, so f(1, e, 0) == 1.0
+# for every evidence count e (a single scan can never claim a track record).
+CONFIDENCE_BOOST_BASELINE = Decimal("1.0")
+CONFIDENCE_REINFORCEMENT_STEP = Decimal("0.04")  # per extra observation
+CONFIDENCE_SPAN_STEP = Decimal("0.01")  # per day of observation span
+CONFIDENCE_EVIDENCE_AMPLIFIER = Decimal("0.05")  # per evidence item, on the boost
+CONFIDENCE_MAX_BOOST = Decimal("0.2")  # saturating cap on the boost
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,20 +116,33 @@ def effective_confidence(
     *,
     reinforcement_count: int,
     evidence_count: int,
+    span_days: int = 0,
 ) -> Decimal:
     """Deterministic delivery-side confidence composition (HIG-197 Phase 1).
 
-    ``llm_confidence * min(1.0, 0.6 + 0.1*reinforcement + 0.05*evidence)``,
-    capped at 1.0. Replaces raw LLM self-report at delivery decisions only;
-    extraction storage keeps the raw score.
+    ``final = llm_confidence * f(reinforcement_count, evidence_count, span_days)``
+    where ``f`` is a bounded multiplier with a 1.0 baseline:
+
+    - ``boost = (0.04*(reinforcement-1) + 0.01*span_days) * (1 + 0.05*evidence)``
+    - ``f = 1.0 + min(boost, 0.2)`` (boost clamped to >= 0, capped at +0.2)
+
+    The boost is driven by repeated observation and span; evidence only
+    *amplifies* an existing reinforcement/span signal. So ``f(1, e, 0) == 1.0``
+    for every evidence count ``e`` — a single-scan candidate keeps its raw LLM
+    score and never gets a track-record boost. ``f`` is monotonic in each input
+    and ``final`` never exceeds 1.0. Replaces raw LLM self-report at delivery
+    decisions only; extraction storage keeps the raw score.
     """
 
-    multiplier = min(
-        Decimal("1.0"),
-        CONFIDENCE_REINFORCEMENT_BASE
-        + CONFIDENCE_REINFORCEMENT_STEP * max(reinforcement_count, 0)
-        + CONFIDENCE_EVIDENCE_STEP * max(evidence_count, 0),
-    )
+    reinforcement = max(reinforcement_count, 0)
+    evidence = max(evidence_count, 0)
+    span = max(span_days, 0)
+    raw_boost = (
+        CONFIDENCE_REINFORCEMENT_STEP * max(reinforcement - 1, 0)
+        + CONFIDENCE_SPAN_STEP * span
+    ) * (Decimal("1.0") + CONFIDENCE_EVIDENCE_AMPLIFIER * evidence)
+    boost = min(CONFIDENCE_MAX_BOOST, max(Decimal("0.0"), raw_boost))
+    multiplier = CONFIDENCE_BOOST_BASELINE + boost
     composed = llm_confidence * multiplier
     if composed < 0:
         return Decimal("0.000")

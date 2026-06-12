@@ -1845,6 +1845,10 @@ class WitnessOpportunityCandidate(Base):
             "(receptivity_score >= 0 and receptivity_score <= 1)",
             name="ck_witness_opportunity_candidates_receptivity",
         ),
+        CheckConstraint(
+            "reinforcement_count >= 0",
+            name="ck_witness_opportunity_candidates_reinforcement_count",
+        ),
         Index(
             "idx_witness_opportunity_candidates_unique",
             "installation_id",

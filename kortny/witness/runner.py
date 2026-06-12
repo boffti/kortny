@@ -72,8 +72,10 @@ from kortny.witness.lifecycle import (
 )
 from kortny.witness.opportunities import (
     WITNESS_OPPORTUNITY_CANDIDATES_PROJECTED_MESSAGE,
+    RecurrenceGate,
     WitnessOpportunityService,
     candidate_delivery_decision,
+    candidate_is_recurring,
     candidate_thread_ts,
     recurrence_evidence_line,
     recurrence_is_proven,
@@ -610,16 +612,21 @@ class WitnessRunner:
         )
         outcomes: list[WitnessDeliveryOutcome] = []
         deliverable: list[tuple[float, str, WitnessOpportunityCandidate]] = []
+        gate = self._recurrence_gate
         for candidate in candidates:
             evidence_count = len(candidate.evidence_json or [])
             confidence = effective_confidence(
                 candidate.confidence_score or Decimal("0.500"),
                 reinforcement_count=candidate.reinforcement_count or 1,
                 evidence_count=evidence_count,
+                span_days=_candidate_span_days(candidate, now=now),
             )
             receptivity_value = receptivity(events, candidate.candidate_type, now)
-            if candidate.automation_kind == "recurring" and not recurrence_is_proven(
-                candidate, now=now
+            if candidate_is_recurring(candidate) and not recurrence_is_proven(
+                candidate,
+                now=now,
+                min_reinforcements=gate.min_reinforcements,
+                min_span=gate.min_span,
             ):
                 receptivity_value *= UNPROVEN_RECURRENCE_RECEPTIVITY_FACTOR
             score = float(confidence) * receptivity_value
@@ -683,6 +690,7 @@ class WitnessRunner:
         text = _digest_text(
             [(decision, candidate) for _score, decision, candidate in included],
             now=now,
+            gate=gate,
         )
         window_index = int(now.timestamp()) // max(
             int(digest_interval.total_seconds()), 1
@@ -896,16 +904,21 @@ class WitnessRunner:
         )
         outcomes: list[WitnessDeliveryOutcome] = []
         deliverable: list[tuple[float, str, WitnessOpportunityCandidate]] = []
+        gate = self._recurrence_gate
         for candidate in candidates:
             evidence_count = len(candidate.evidence_json or [])
             confidence = effective_confidence(
                 candidate.confidence_score or Decimal("0.500"),
                 reinforcement_count=candidate.reinforcement_count or 1,
                 evidence_count=evidence_count,
+                span_days=_candidate_span_days(candidate, now=now),
             )
             receptivity_value = receptivity(events, candidate.candidate_type, now)
-            if candidate.automation_kind == "recurring" and not recurrence_is_proven(
-                candidate, now=now
+            if candidate_is_recurring(candidate) and not recurrence_is_proven(
+                candidate,
+                now=now,
+                min_reinforcements=gate.min_reinforcements,
+                min_span=gate.min_span,
             ):
                 receptivity_value *= UNPROVEN_RECURRENCE_RECEPTIVITY_FACTOR
             score = float(confidence) * receptivity_value
@@ -1006,7 +1019,9 @@ class WitnessRunner:
             else None
         )
         thread_ts = candidate_thread_ts(candidate, source_task=source_task)
-        text = _channel_suggestion_text(candidate, decision=decision, now=now)
+        text = _channel_suggestion_text(
+            candidate, decision=decision, now=now, gate=self._recurrence_gate
+        )
         blocks = [
             blockkit.markdown_block(text),
             _candidate_actions_block(candidate),
@@ -1448,6 +1463,18 @@ class WitnessRunner:
             self.settings = load_settings()
         return self.settings
 
+    @property
+    def _recurrence_gate(self) -> RecurrenceGate:
+        # Avoid forcing a full settings load (which needs a populated env) just
+        # to read the gate thresholds: fall back to the module defaults when no
+        # Settings were injected.
+        if self.settings is None:
+            return RecurrenceGate()
+        return RecurrenceGate.from_values(
+            min_reinforcements=self.settings.witness_recurring_min_reinforcements,
+            min_span_days=self.settings.witness_recurring_min_span_days,
+        )
+
     def _try_advisory_lock(self) -> bool:
         return bool(
             self.session.scalar(
@@ -1637,6 +1664,7 @@ def _digest_text(
     items: list[tuple[str, WitnessOpportunityCandidate]],
     *,
     now: datetime,
+    gate: RecurrenceGate | None = None,
 ) -> str:
     count = len(items)
     plural = "s" if count != 1 else ""
@@ -1644,7 +1672,7 @@ def _digest_text(
     for index, (decision, candidate) in enumerate(items, start=1):
         body = candidate.suggested_message or candidate.summary
         lines.append(f"{index}. {candidate.title} - {body}")
-        evidence = _digest_evidence_line(candidate, now=now)
+        evidence = _digest_evidence_line(candidate, now=now, gate=gate)
         if evidence:
             lines.append(f"   Evidence: {evidence}")
         lines.append(f"   {_digest_action_line(decision, candidate)}")
@@ -1657,6 +1685,7 @@ def _channel_suggestion_text(
     *,
     decision: str,
     now: datetime,
+    gate: RecurrenceGate | None = None,
 ) -> str:
     """Threaded, low-key, evidence-first channel suggestion copy (HIG-198)."""
 
@@ -1665,7 +1694,7 @@ def _channel_suggestion_text(
         or f"I noticed something that might be worth a look: {candidate.summary}"
     )
     lines = [noticed]
-    evidence = _digest_evidence_line(candidate, now=now)
+    evidence = _digest_evidence_line(candidate, now=now, gate=gate)
     if evidence:
         lines.append(f"Evidence: {evidence}")
     proposed = candidate.deliverable or candidate.suggested_action
@@ -1681,12 +1710,34 @@ def _channel_suggestion_text(
     return normalize_user_facing_text(text[:WITNESS_CHANNEL_SUGGESTION_MAX_CHARS])
 
 
+def _candidate_span_days(
+    candidate: WitnessOpportunityCandidate,
+    *,
+    now: datetime,
+) -> int:
+    """Whole days between first observation and ``now`` (>= 0)."""
+
+    first_observed = candidate.first_observed_at or candidate.created_at
+    if first_observed is None:
+        return 0
+    if first_observed.tzinfo is None:
+        first_observed = first_observed.replace(tzinfo=UTC)
+    return max((now - first_observed).days, 0)
+
+
 def _digest_evidence_line(
     candidate: WitnessOpportunityCandidate,
     *,
     now: datetime,
+    gate: RecurrenceGate | None = None,
 ) -> str | None:
-    recurrence = recurrence_evidence_line(candidate, now=now)
+    gate = gate or RecurrenceGate()
+    recurrence = recurrence_evidence_line(
+        candidate,
+        now=now,
+        min_reinforcements=gate.min_reinforcements,
+        min_span=gate.min_span,
+    )
     if recurrence is not None:
         return recurrence
     evidence = candidate.evidence_json or []

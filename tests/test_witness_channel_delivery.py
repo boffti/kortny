@@ -912,16 +912,17 @@ def test_reaction_dismiss_records_feedback_for_receptivity(
     assert last["reason"] == "slack_reaction"
 
     # The dismissal now feeds channel receptivity: the next candidate of the
-    # same type scores lower and stays silent. Without the fresh dismissal
-    # this candidate scores 0.9 * 0.75 = 0.675 >= 0.55; with the dismissal
-    # penalty (x~0.6) it lands below the threshold. The dismissal feedback
-    # entry is stamped with wall-clock time, so score at wall-clock now.
+    # same type scores lower and stays silent. A single-scan candidate keeps its
+    # raw confidence (f(1, e, 0)=1.0), so without the fresh dismissal it scores
+    # 0.8 >= 0.55; the dismissal penalty (x~0.6) lands it below the threshold
+    # (0.8 * 0.6 = 0.48). The dismissal feedback entry is stamped with
+    # wall-clock time, so score at wall-clock now.
     follow_up = make_channel_candidate(
         db_session,
         installation.id,
         title="Follow up same type",
         source_task_id=source_task.id,
-        confidence="0.900",
+        confidence="0.800",
         evidence_count=1,
         reinforcement_count=1,
     )

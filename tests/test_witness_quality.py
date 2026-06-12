@@ -360,12 +360,12 @@ def test_recurrence_evidence_line_requires_count_and_span(
         automation_kind="recurring",
         cadence_suggestion="every weekday",
         reinforcement_count=3,
-        first_observed_at=NOW - timedelta(days=8),
+        first_observed_at=NOW - timedelta(days=15),
     )
     line = recurrence_evidence_line(proven, now=NOW)
     assert line is not None
-    assert "I've seen this 3 times since" in line
-    assert (NOW - timedelta(days=8)).date().isoformat() in line
+    assert "I've noticed this 3 times since" in line
+    assert (NOW - timedelta(days=15)).date().isoformat() in line
     assert recurrence_is_proven(proven, now=NOW) is True
 
     # Failure 1: enough span, too few observations.
@@ -375,54 +375,109 @@ def test_recurrence_evidence_line_requires_count_and_span(
         title="Low count recurrence",
         automation_kind="recurring",
         reinforcement_count=2,
-        first_observed_at=NOW - timedelta(days=8),
+        first_observed_at=NOW - timedelta(days=15),
     )
     assert recurrence_evidence_line(low_count, now=NOW) is None
     assert recurrence_is_proven(low_count, now=NOW) is False
 
-    # Failure 2: enough observations, span too short.
+    # Failure 2: enough observations, span too short (default gate is 14 days).
     short_span = make_dm_candidate(
         db_session,
         installation.id,
         title="Short span recurrence",
         automation_kind="recurring",
         reinforcement_count=5,
-        first_observed_at=NOW - timedelta(days=5),
+        first_observed_at=NOW - timedelta(days=10),
     )
     assert recurrence_evidence_line(short_span, now=NOW) is None
     assert recurrence_is_proven(short_span, now=NOW) is False
 
-    # Non-recurring candidates never claim recurrence.
+    # Non-recurring candidates never claim recurrence (neither automation_kind
+    # nor candidate_type marks them recurring-class).
     one_shot = make_dm_candidate(
         db_session,
         installation.id,
         title="One shot",
+        candidate_type="general_help",
         automation_kind="one_shot",
         reinforcement_count=5,
         first_observed_at=NOW - timedelta(days=30),
     )
     assert recurrence_evidence_line(one_shot, now=NOW) is None
+    assert recurrence_is_proven(one_shot, now=NOW) is False
+
+    # recurring_check candidate_type alone (no automation_kind) is recurring-class.
+    by_type = make_dm_candidate(
+        db_session,
+        installation.id,
+        title="Recurring check by type",
+        candidate_type="recurring_check",
+        automation_kind=None,
+        reinforcement_count=4,
+        first_observed_at=NOW - timedelta(days=20),
+    )
+    assert recurrence_is_proven(by_type, now=NOW) is True
+
+    # Configurable gate: stricter thresholds can withhold an otherwise-proven
+    # candidate; looser thresholds can admit it.
+    assert (
+        recurrence_is_proven(
+            proven, now=NOW, min_reinforcements=10, min_span=timedelta(days=14)
+        )
+        is False
+    )
+    assert (
+        recurrence_is_proven(
+            short_span, now=NOW, min_reinforcements=3, min_span=timedelta(days=7)
+        )
+        is True
+    )
 
 
-# --- Design-doc test: effective_confidence composition math ---
+# --- HIG-197: effective_confidence composition math ---
 
 
-def test_effective_confidence_composition() -> None:
-    # 0.8 * min(1, 0.6 + 0.1*1 + 0.05*2) = 0.8 * 0.8 = 0.64
+def test_effective_confidence_floor_is_identity_for_single_scan() -> None:
+    # f(1, e, 0) == 1.0 for every evidence count e: a single-scan candidate
+    # keeps its raw LLM score and never gets a track-record boost.
+    for evidence in (0, 1, 5, 20):
+        assert effective_confidence(
+            Decimal("0.700"), reinforcement_count=1, evidence_count=evidence
+        ) == Decimal("0.700")
+    # reinforcement_count below the floor is clamped to the same identity.
     assert effective_confidence(
-        Decimal("0.800"), reinforcement_count=1, evidence_count=2
-    ) == Decimal("0.640")
-    # multiplier caps at 1.0: 0.6 + 0.5 + 0.2 = 1.3 -> 1.0
+        Decimal("0.700"), reinforcement_count=0, evidence_count=3
+    ) == Decimal("0.700")
+
+
+def test_effective_confidence_boost_is_bounded_and_monotonic() -> None:
+    base = effective_confidence(
+        Decimal("0.800"), reinforcement_count=1, evidence_count=0, span_days=0
+    )
+    assert base == Decimal("0.800")  # floor identity
+    # More reinforcement raises the score (boost kicks in above count 1).
+    more_reinforced = effective_confidence(
+        Decimal("0.800"), reinforcement_count=4, evidence_count=0, span_days=14
+    )
+    assert more_reinforced > base
+    # Evidence amplifies an existing reinforcement/span signal.
+    with_evidence = effective_confidence(
+        Decimal("0.800"), reinforcement_count=4, evidence_count=5, span_days=14
+    )
+    assert with_evidence >= more_reinforced
+    # Monotonic in span.
+    longer_span = effective_confidence(
+        Decimal("0.800"), reinforcement_count=4, evidence_count=5, span_days=60
+    )
+    assert longer_span >= with_evidence
+    # Boost saturates at +0.2: 0.8 * 1.2 = 0.96, never higher from this base.
+    assert longer_span <= Decimal("0.960")
+    # Heavily reinforced never exceeds 1.0.
     assert effective_confidence(
-        Decimal("0.900"), reinforcement_count=5, evidence_count=4
-    ) == Decimal("0.900")
-    # zero counts: 0.7 * 0.6 = 0.42
-    assert effective_confidence(
-        Decimal("0.700"), reinforcement_count=0, evidence_count=0
-    ) == Decimal("0.420")
-    # never exceeds 1.0
-    assert effective_confidence(
-        Decimal("1.000"), reinforcement_count=10, evidence_count=10
+        Decimal("1.000"),
+        reinforcement_count=50,
+        evidence_count=50,
+        span_days=365,
     ) == Decimal("1.000")
 
 
@@ -506,6 +561,7 @@ def test_silent_decision_is_logged_and_never_posts(db_session: Session) -> None:
         db_session,
         installation.id,
         title="Weak hunch",
+        candidate_type="general_help",
         confidence="0.300",
     )
     client = FakeWitnessSlackClient()
@@ -541,7 +597,7 @@ def test_decision_assignment_notify_question_draft(db_session: Session) -> None:
         automation_kind="recurring",
         cadence_suggestion="every weekday at 5pm",
         reinforcement_count=3,
-        first_observed_at=NOW - timedelta(days=10),
+        first_observed_at=NOW - timedelta(days=15),
         evidence_count=2,
     )
     question = make_dm_candidate(
@@ -551,7 +607,7 @@ def test_decision_assignment_notify_question_draft(db_session: Session) -> None:
         automation_kind="recurring",
         cadence_suggestion=None,
         reinforcement_count=3,
-        first_observed_at=NOW - timedelta(days=10),
+        first_observed_at=NOW - timedelta(days=15),
         evidence_count=2,
     )
     draft = make_dm_candidate(
@@ -582,19 +638,21 @@ def test_decision_assignment_notify_question_draft(db_session: Session) -> None:
     assert "What cadence should I use?" in digest_text
     assert "Say go and I'll do it." in digest_text
     # Proven recurrence earns the evidence line in copy.
-    assert "I've seen this 3 times since" in digest_text
+    assert "I've noticed this 3 times since" in digest_text
 
 
 def test_unproven_recurrence_lowers_receptivity_no_claim_in_copy(
     db_session: Session,
 ) -> None:
     installation = make_installation(db_session)
-    # score = 0.9 * min(1, 0.6+0.1+0.05) * (1.0 * 0.8) = 0.675*0.8 = 0.54 < 0.55
+    # A single-scan recurring candidate keeps its raw confidence (f(1, e, 0)=1.0)
+    # but the unproven-recurrence receptivity penalty (x0.8) drops it under the
+    # 0.55 delivery threshold: 0.68 * 1.0 * 0.8 = 0.544 < 0.55.
     candidate = make_dm_candidate(
         db_session,
         installation.id,
         title="Unproven recurrence",
-        confidence="0.900",
+        confidence="0.680",
         automation_kind="recurring",
         cadence_suggestion="every weekday",
         reinforcement_count=1,

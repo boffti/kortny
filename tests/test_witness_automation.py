@@ -580,6 +580,78 @@ def test_accept_recurring_high_confidence_drafts_schedule_and_posts_confirmation
     assert WITNESS_AUTOMATION_DRAFTED_MESSAGE in messages
 
 
+def test_accept_recurring_lands_frequency_evidence_in_confirmation(
+    db_session: Session,
+) -> None:
+    # HIG-197 -> HIG-224 hook: a candidate that has crossed the recurrence gate
+    # carries its proven frequency evidence into the schedule-proposal copy.
+    source_task, candidate = project_channel_candidate(
+        db_session,
+        automation_kind="recurring",
+        cadence_suggestion="every weekday at 8am central time",
+        deliverable="post a trading summary in this channel",
+    )
+    candidate.reinforcement_count = 3
+    candidate.first_observed_at = datetime.now(UTC) - timedelta(days=20)
+    db_session.flush()
+    accept_candidate(
+        db_session,
+        candidate.id,
+        installation_id=source_task.installation_id,
+        by_user_id="UAdmin",
+    )
+    client = FakeWitnessSlackClient()
+
+    outcome = materialize_acceptance(
+        db_session,
+        make_settings(),
+        candidate,
+        accepted_by="UAdmin",
+        slack_client=client,
+        schedule_parser=FakeScheduleParser(recurring_draft()),
+    )
+    db_session.commit()
+
+    assert outcome.kind == "recurring"
+    assert outcome.confirmation_posted is True
+    assert len(client.calls) == 1
+    text = client.calls[0]["text"]
+    assert "I've noticed this 3 times since" in text
+
+
+def test_accept_recurring_single_scan_omits_frequency_evidence(
+    db_session: Session,
+) -> None:
+    # A single-scan candidate never claims recurrence in the confirmation copy.
+    source_task, candidate = project_channel_candidate(
+        db_session,
+        automation_kind="recurring",
+        cadence_suggestion="every weekday at 8am central time",
+        deliverable="post a trading summary in this channel",
+    )
+    assert candidate.reinforcement_count == 1
+    accept_candidate(
+        db_session,
+        candidate.id,
+        installation_id=source_task.installation_id,
+        by_user_id="UAdmin",
+    )
+    client = FakeWitnessSlackClient()
+
+    materialize_acceptance(
+        db_session,
+        make_settings(),
+        candidate,
+        accepted_by="UAdmin",
+        slack_client=client,
+        schedule_parser=FakeScheduleParser(recurring_draft()),
+    )
+    db_session.commit()
+
+    assert len(client.calls) == 1
+    assert "I've noticed this" not in client.calls[0]["text"]
+
+
 def _accepted_recurring_with_draft(
     db_session: Session,
 ) -> tuple[Task, WitnessOpportunityCandidate, Schedule]:

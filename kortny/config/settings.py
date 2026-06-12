@@ -238,6 +238,22 @@ class Settings(BaseSettings):
         default=True,
         validation_alias="KORTNY_WITNESS_AUTOMATION_ENABLED",
     )
+    witness_recurring_min_reinforcements: int = Field(
+        default=3,
+        validation_alias="KORTNY_WITNESS_RECURRING_MIN_REINFORCEMENTS",
+        description=(
+            "Re-observations a recurring candidate needs before its copy may "
+            "claim recurrence (HIG-197). A single scan never claims it."
+        ),
+    )
+    witness_recurring_min_span_days: int = Field(
+        default=14,
+        validation_alias="KORTNY_WITNESS_RECURRING_MIN_SPAN_DAYS",
+        description=(
+            "Minimum observation span (days, first_observed_at -> now) before "
+            "a recurring candidate may claim recurrence in copy (HIG-197)."
+        ),
+    )
     witness_channel_posts_per_week: int = Field(
         default=1,
         validation_alias="KORTNY_WITNESS_CHANNEL_POSTS_PER_WEEK",
@@ -662,6 +678,24 @@ class Settings(BaseSettings):
         if value < 0 or value > 25:
             raise ValueError(
                 "KORTNY_WITNESS_DRAFTS_PER_CHANNEL_PER_DAY must be between 0 and 25"
+            )
+        return value
+
+    @field_validator("witness_recurring_min_reinforcements")
+    @classmethod
+    def _valid_witness_recurring_min_reinforcements(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError(
+                "KORTNY_WITNESS_RECURRING_MIN_REINFORCEMENTS must be at least 1"
+            )
+        return value
+
+    @field_validator("witness_recurring_min_span_days")
+    @classmethod
+    def _valid_witness_recurring_min_span_days(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError(
+                "KORTNY_WITNESS_RECURRING_MIN_SPAN_DAYS cannot be negative"
             )
         return value
 

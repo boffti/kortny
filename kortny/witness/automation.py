@@ -45,6 +45,7 @@ from kortny.slack.schedule_blocks import schedule_action_blocks
 from kortny.tasks import TaskService
 from kortny.tasks.identity import TaskIdentity
 from kortny.witness.lifecycle import WitnessSlackClient
+from kortny.witness.opportunities import RecurrenceGate, recurrence_evidence_line
 
 logger = logging.getLogger(__name__)
 
@@ -409,12 +410,18 @@ def _materialize_recurring(
         **dict(schedule.metadata_json or {}),
         SCHEDULE_WITNESS_CANDIDATE_KEY: str(candidate.id),
     }
+    confirmation_text = _schedule_confirmation_text(
+        proposal.response_text,
+        candidate,
+        settings=settings,
+        now=now,
+    )
     confirmation_posted = _post_candidate_message(
         session,
         candidate,
         client=slack_client,
         channel_id=channel_id,
-        text=proposal.response_text,
+        text=confirmation_text,
         blocks=schedule_action_blocks(schedule),
         purpose=WITNESS_AUTOMATION_CONFIRMATION_PURPOSE,
         idempotency_key=f"{WITNESS_AUTOMATION_CONFIRMATION_PURPOSE}:{candidate.id}",
@@ -620,6 +627,38 @@ def _schedule_request_text(candidate: WitnessOpportunityCandidate) -> str:
     if cadence:
         return _bounded(f"{cadence}, {deliverable}", 1200)
     return _bounded(deliverable, 1200)
+
+
+def _schedule_confirmation_text(
+    response_text: str,
+    candidate: WitnessOpportunityCandidate,
+    *,
+    settings: Settings | None,
+    now: datetime,
+) -> str:
+    """Land the recurrence evidence into the schedule-confirmation copy (HIG-224).
+
+    When the candidate has crossed the recurrence gate, the proven frequency
+    evidence ("I've noticed this N times since ...") leads the confirmation so
+    the standing-automation proposal carries the same track record the digest
+    cited. Below the gate the schedule copy is unchanged.
+    """
+
+    gate = RecurrenceGate.from_values(
+        min_reinforcements=(
+            settings.witness_recurring_min_reinforcements if settings else None
+        ),
+        min_span_days=(settings.witness_recurring_min_span_days if settings else None),
+    )
+    evidence = recurrence_evidence_line(
+        candidate,
+        now=now,
+        min_reinforcements=gate.min_reinforcements,
+        min_span=gate.min_span,
+    )
+    if evidence is None:
+        return response_text
+    return normalize_user_facing_text(f"{evidence}. {response_text}".strip())
 
 
 def _one_shot_task_input(candidate: WitnessOpportunityCandidate) -> str:

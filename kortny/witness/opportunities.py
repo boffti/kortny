@@ -46,9 +46,12 @@ ALLOWED_AUTOMATION_KINDS = frozenset(("recurring", "one_shot", "watch"))
 SLACK_TS_RE = re.compile(r"^\d+\.\d+$")
 
 # Recurring framing gate (HIG-227 / HIG-197 Phase 1): only claim recurrence in
-# user-facing copy once the pattern is proven by repeated observation.
+# user-facing copy once the pattern is proven by repeated observation. Both
+# bounds are configurable via Settings
+# (KORTNY_WITNESS_RECURRING_MIN_REINFORCEMENTS / _MIN_SPAN_DAYS); these constants
+# are the standalone defaults when no Settings are threaded in.
 RECURRENCE_MIN_REINFORCEMENT = 3
-RECURRENCE_MIN_SPAN = timedelta(days=7)
+RECURRENCE_MIN_SPAN = timedelta(days=14)
 
 _WHITESPACE_RE = re.compile(r"\s+")
 
@@ -469,44 +472,99 @@ def _record_reinforcement(candidate: WitnessOpportunityCandidate) -> None:
         candidate.first_observed_at = candidate.created_at
 
 
+@dataclass(frozen=True, slots=True)
+class RecurrenceGate:
+    """Configurable thresholds for the recurrence-framing gate (HIG-197)."""
+
+    min_reinforcements: int = RECURRENCE_MIN_REINFORCEMENT
+    min_span: timedelta = RECURRENCE_MIN_SPAN
+
+    @classmethod
+    def from_values(
+        cls,
+        *,
+        min_reinforcements: int | None,
+        min_span_days: int | None,
+    ) -> RecurrenceGate:
+        return cls(
+            min_reinforcements=(
+                min_reinforcements
+                if min_reinforcements is not None
+                else RECURRENCE_MIN_REINFORCEMENT
+            ),
+            min_span=(
+                timedelta(days=min_span_days)
+                if min_span_days is not None
+                else RECURRENCE_MIN_SPAN
+            ),
+        )
+
+
+def candidate_is_recurring(candidate: WitnessOpportunityCandidate) -> bool:
+    """Whether a candidate is recurring-class for the recurrence gate.
+
+    HIG-197 frames the gate around ``recurring_check`` suggestions; the existing
+    automation path keys on ``automation_kind='recurring'`` (the explicit "this
+    should recur" intent that drives schedule materialization). Either signal
+    makes a candidate recurring-class.
+    """
+
+    return (
+        candidate.automation_kind == "recurring"
+        or candidate.candidate_type == "recurring_check"
+    )
+
+
 def recurrence_is_proven(
     candidate: WitnessOpportunityCandidate,
     *,
     now: datetime,
+    min_reinforcements: int = RECURRENCE_MIN_REINFORCEMENT,
+    min_span: timedelta = RECURRENCE_MIN_SPAN,
 ) -> bool:
     """True when a recurring candidate has earned a recurrence claim in copy.
 
-    Requires ``automation_kind='recurring'``, at least
-    ``RECURRENCE_MIN_REINFORCEMENT`` observations, and an observation span of
-    at least ``RECURRENCE_MIN_SPAN`` since ``first_observed_at``.
+    Requires the candidate to be recurring-class
+    (:func:`candidate_is_recurring`), at least ``min_reinforcements``
+    observations, and an observation span of at least ``min_span`` since
+    ``first_observed_at``. The gate sits at delivery/projection time so the
+    reinforcement counter keeps accruing while a candidate is still below it;
+    a single scan (count 1, span 0) can never pass it.
     """
 
-    if candidate.automation_kind != "recurring":
+    if not candidate_is_recurring(candidate):
         return False
-    if (candidate.reinforcement_count or 1) < RECURRENCE_MIN_REINFORCEMENT:
+    if (candidate.reinforcement_count or 1) < min_reinforcements:
         return False
     first_observed = candidate.first_observed_at or candidate.created_at
     if first_observed is None:
         return False
     if first_observed.tzinfo is None:
         first_observed = first_observed.replace(tzinfo=UTC)
-    return now - first_observed >= RECURRENCE_MIN_SPAN
+    return now - first_observed >= min_span
 
 
 def recurrence_evidence_line(
     candidate: WitnessOpportunityCandidate,
     *,
     now: datetime,
+    min_reinforcements: int = RECURRENCE_MIN_REINFORCEMENT,
+    min_span: timedelta = RECURRENCE_MIN_SPAN,
 ) -> str | None:
     """Return the proven-recurrence evidence line, or None below the gate."""
 
-    if not recurrence_is_proven(candidate, now=now):
+    if not recurrence_is_proven(
+        candidate,
+        now=now,
+        min_reinforcements=min_reinforcements,
+        min_span=min_span,
+    ):
         return None
     first_observed = candidate.first_observed_at or candidate.created_at
     if first_observed.tzinfo is None:
         first_observed = first_observed.replace(tzinfo=UTC)
     return (
-        f"I've seen this {candidate.reinforcement_count} times since "
+        f"I've noticed this {candidate.reinforcement_count} times since "
         f"{first_observed.date().isoformat()}"
     )
 

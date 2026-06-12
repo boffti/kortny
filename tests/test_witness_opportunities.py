@@ -262,6 +262,52 @@ def test_project_from_task_candidates_persists_llm_proposals(
     )
 
 
+def test_dismissed_candidate_still_reinforces_on_reobservation(
+    db_session: Session,
+) -> None:
+    # HIG-197: the reinforcement counter accrues across scans even while a
+    # candidate is dismissed/cooldown, so a pattern that keeps recurring after a
+    # dismissal can still earn a recurrence claim later. Re-extraction does not
+    # silently un-dismiss the candidate.
+    task, membership, _profile = create_profile_fixture(db_session)
+    candidate_input = WitnessOpportunityCandidateInput(
+        candidate_type="recurring_check",
+        title="Recurring blotter",
+        summary="Offer to post the daily blotter summary.",
+        suggested_action="Post the daily blotter.",
+        suggested_message="I can post the daily blotter.",
+        evidence=("The channel reviews the blotter daily.",),
+        confidence_score=Decimal("0.700"),
+        confidence_reason="Recurring workflow.",
+        metadata_json={"extractor": "test"},
+        automation_kind="recurring",
+        cadence_suggestion="every weekday",
+    )
+    service = WitnessOpportunityService(db_session)
+    service.project_from_task_candidates(
+        task=task,
+        candidates=(candidate_input,),
+        response_text="I can watch this.",
+    )
+    candidate = db_session.scalar(select(WitnessOpportunityCandidate))
+    assert candidate is not None
+    assert candidate.reinforcement_count == 1
+
+    candidate.status = "dismissed"
+    db_session.flush()
+
+    service.project_from_task_candidates(
+        task=task,
+        candidates=(candidate_input,),
+        response_text="Same opportunity recurred.",
+    )
+    db_session.flush()
+
+    assert candidate.reinforcement_count == 2
+    # Re-extraction reinforces the count but does not reactivate the candidate.
+    assert candidate.status == "dismissed"
+
+
 def test_eligible_private_suggestions_respects_status_and_cooldown(
     db_session: Session,
 ) -> None:

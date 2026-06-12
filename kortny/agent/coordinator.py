@@ -13,6 +13,7 @@ import time
 import uuid
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Protocol
 
@@ -50,6 +51,14 @@ from kortny.agent.execution import (
     ToolAttemptRecord,
     make_default_execution_plan,
 )
+from kortny.agent.idempotency import (
+    TOOL_CALL_DEDUPLICATED_MESSAGE,
+    TOOL_CALL_UNKNOWN_OUTCOME_MESSAGE,
+    TOOL_LEASE_PRESSURE_MESSAGE,
+    TOOL_UNKNOWN_OUTCOME_ERROR_CODE,
+    PriorAttemptStatus,
+    find_prior_attempt,
+)
 from kortny.agent.planner import (
     ExecutionPlanner,
     make_fallback_recovery_plan,
@@ -83,6 +92,7 @@ from kortny.observability import (
 )
 from kortny.tasks import TaskService
 from kortny.tools import ToolRegistry
+from kortny.tools.catalog import tool_metadata, tool_timeout_seconds
 from kortny.tools.types import (
     JsonObject,
     JsonSchema,
@@ -526,6 +536,29 @@ class AgentCoordinator:
                 turn=turn,
                 step_id=plan.current_step.step_id,
             )
+            # HIG-194: on a retry after a mid-invoke crash, short-circuit a tool
+            # whose prior attempt already completed (replay) or surface an
+            # unknown-outcome error for a side-effecting tool that started but
+            # never finished. Only the retry path pays the ledger lookup.
+            dedup_artifacts = self._dedup_tool_call(
+                task_obj=task_obj,
+                messages=messages,
+                tool_call=tool_call,
+                attempt=attempt,
+                turn=turn,
+                step_id=plan.current_step.step_id,
+            )
+            if dedup_artifacts is not None:
+                artifact_count += dedup_artifacts
+                continue
+            # HIG-195: warn when this tool's deadline could outrun the remaining
+            # queue lease, so an operator can see lease pressure before a hang.
+            self._warn_if_tool_deadline_exceeds_lease(
+                task_obj=task_obj,
+                tool_call=tool_call,
+                turn=turn,
+                step_id=plan.current_step.step_id,
+            )
             self.task_service.append_event(
                 task_obj,
                 TaskEventType.tool_call,
@@ -535,6 +568,7 @@ class AgentCoordinator:
                     "tool": tool_call.name,
                     "step_id": plan.current_step.step_id,
                     "normalized_args_hash": attempt.normalized_args_hash,
+                    "idempotency_key": attempt.idempotency_key,
                     "attempt_no": attempt.attempt_no,
                     "argument_keys": sorted(arguments),
                     "arguments": arguments,
@@ -699,6 +733,7 @@ class AgentCoordinator:
                     "tool": tool_call.name,
                     "step_id": plan.current_step.step_id,
                     "normalized_args_hash": attempt.normalized_args_hash,
+                    "idempotency_key": attempt.idempotency_key,
                     "attempt_no": attempt.attempt_no,
                     "latency_ms": latency_ms,
                     "output_shape": _output_shape(result.output),
@@ -1223,6 +1258,251 @@ class AgentCoordinator:
             )
             raise error
         return attempt
+
+    def _dedup_tool_call(
+        self,
+        *,
+        task_obj: Task,
+        messages: list[ChatMessage],
+        tool_call: ToolCall,
+        attempt: ToolAttemptRecord,
+        turn: int,
+        step_id: str,
+    ) -> int | None:
+        """Replay or block a tool call whose prior attempt is on the ledger.
+
+        Returns the replayed artifact count (caller skips re-invoking) when a
+        prior completed attempt is replayed, ``0`` when a write/destructive tool
+        with an unknown prior outcome is surfaced to the model, or ``None`` when
+        there is nothing to dedup and the call should run normally.
+
+        Only retried tasks (``attempts > 0``) pay the ledger lookup; a fresh task
+        skips it entirely so the common path adds no query.
+        """
+
+        if task_obj.attempts <= 0:
+            return None
+        if attempt.idempotency_key is None:
+            return None
+
+        lookup = find_prior_attempt(
+            self.session,
+            task_id=task_obj.id,
+            idempotency_key=attempt.idempotency_key,
+        )
+        if lookup.status is PriorAttemptStatus.completed and lookup.result is not None:
+            return self._replay_completed_attempt(
+                task_obj=task_obj,
+                messages=messages,
+                tool_call=tool_call,
+                attempt=attempt,
+                turn=turn,
+                step_id=step_id,
+                result=lookup.result,
+            )
+        if lookup.status is PriorAttemptStatus.started_only:
+            side_effect = tool_metadata(tool_call.name).side_effect
+            if side_effect == "read":
+                # Read-only tools are safe to re-run; let the call proceed.
+                return None
+            return self._surface_unknown_prior_outcome(
+                task_obj=task_obj,
+                messages=messages,
+                tool_call=tool_call,
+                attempt=attempt,
+                turn=turn,
+                step_id=step_id,
+                side_effect=side_effect,
+            )
+        return None
+
+    def _replay_completed_attempt(
+        self,
+        *,
+        task_obj: Task,
+        messages: list[ChatMessage],
+        tool_call: ToolCall,
+        attempt: ToolAttemptRecord,
+        turn: int,
+        step_id: str,
+        result: ToolResult,
+    ) -> int:
+        result_payload = _tool_result_payload(tool_call.name, result)
+        prompt_result_payload, _ = _tool_result_prompt_payload(
+            tool_call.name,
+            result_payload,
+            max_chars=self.tool_result_prompt_max_chars,
+        )
+        self.task_service.append_event(
+            task_obj,
+            TaskEventType.log,
+            {
+                "message": TOOL_CALL_DEDUPLICATED_MESSAGE,
+                "turn": turn,
+                "tool_call_id": tool_call.id,
+                "tool": tool_call.name,
+                "step_id": step_id,
+                "idempotency_key": attempt.idempotency_key,
+                "normalized_args_hash": attempt.normalized_args_hash,
+                "attempt_no": attempt.attempt_no,
+                "task_attempts": task_obj.attempts,
+                "artifact_count": len(result.artifacts),
+            },
+        )
+        log_observation(
+            logger,
+            "tool_call_deduplicated",
+            task=task_obj,
+            turn=turn,
+            tool_call_id=tool_call.id,
+            tool=tool_call.name,
+            step_id=step_id,
+            idempotency_key=attempt.idempotency_key,
+            task_attempts=task_obj.attempts,
+            artifact_count=len(result.artifacts),
+        )
+        messages.append(
+            ChatMessage(
+                role="tool",
+                content=_json_dumps(prompt_result_payload),
+                tool_call_id=tool_call.id,
+            )
+        )
+        return len(result.artifacts)
+
+    def _surface_unknown_prior_outcome(
+        self,
+        *,
+        task_obj: Task,
+        messages: list[ChatMessage],
+        tool_call: ToolCall,
+        attempt: ToolAttemptRecord,
+        turn: int,
+        step_id: str,
+        side_effect: str,
+    ) -> int:
+        message = (
+            f"A previous run started {tool_call.name} but did not record whether "
+            "it finished, so its outcome is unknown. Because it can change "
+            "external state, I won't run it again automatically. Confirm whether "
+            "it already took effect, or ask me to proceed."
+        )
+        error = RecoverableToolError(
+            code=TOOL_UNKNOWN_OUTCOME_ERROR_CODE,
+            message=message,
+            hint=(
+                "Do not blindly retry. Verify the prior outcome (or ask the user) "
+                "before running this side-effecting tool again."
+            ),
+            details={
+                "tool": tool_call.name,
+                "side_effect": side_effect,
+                "idempotency_key": attempt.idempotency_key,
+            },
+        )
+        classification = classify_recoverable_tool_error(error)
+        result = _recoverable_tool_error_result(
+            arguments=dict(tool_call.arguments),
+            error=error,
+            classification=classification,
+        )
+        result_payload = _tool_result_payload(tool_call.name, result)
+        prompt_result_payload, _ = _tool_result_prompt_payload(
+            tool_call.name,
+            result_payload,
+            max_chars=self.tool_result_prompt_max_chars,
+        )
+        self.task_service.append_event(
+            task_obj,
+            TaskEventType.log,
+            {
+                "message": TOOL_CALL_UNKNOWN_OUTCOME_MESSAGE,
+                "turn": turn,
+                "tool_call_id": tool_call.id,
+                "tool": tool_call.name,
+                "step_id": step_id,
+                "idempotency_key": attempt.idempotency_key,
+                "normalized_args_hash": attempt.normalized_args_hash,
+                "attempt_no": attempt.attempt_no,
+                "task_attempts": task_obj.attempts,
+                "side_effect": side_effect,
+            },
+        )
+        log_observation(
+            logger,
+            "tool_call_unknown_prior_outcome",
+            level=logging.WARNING,
+            task=task_obj,
+            turn=turn,
+            tool_call_id=tool_call.id,
+            tool=tool_call.name,
+            step_id=step_id,
+            idempotency_key=attempt.idempotency_key,
+            task_attempts=task_obj.attempts,
+            side_effect=side_effect,
+        )
+        messages.append(
+            ChatMessage(
+                role="tool",
+                content=_json_dumps(prompt_result_payload),
+                tool_call_id=tool_call.id,
+            )
+        )
+        return 0
+
+    def _warn_if_tool_deadline_exceeds_lease(
+        self,
+        *,
+        task_obj: Task,
+        tool_call: ToolCall,
+        turn: int,
+        step_id: str,
+    ) -> None:
+        """Emit a lease-pressure warning when a tool deadline is over half the
+        remaining lease.
+
+        The lease heartbeat thread keeps renewing the lease even while a tool
+        blocks the main worker thread, so this is an observability signal rather
+        than a control: it makes a long-running tool's lease pressure visible.
+        """
+
+        lease_expires_at = task_obj.lease_expires_at
+        if lease_expires_at is None:
+            return
+        if lease_expires_at.tzinfo is None:
+            lease_expires_at = lease_expires_at.replace(tzinfo=UTC)
+        remaining_seconds = (lease_expires_at - datetime.now(UTC)).total_seconds()
+        if remaining_seconds <= 0:
+            return
+        timeout_seconds = tool_timeout_seconds(tool_call.name)
+        if timeout_seconds <= 0:
+            return
+        if timeout_seconds <= 0.5 * remaining_seconds:
+            return
+        self._append_log(
+            task_obj,
+            TOOL_LEASE_PRESSURE_MESSAGE,
+            {
+                "turn": turn,
+                "tool_call_id": tool_call.id,
+                "tool": tool_call.name,
+                "step_id": step_id,
+                "timeout_seconds": timeout_seconds,
+                "lease_remaining_seconds": int(remaining_seconds),
+            },
+        )
+        log_observation(
+            logger,
+            "tool_lease_pressure",
+            level=logging.WARNING,
+            task=task_obj,
+            turn=turn,
+            tool_call_id=tool_call.id,
+            tool=tool_call.name,
+            step_id=step_id,
+            timeout_seconds=timeout_seconds,
+            lease_remaining_seconds=int(remaining_seconds),
+        )
 
     def _raise_if_tool_approval_required(
         self,

@@ -13,6 +13,13 @@ from kortny.tools.types import JsonObject, JsonSchema, Tool
 ToolSideEffect = Literal["read", "write", "destructive"]
 ToolApproval = Literal["none", "self_gated", "user_approval", "admin_approval"]
 
+# HIG-195: default registry-enforced per-tool execution deadline (seconds).
+DEFAULT_TOOL_TIMEOUT_SECONDS = 60
+# Margin added on top of a sandbox tool's inner timeout so the inner sandbox
+# limit (which can clean up its container) fires before the outer registry
+# deadline (which cannot kill the lingering worker thread) does.
+SANDBOX_TIMEOUT_MARGIN_SECONDS = 30
+
 
 @dataclass(frozen=True, slots=True)
 class ToolMetadata:
@@ -26,6 +33,12 @@ class ToolMetadata:
     side_effect: ToolSideEffect
     integration: str = ""
     approval: ToolApproval = "none"
+    # HIG-195: per-tool execution deadline (seconds). The registry wraps every
+    # invocation with this deadline so an unbounded in-process tool cannot hang
+    # the worker until the lease expires. Sandbox tools set this above their
+    # inner sandbox limit so the inner limit fires first; quick lookups set it
+    # short. 0 disables the registry deadline (used only by the test echo probe).
+    timeout_seconds: int = 60
     runtime_registered: bool = True
     dashboard_exposed: bool = True
     context_hint: bool = False
@@ -52,6 +65,7 @@ class ToolDescriptor:
     capabilities: tuple[str, ...]
     side_effect: ToolSideEffect
     approval: ToolApproval
+    timeout_seconds: int
     required_env_vars: tuple[str, ...]
     required_slack_scopes: tuple[str, ...]
     plan_gates: tuple[str, ...]
@@ -78,6 +92,7 @@ class ToolDescriptor:
             "capabilities": list(self.capabilities),
             "side_effect": self.side_effect,
             "approval": self.approval,
+            "timeout_seconds": self.timeout_seconds,
             "required_env_vars": list(self.required_env_vars),
             "required_slack_scopes": list(self.required_slack_scopes),
             "plan_gates": list(self.plan_gates),
@@ -104,6 +119,12 @@ _WORKBENCH_SANDBOX_POLICY = ToolSandboxPolicy(
     ),
     reason="Workbench commands run in the task's persistent sandbox session.",
 )
+# Registry deadline for workbench tools: inner sandbox limit (300s) plus margin
+# so the sandbox container limit fires before the un-killable worker thread.
+_WORKBENCH_TIMEOUT_SECONDS = (
+    _WORKBENCH_SANDBOX_POLICY.resource_limits.timeout_seconds
+    + SANDBOX_TIMEOUT_MARGIN_SECONDS
+)
 
 NATIVE_TOOL_METADATA: dict[str, ToolMetadata] = {
     "web_search": ToolMetadata(
@@ -113,6 +134,9 @@ NATIVE_TOOL_METADATA: dict[str, ToolMetadata] = {
         display_name="Web search",
         capabilities=("web_search", "current_research"),
         side_effect="read",
+        # Brave Search client uses a 10s httpx timeout; give the registry a
+        # little headroom over that inner network timeout.
+        timeout_seconds=20,
         required_env_vars=("BRAVE_SEARCH_API_KEY",),
         plan_gates=("external_network",),
         result_budget="bounded_results",
@@ -169,6 +193,8 @@ NATIVE_TOOL_METADATA: dict[str, ToolMetadata] = {
             "slack_context",
         ),
         side_effect="read",
+        # Local cache lookup with no external network call: keep it snappy.
+        timeout_seconds=15,
         required_env_vars=("POSTGRES_URL",),
         context_hint=True,
         plan_gates=("scope_guarded_context",),
@@ -374,6 +400,9 @@ NATIVE_TOOL_METADATA: dict[str, ToolMetadata] = {
         capabilities=("document_generation", "artifact_generation"),
         side_effect="write",
         approval="none",
+        # Document rendering (PDF generation) legitimately runs longer than a
+        # quick tool call.
+        timeout_seconds=180,
         result_budget="artifact",
         notes=("Creates local task artifacts only when explicitly useful.",),
     ),
@@ -388,6 +417,9 @@ NATIVE_TOOL_METADATA: dict[str, ToolMetadata] = {
         # host-filesystem-free, and resource-capped, so gating it added
         # coworker friction without a safety win.
         approval="none",
+        # Inner sandbox limit is 30s; the registry deadline sits above it
+        # (SANDBOX_TIMEOUT_MARGIN_SECONDS) so the sandbox limit fires first.
+        timeout_seconds=30 + SANDBOX_TIMEOUT_MARGIN_SECONDS,
         required_env_vars=("KORTNY_SANDBOX_RUNNER_URL",),
         plan_gates=(
             "sandbox_required",
@@ -423,6 +455,7 @@ NATIVE_TOOL_METADATA: dict[str, ToolMetadata] = {
         ),
         side_effect="destructive",
         approval="none",
+        timeout_seconds=_WORKBENCH_TIMEOUT_SECONDS,
         required_env_vars=("KORTNY_SANDBOX_RUNNER_URL",),
         plan_gates=(
             "sandbox_required",
@@ -443,6 +476,7 @@ NATIVE_TOOL_METADATA: dict[str, ToolMetadata] = {
         capabilities=("sandboxed_code_execution", "file_generation"),
         side_effect="write",
         approval="none",
+        timeout_seconds=_WORKBENCH_TIMEOUT_SECONDS,
         required_env_vars=("KORTNY_SANDBOX_RUNNER_URL",),
         plan_gates=("sandbox_required",),
         result_budget="normal",
@@ -457,6 +491,7 @@ NATIVE_TOOL_METADATA: dict[str, ToolMetadata] = {
         capabilities=("sandboxed_code_execution", "file_inspection"),
         side_effect="read",
         approval="none",
+        timeout_seconds=_WORKBENCH_TIMEOUT_SECONDS,
         required_env_vars=("KORTNY_SANDBOX_RUNNER_URL",),
         plan_gates=("sandbox_required",),
         result_budget="large_text_compaction",
@@ -474,6 +509,7 @@ NATIVE_TOOL_METADATA: dict[str, ToolMetadata] = {
         ),
         side_effect="write",
         approval="none",
+        timeout_seconds=_WORKBENCH_TIMEOUT_SECONDS,
         required_env_vars=("KORTNY_SANDBOX_RUNNER_URL",),
         plan_gates=("sandbox_required",),
         result_budget="artifact",
@@ -492,6 +528,7 @@ NATIVE_TOOL_METADATA: dict[str, ToolMetadata] = {
         ),
         side_effect="write",
         approval="none",
+        timeout_seconds=_WORKBENCH_TIMEOUT_SECONDS,
         required_env_vars=(
             "KORTNY_SANDBOX_RUNNER_URL",
             "KORTNY_ARTIFACTS_DIR",
@@ -511,6 +548,9 @@ NATIVE_TOOL_METADATA: dict[str, ToolMetadata] = {
         capabilities=("site_deployment", "external_publishing"),
         side_effect="destructive",
         approval="user_approval",
+        # Netlify/Vercel deploy posts use a 120s httpx timeout per request and
+        # may chain several calls; give the registry generous headroom.
+        timeout_seconds=300,
         plan_gates=(
             "explicit_user_request_required",
             "requester_approval_required",
@@ -598,6 +638,8 @@ NATIVE_TOOL_METADATA: dict[str, ToolMetadata] = {
         capabilities=("procedural_skills", "skill_script_execution"),
         side_effect="write",
         approval="none",
+        # Runs a skill script inside the persistent sandbox session.
+        timeout_seconds=_WORKBENCH_TIMEOUT_SECONDS,
         required_env_vars=("POSTGRES_URL", "KORTNY_SANDBOX_RUNNER_URL"),
         notes=(
             "Runs a bundled script from a trusted skill inside the task's "
@@ -738,6 +780,18 @@ def tool_metadata(name: str) -> ToolMetadata:
             notes=("No explicit metadata has been registered yet.",),
         ),
     )
+
+
+def tool_timeout_seconds(name: str) -> int:
+    """Return the registry-enforced execution deadline for a tool name.
+
+    Native tools use their catalog ``timeout_seconds``. External tools
+    (Composio/MCP) have no native metadata entry, so they fall back to the
+    conservative default — their own provider clients still apply network-level
+    timeouts underneath this deadline.
+    """
+
+    return tool_metadata(name).timeout_seconds
 
 
 def read_only_native_tool_names() -> frozenset[str]:
@@ -911,6 +965,7 @@ def _descriptor(
         capabilities=metadata.capabilities,
         side_effect=metadata.side_effect,
         approval=metadata.approval,
+        timeout_seconds=metadata.timeout_seconds,
         required_env_vars=metadata.required_env_vars,
         required_slack_scopes=metadata.required_slack_scopes,
         plan_gates=metadata.plan_gates,

@@ -37,7 +37,7 @@ def test_adk_tool_enforces_existing_approval_policy() -> None:
     task_service = _RecordingTaskService()
     adapter = KortnyAdkTool(
         tool=_ForgetFactTool(),
-        task=cast(Any, SimpleNamespace(id=uuid.uuid4())),
+        task=cast(Any, SimpleNamespace(id=uuid.uuid4(), attempts=0)),
         session=cast(Any, _NoApprovalSession()),
         task_service=cast(Any, task_service),
     )
@@ -190,7 +190,7 @@ def test_adk_registry_toolset_loads_registry_lazily_once() -> None:
 
     toolset = KortnyRegistryToolset(
         registry_factory=registry_factory,
-        task=cast(Any, SimpleNamespace(id=uuid.uuid4())),
+        task=cast(Any, SimpleNamespace(id=uuid.uuid4(), attempts=0)),
         session=cast(Any, None),
         task_service=cast(Any, task_service),
     )
@@ -287,6 +287,7 @@ def _fake_task() -> SimpleNamespace:
         slack_channel_id="C123",
         slack_thread_ts="123.456",
         slack_user_id="U123",
+        attempts=0,
     )
 
 

@@ -192,6 +192,7 @@ def make_descriptor(
         capabilities=("diagnostic",),
         side_effect="read",
         approval="none",
+        timeout_seconds=60,
         required_env_vars=(),
         required_slack_scopes=(),
         plan_gates=(),

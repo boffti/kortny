@@ -189,7 +189,7 @@ class ExecutionBudgetState:
             normalized_args_hash=normalized_args_hash,
             attempt_no=attempt_no,
             status="started",
-            idempotency_key=_idempotency_key(
+            idempotency_key=build_idempotency_key(
                 task_id=task_id,
                 step_id=step_id,
                 tool_name=tool_name,
@@ -386,13 +386,19 @@ def recoverable_error_key(
     return f"{tool_name}:{error_category}:{error_code}:{normalized_args_hash}"
 
 
-def _idempotency_key(
+def build_idempotency_key(
     *,
     task_id: uuid.UUID,
     step_id: str,
     tool_name: str,
     normalized_args_hash: str,
 ) -> str:
+    """Return the deterministic idempotency key for a tool invocation.
+
+    Shared by the budget tracker (custom runtime) and the ADK tool path so both
+    runtimes dedup on the same key (HIG-194).
+    """
+
     return f"{task_id}:{step_id}:{tool_name}:{normalized_args_hash}"
 
 

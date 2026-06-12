@@ -24,7 +24,14 @@ from kortny.agent.coordinator import (
     _tool_result_prompt_payload,
     _with_classified_error,
 )
-from kortny.agent.execution import normalized_tool_args_hash
+from kortny.agent.execution import build_idempotency_key, normalized_tool_args_hash
+from kortny.agent.idempotency import (
+    TOOL_CALL_DEDUPLICATED_MESSAGE,
+    TOOL_CALL_UNKNOWN_OUTCOME_MESSAGE,
+    TOOL_UNKNOWN_OUTCOME_ERROR_CODE,
+    PriorAttemptStatus,
+    find_prior_attempt,
+)
 from kortny.approvals import (
     TOOL_APPROVAL_DECISION_MESSAGE,
     TOOL_APPROVAL_REQUIRED_MESSAGE,
@@ -37,6 +44,8 @@ from kortny.db.models import Task, TaskEvent, TaskEventType
 from kortny.observability import log_observation
 from kortny.tasks import TaskService
 from kortny.tools import Tool, ToolRegistry
+from kortny.tools.catalog import tool_metadata
+from kortny.tools.registry import invoke_tool_with_timeout
 from kortny.tools.types import JsonObject, RecoverableToolError, ToolResult
 
 logger = logging.getLogger(__name__)
@@ -83,23 +92,39 @@ class KortnyAdkTool(BaseTool):
         arguments = dict(args)
         tool_call_id = tool_context.function_call_id or f"adk-{uuid.uuid4()}"
         normalized_args_hash = normalized_tool_args_hash(arguments)
+        idempotency_key = build_idempotency_key(
+            task_id=self.task.id,
+            step_id=ADK_TOOL_STEP_ID,
+            tool_name=self.name,
+            normalized_args_hash=normalized_args_hash,
+        )
 
         self._raise_if_approval_required(
             arguments=arguments,
             tool_call_id=tool_call_id,
             normalized_args_hash=normalized_args_hash,
         )
+        # HIG-194: dedup completed/unknown prior attempts on retry after a crash.
+        dedup_payload = self._dedup_tool_call(
+            arguments=arguments,
+            tool_call_id=tool_call_id,
+            normalized_args_hash=normalized_args_hash,
+            idempotency_key=idempotency_key,
+        )
+        if dedup_payload is not None:
+            return dedup_payload
         self._record_tool_call(
             arguments=arguments,
             tool_call_id=tool_call_id,
             normalized_args_hash=normalized_args_hash,
+            idempotency_key=idempotency_key,
         )
         started = time.perf_counter()
         recoverable_error = None
         result: ToolResult
         try:
             try:
-                result = self.tool.invoke(arguments)
+                result = invoke_tool_with_timeout(self.tool, arguments)
             except RecoverableToolError as exc:
                 recoverable_error = exc
                 classification = _classify_recoverable_result_error(
@@ -138,6 +163,7 @@ class KortnyAdkTool(BaseTool):
                     "runtime": "adk",
                     "step_id": ADK_TOOL_STEP_ID,
                     "normalized_args_hash": normalized_args_hash,
+                    "idempotency_key": idempotency_key,
                     "attempt_no": 1,
                     "latency_ms": latency_ms,
                     "output_shape": _output_shape(result.output),
@@ -191,6 +217,7 @@ class KortnyAdkTool(BaseTool):
                 "runtime": "adk",
                 "step_id": ADK_TOOL_STEP_ID,
                 "normalized_args_hash": normalized_args_hash,
+                "idempotency_key": idempotency_key,
                 "attempt_no": 1,
                 "latency_ms": latency_ms,
                 "output_shape": _output_shape(result.output),
@@ -234,6 +261,7 @@ class KortnyAdkTool(BaseTool):
         arguments: JsonObject,
         tool_call_id: str,
         normalized_args_hash: str,
+        idempotency_key: str,
     ) -> None:
         self.task_service.append_event(
             self.task,
@@ -245,6 +273,7 @@ class KortnyAdkTool(BaseTool):
                 "runtime": "adk",
                 "step_id": ADK_TOOL_STEP_ID,
                 "normalized_args_hash": normalized_args_hash,
+                "idempotency_key": idempotency_key,
                 "attempt_no": 1,
                 "argument_keys": sorted(arguments),
                 "arguments": arguments,
@@ -258,6 +287,142 @@ class KortnyAdkTool(BaseTool):
             tool=self.name,
             argument_keys=sorted(arguments),
         )
+
+    def _dedup_tool_call(
+        self,
+        *,
+        arguments: JsonObject,
+        tool_call_id: str,
+        normalized_args_hash: str,
+        idempotency_key: str,
+    ) -> JsonObject | None:
+        """Replay or block a prior attempt on retry after a crash (HIG-194).
+
+        Returns a prompt-ready payload to short-circuit ``run_async`` (completed
+        replay or unknown-outcome surface), or ``None`` to run the tool normally.
+        Only retried tasks pay the ledger lookup.
+        """
+
+        if self.task.attempts <= 0:
+            return None
+
+        lookup = find_prior_attempt(
+            self.session,
+            task_id=self.task.id,
+            idempotency_key=idempotency_key,
+        )
+        if lookup.status is PriorAttemptStatus.completed and lookup.result is not None:
+            result_payload = _tool_result_payload(self.name, lookup.result)
+            prompt_result_payload, _ = _tool_result_prompt_payload(
+                self.name,
+                result_payload,
+                max_chars=self.tool_result_prompt_max_chars,
+            )
+            self.task_service.append_event(
+                self.task,
+                TaskEventType.log,
+                {
+                    "message": TOOL_CALL_DEDUPLICATED_MESSAGE,
+                    "runtime": "adk",
+                    "turn": ADK_TOOL_TURN,
+                    "tool_call_id": tool_call_id,
+                    "tool": self.name,
+                    "step_id": ADK_TOOL_STEP_ID,
+                    "idempotency_key": idempotency_key,
+                    "normalized_args_hash": normalized_args_hash,
+                    "task_attempts": self.task.attempts,
+                    "artifact_count": len(lookup.result.artifacts),
+                },
+            )
+            log_observation(
+                logger,
+                "adk_tool_call_deduplicated",
+                task=self.task,
+                tool_call_id=tool_call_id,
+                tool=self.name,
+                idempotency_key=idempotency_key,
+                task_attempts=self.task.attempts,
+            )
+            return prompt_result_payload
+
+        if lookup.status is PriorAttemptStatus.started_only:
+            side_effect = tool_metadata(self.name).side_effect
+            if side_effect == "read":
+                return None
+            error = RecoverableToolError(
+                code=TOOL_UNKNOWN_OUTCOME_ERROR_CODE,
+                message=(
+                    f"A previous run started {self.name} but did not record "
+                    "whether it finished, so its outcome is unknown. Because it "
+                    "can change external state, I won't run it again "
+                    "automatically. Confirm whether it already took effect, or "
+                    "ask me to proceed."
+                ),
+                hint=(
+                    "Do not blindly retry. Verify the prior outcome (or ask the "
+                    "user) before running this side-effecting tool again."
+                ),
+                details={
+                    "tool": self.name,
+                    "side_effect": side_effect,
+                    "idempotency_key": idempotency_key,
+                },
+            )
+            classification = _classify_recoverable_result_error(
+                {"error": error.to_payload()}
+            )
+            result = (
+                _recoverable_tool_error_result(
+                    arguments=arguments,
+                    error=error,
+                    classification=classification,
+                )
+                if classification is not None
+                else ToolResult(
+                    output={
+                        "successful": False,
+                        "attempted_argument_keys": sorted(arguments),
+                        "error": error.to_payload(),
+                    }
+                )
+            )
+            result_payload = _tool_result_payload(self.name, result)
+            prompt_result_payload, _ = _tool_result_prompt_payload(
+                self.name,
+                result_payload,
+                max_chars=self.tool_result_prompt_max_chars,
+            )
+            self.task_service.append_event(
+                self.task,
+                TaskEventType.log,
+                {
+                    "message": TOOL_CALL_UNKNOWN_OUTCOME_MESSAGE,
+                    "runtime": "adk",
+                    "turn": ADK_TOOL_TURN,
+                    "tool_call_id": tool_call_id,
+                    "tool": self.name,
+                    "step_id": ADK_TOOL_STEP_ID,
+                    "idempotency_key": idempotency_key,
+                    "normalized_args_hash": normalized_args_hash,
+                    "task_attempts": self.task.attempts,
+                    "side_effect": side_effect,
+                },
+            )
+            log_observation(
+                logger,
+                "adk_tool_call_unknown_prior_outcome",
+                level=logging.WARNING,
+                task=self.task,
+                tool_call_id=tool_call_id,
+                tool=self.name,
+                idempotency_key=idempotency_key,
+                task_attempts=self.task.attempts,
+                side_effect=side_effect,
+            )
+            prompt_result_payload["recoverable_error"] = True
+            return prompt_result_payload
+
+        return None
 
     def _raise_if_approval_required(
         self,

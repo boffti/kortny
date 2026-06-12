@@ -1,0 +1,10 @@
+This skill is an original Kortny clean-room authorship.
+
+The concept of a spreadsheet-builder skill is inspired by Anthropic's
+proprietary internal document skills (xlsx/spreadsheet authoring). No text or
+code was copied from that source — the professional standards it encodes
+(zero formula errors, financial color-coding, correct number formats, frozen
+headers) are unprotectable conventions. The SKILL.md and the script
+(build_workbook.py) were authored independently using openpyxl.
+
+This file and all files in this directory are subject to the Kortny project license.

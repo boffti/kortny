@@ -1,0 +1,1 @@
+This skill is original work, part of the Kortny project and distributed under the Kortny project license. Concept inspiration: https://github.com/phuryn/pm-skills (MIT).

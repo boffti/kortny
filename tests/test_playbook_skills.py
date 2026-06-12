@@ -12,7 +12,7 @@ from alembic.config import Config
 from sqlalchemy import Engine, delete, select
 from sqlalchemy.orm import Session
 
-from kortny.agent.context import ContextAssembler
+from kortny.agent.context import DEFAULT_SKILLS_CONTEXT_MAX_SKILLS, ContextAssembler
 from kortny.db.models import (
     Installation,
     ProceduralSkill,
@@ -49,6 +49,10 @@ _DECISIONS = 1
 _AMBIENT = 2
 _DATA = 3
 _DRAFT = 4
+# HIG-239: the default curated pack adds channel-digest / recap-style skills.
+# Give their distinctive vocabulary its own axis so the check-in smoke is not
+# perturbed by digest skills collapsing onto the check-in axis.
+_DIGEST = 5
 
 PLAYBOOK_VOCABULARY: dict[str, int] = {
     # Recurring check-in / status posting.
@@ -87,6 +91,13 @@ PLAYBOOK_VOCABULARY: dict[str, int] = {
     "due": _DRAFT,
     "email": _DRAFT,
     "confirm": _DRAFT,
+    # Channel digests / recaps (default-pack skills).
+    "digest": _DIGEST,
+    "recap": _DIGEST,
+    "weekly": _DIGEST,
+    "channel": _DIGEST,
+    "summary": _DIGEST,
+    "themes": _DIGEST,
 }
 
 
@@ -336,9 +347,11 @@ def test_checkin_query_ranks_project_checkin_top(db_session: Session) -> None:
     assert package.execution_hint == "skill_direct"
     assert package.matched_skill_slug == "project-checkin"
     assert [skill.slug for skill in package.selected_skills][0] == "project-checkin"
-    assert {skill.slug for skill in package.selected_skills} == set(
-        PLAYBOOK_SKILL_SLUGS
-    )
+    # The full default-enabled pack (playbook + HIG-239 default pack) is enabled
+    # at workspace scope and ranked; the top of the index is the check-in skill.
+    selected_slugs = {skill.slug for skill in package.selected_skills}
+    assert "project-checkin" in selected_slugs
+    assert len(package.selected_skills) <= DEFAULT_SKILLS_CONTEXT_MAX_SKILLS
     skills_message = next(
         message.content
         for message in package.messages

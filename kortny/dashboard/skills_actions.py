@@ -7,6 +7,7 @@ import uuid
 from sqlalchemy.orm import Session
 
 from kortny.db.models import ProceduralSkill, SkillEnablement
+from kortny.embeddings import EmbeddingIndex
 from kortny.skills import SkillRegistryService
 from kortny.skills.ingestion import (
     IngestedSkill,
@@ -57,10 +58,11 @@ def upload_skill(
     data: bytes,
     filename: str,
     by_user: str,
+    embedding_index: EmbeddingIndex | None = None,
 ) -> IngestedSkill:
     """Ingest an uploaded skill zip, or a single SKILL.md file."""
 
-    ingestion = SkillIngestionService(session)
+    ingestion = SkillIngestionService(session, embedding_index=embedding_index)
     kwargs = _custom_skill_kwargs(installation_id, by_user)
     if filename.lower().endswith(".md"):
         try:
@@ -79,8 +81,11 @@ def paste_skill_markdown(
     name: str | None,
     description: str | None,
     by_user: str,
+    embedding_index: EmbeddingIndex | None = None,
 ) -> IngestedSkill:
-    return SkillIngestionService(session).ingest_markdown(
+    return SkillIngestionService(
+        session, embedding_index=embedding_index
+    ).ingest_markdown(
         content,
         fallback_name=name or None,
         fallback_description=description or None,

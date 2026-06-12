@@ -56,6 +56,10 @@ extend-exclude = [
     ".venv",
     "build",
     "dist",
+    # Curated-skill helper scripts are sandbox-only assets (heavy optional deps,
+    # not imported by Kortny); linting them here would gate on tools absent from
+    # the dev/CI environment.
+    "kortny/skills/curated/*/scripts",
 ]
 
 [tool.ruff.lint]
@@ -93,6 +97,11 @@ exclude = [
     "^\\.venv/",
     "^build/",
     "^dist/",
+    # Curated-skill helper scripts run only inside the trusted-tier sandbox,
+    # against deps (Pillow, pandas, weasyprint, …) absent from the dev/CI
+    # environment. They are shipped as skill assets, not imported by Kortny, so
+    # they are out of scope for the repo-wide strict typecheck.
+    "^kortny/skills/curated/.*/scripts/",
 ]
 
 [[tool.mypy.overrides]]

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -23,9 +24,12 @@ from kortny.db.models import (
     Task,
     TaskEventType,
 )
+from kortny.embeddings import EmbeddingIndex
 from kortny.skills.builtins import BUILTIN_SKILLS, BuiltInSkillDefinition
 from kortny.tasks import TaskService
 from kortny.tools.types import JsonObject
+
+logger = logging.getLogger(__name__)
 
 SKILL_CATALOG_BUILT_MESSAGE = "procedural_skill_catalog_built"
 SKILL_INVOKED_MESSAGE = "procedural_skill_invoked"
@@ -47,6 +51,30 @@ PLAYBOOK_SKILL_SLUGS: tuple[str, ...] = (
 )
 PLAYBOOK_ENABLEMENT_ADDED_BY = "system:playbook-seed"
 
+# HIG-239 curated skill pack: the default-enabled tier. These ship enabled at
+# workspace scope for every installation alongside the playbook pack; every
+# other curated skill stays catalog-only (registered, install-on-demand from
+# the dashboard). Slugs that are not present in the tree yet are tolerated
+# (warn-and-skip) so seeding never crashes mid-rollout.
+DEFAULT_PACK_SLUGS: tuple[str, ...] = (
+    "internal-comms",
+    "thread-recap",
+    "weekly-channel-digest",
+    "data-digest",
+    "report-generator",
+    "summarize-meeting",
+    "competitor-profiling",
+    "cited-research-brief",
+    "brand-template",
+    "chart-maker",
+    "spreadsheet-builder",
+    "styled-report-pdf",
+)
+DEFAULT_PACK_ENABLEMENT_ADDED_BY = "system:default-pack-seed"
+
+# Union of every curated slug that ships enabled by default.
+DEFAULT_ENABLED_SLUGS: tuple[str, ...] = (*PLAYBOOK_SKILL_SLUGS, *DEFAULT_PACK_SLUGS)
+
 SKILL_SCOPE_TYPES = frozenset({"workspace", "channel", "user"})
 _SCOPE_SPECIFICITY = {"workspace": 0, "channel": 1, "user": 2}
 
@@ -67,6 +95,8 @@ class EnabledSkill:
     scope_id: str | None
     has_references: bool
     has_scripts: bool
+    intent_tags: tuple[str, ...] = ()
+    trigger_phrases: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,9 +145,11 @@ class SkillRegistryService:
         session: Session,
         *,
         task_service: TaskService | None = None,
+        embedding_index: EmbeddingIndex | None = None,
     ) -> None:
         self.session = session
         self.task_service = task_service or TaskService(session)
+        self.embedding_index = embedding_index
 
     def ensure_builtin_skills(self) -> None:
         """Idempotently seed system-owned built-in skill definitions."""
@@ -129,43 +161,75 @@ class SkillRegistryService:
     def ensure_curated_skills(self) -> None:
         """Idempotently seed the curated execution-time skill catalog."""
 
-        from kortny.skills.ingestion import SkillIngestionService
+        from kortny.skills.ingestion import (
+            SkillIngestionError,
+            SkillIngestionService,
+        )
 
         if not CURATED_SKILLS_DIR.is_dir():
             return
-        ingestion = SkillIngestionService(self.session)
+        ingestion = SkillIngestionService(
+            self.session, embedding_index=self.embedding_index
+        )
         for skill_dir in sorted(CURATED_SKILLS_DIR.iterdir()):
             if not skill_dir.is_dir():
                 continue
-            ingestion.ingest_directory(
-                skill_dir,
-                owner_type="system",
-                owner_id=None,
-                provenance="kortny",
-                trust_level="trusted",
-                created_by="system",
-            )
-        self._ensure_playbook_enablements()
+            try:
+                ingestion.ingest_directory(
+                    skill_dir,
+                    owner_type="system",
+                    owner_id=None,
+                    provenance="kortny",
+                    trust_level="trusted",
+                    created_by="system",
+                )
+            except SkillIngestionError:
+                # A curated dir without a parseable SKILL.md (e.g. a partial
+                # checkout) must never crash seeding — warn and skip it.
+                logger.warning(
+                    "skipping curated skill dir without a valid SKILL.md: %s",
+                    skill_dir.name,
+                )
+        self._ensure_default_enablements(
+            PLAYBOOK_SKILL_SLUGS, added_by=PLAYBOOK_ENABLEMENT_ADDED_BY
+        )
+        self._ensure_default_enablements(
+            DEFAULT_PACK_SLUGS, added_by=DEFAULT_PACK_ENABLEMENT_ADDED_BY
+        )
         self.session.flush()
 
-    def _ensure_playbook_enablements(self) -> None:
-        """Seed workspace enablements for the coworker playbook pack.
+    def _ensure_default_enablements(
+        self,
+        slugs: tuple[str, ...],
+        *,
+        added_by: str,
+    ) -> None:
+        """Seed workspace enablements for a default-enabled curated tier.
 
         Only rows that are entirely missing are created; existing
         workspace-scope rows — including admin-disabled ones — are never
-        touched, so a deliberate disable sticks across re-seeds.
+        touched, so a deliberate disable sticks across re-seeds. Slugs absent
+        from the tree (e.g. mid-rollout) are warned and skipped, never crash.
         """
 
-        skill_ids = list(
-            self.session.scalars(
-                select(ProceduralSkill.id).where(
+        active_by_slug = {
+            slug: skill_id
+            for slug, skill_id in self.session.execute(
+                select(ProceduralSkill.slug, ProceduralSkill.id).where(
                     ProceduralSkill.owner_type == "system",
                     ProceduralSkill.owner_id.is_(None),
-                    ProceduralSkill.slug.in_(PLAYBOOK_SKILL_SLUGS),
+                    ProceduralSkill.slug.in_(slugs),
                     ProceduralSkill.status == "active",
                 )
             )
-        )
+        }
+        missing = [slug for slug in slugs if slug not in active_by_slug]
+        if missing:
+            logger.warning(
+                "default-enabled curated skills not found, skipping: %s",
+                ", ".join(sorted(missing)),
+            )
+        skill_ids = list(active_by_slug.values())
         if not skill_ids:
             return
         installation_ids = list(self.session.scalars(select(Installation.id)))
@@ -191,7 +255,7 @@ class SkillRegistryService:
                         scope_type="workspace",
                         scope_id=None,
                         status="enabled",
-                        added_by=PLAYBOOK_ENABLEMENT_ADDED_BY,
+                        added_by=added_by,
                     )
                 )
 
@@ -308,6 +372,8 @@ class SkillRegistryService:
                 scope_id=enablement.scope_id,
                 has_references="reference" in file_kinds or "asset" in file_kinds,
                 has_scripts="script" in file_kinds,
+                intent_tags=tuple(_string_list(version.intent_tags)),
+                trigger_phrases=tuple(_string_list(version.trigger_phrases)),
             )
         return sorted(by_skill.values(), key=lambda item: item.slug)
 
@@ -600,3 +666,9 @@ def _string_set(value: object) -> set[str]:
     if not isinstance(value, list):
         return set()
     return {item for item in value if isinstance(item, str)}
+
+
+def _string_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, str)]

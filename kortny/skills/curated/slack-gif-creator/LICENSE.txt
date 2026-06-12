@@ -1,0 +1,8 @@
+This skill is an original Kortny clean-room authorship.
+
+The concept of a slack-gif-creator skill is inspired by the anthropics/skills
+slack-gif-creator skill, which is a proprietary Anthropic internal skill. No text or code
+was copied from that source. The scripts (create_gif.py, video_to_gif.py) were authored
+independently using Pillow and ffmpeg.
+
+This file and all files in this directory are subject to the Kortny project license.

@@ -1,0 +1,7 @@
+This skill is an original Kortny clean-room authorship.
+
+The concept of a skill-creator meta-skill is inspired by the anthropics/skills
+skill-creator skill, which is a proprietary Anthropic internal skill. No text or code
+was copied from that source.
+
+This file and all files in this directory are subject to the Kortny project license.

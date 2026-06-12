@@ -81,7 +81,9 @@ services:
       OTEL_TRACE_SAMPLING_RATIO: ${OTEL_TRACE_SAMPLING_RATIO:-1.0}
       KORTNY_SANDBOX_RUNNER_URL: ${KORTNY_SANDBOX_RUNNER_URL:-http://sandbox-runner:8090}
       KORTNY_SANDBOX_RUNNER_TIMEOUT_SECONDS: ${KORTNY_SANDBOX_RUNNER_TIMEOUT_SECONDS:-70}
-      KORTNY_SANDBOX_DEFAULT_IMAGE: ${KORTNY_SANDBOX_DEFAULT_IMAGE:-ghcr.io/astral-sh/uv:python3.11-bookworm-slim}
+      # HIG-239: baked image carrying the builder-skill deps; build it with
+      # `docker compose build sandbox-exec-image` (see docker/sandbox-exec.Dockerfile).
+      KORTNY_SANDBOX_DEFAULT_IMAGE: ${KORTNY_SANDBOX_DEFAULT_IMAGE:-kortny-sandbox-exec:local}
       KORTNY_ARTIFACTS_DIR: ${KORTNY_ARTIFACTS_DIR:-/data/artifacts}
       KORTNY_PUBLIC_BASE_URL: ${KORTNY_PUBLIC_BASE_URL:-}
       KORTNY_PREVIEW_SIGNING_SECRET: ${KORTNY_PREVIEW_SIGNING_SECRET:-}
@@ -249,7 +251,9 @@ services:
       OTEL_TRACE_SAMPLING_RATIO: ${OTEL_TRACE_SAMPLING_RATIO:-1.0}
       KORTNY_SANDBOX_RUNNER_URL: ${KORTNY_SANDBOX_RUNNER_URL:-http://sandbox-runner:8090}
       KORTNY_SANDBOX_RUNNER_TIMEOUT_SECONDS: ${KORTNY_SANDBOX_RUNNER_TIMEOUT_SECONDS:-70}
-      KORTNY_SANDBOX_DEFAULT_IMAGE: ${KORTNY_SANDBOX_DEFAULT_IMAGE:-ghcr.io/astral-sh/uv:python3.11-bookworm-slim}
+      # HIG-239: baked image carrying the builder-skill deps; build it with
+      # `docker compose build sandbox-exec-image` (see docker/sandbox-exec.Dockerfile).
+      KORTNY_SANDBOX_DEFAULT_IMAGE: ${KORTNY_SANDBOX_DEFAULT_IMAGE:-kortny-sandbox-exec:local}
       KORTNY_ARTIFACTS_DIR: ${KORTNY_ARTIFACTS_DIR:-/data/artifacts}
       KORTNY_PUBLIC_BASE_URL: ${KORTNY_PUBLIC_BASE_URL:-}
       KORTNY_PREVIEW_SIGNING_SECRET: ${KORTNY_PREVIEW_SIGNING_SECRET:-}
@@ -263,6 +267,21 @@ services:
       - uv-cache:/tmp/uv-cache
       - task-artifacts:/data/artifacts
       - fastembed-cache:/data/fastembed-cache
+
+  # Build-only service for the sandbox execution image (HIG-239). Skill scripts
+  # run in network-isolated, read-only containers spun up from this image, so
+  # their deps (openpyxl/python-pptx/weasyprint/matplotlib/... + ffmpeg + pango)
+  # must be baked in at build time. `docker compose build sandbox-exec-image`
+  # produces the tag the runner hands to those throwaway containers.
+  sandbox-exec-image:
+    image: ${KORTNY_SANDBOX_DEFAULT_IMAGE:-kortny-sandbox-exec:local}
+    build:
+      context: .
+      dockerfile: docker/sandbox-exec.Dockerfile
+    # Never started as a long-running service; it only exists to build the image.
+    command: ["true"]
+    profiles:
+      - build-only
 
   sandbox-docker-proxy:
     restart: unless-stopped
@@ -297,7 +316,9 @@ services:
       DOCKER_HOST: tcp://sandbox-docker-proxy:2375
       KORTNY_SANDBOX_EXECUTION_ENABLED: ${KORTNY_SANDBOX_EXECUTION_ENABLED:-true}
       KORTNY_SANDBOX_RUNNER_NAME: ${KORTNY_SANDBOX_RUNNER_NAME:-kortny-sandbox-runner}
-      KORTNY_SANDBOX_DEFAULT_IMAGE: ${KORTNY_SANDBOX_DEFAULT_IMAGE:-ghcr.io/astral-sh/uv:python3.11-bookworm-slim}
+      # HIG-239: baked image carrying the builder-skill deps; build it with
+      # `docker compose build sandbox-exec-image` (see docker/sandbox-exec.Dockerfile).
+      KORTNY_SANDBOX_DEFAULT_IMAGE: ${KORTNY_SANDBOX_DEFAULT_IMAGE:-kortny-sandbox-exec:local}
       KORTNY_SANDBOX_DEFAULT_NETWORK: ${KORTNY_SANDBOX_DEFAULT_NETWORK:-none}
       KORTNY_SANDBOX_CPUS: ${KORTNY_SANDBOX_CPUS:-1.0}
       KORTNY_SANDBOX_MEMORY_MB: ${KORTNY_SANDBOX_MEMORY_MB:-512}

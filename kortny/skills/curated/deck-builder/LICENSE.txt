@@ -1,0 +1,10 @@
+This skill is an original Kortny clean-room authorship.
+
+The concept of a deck-builder skill is inspired by Anthropic's proprietary
+internal document skills (pptx / presentation authoring). No text or code was
+copied from that source — the standards it encodes (one idea per slide,
+consistent theme, layout discipline, generous margins) are unprotectable
+conventions. The SKILL.md and the script (build_deck.py) were authored
+independently using python-pptx.
+
+This file and all files in this directory are subject to the Kortny project license.

@@ -46,6 +46,7 @@ from kortny.knowledge_graph import (
 from kortny.llm import ChatMessage
 from kortny.memory import EpisodeService, Fact, RelevantEpisode, WorkspaceStateService
 from kortny.observability import observe_task_event, set_span_attributes, start_span
+from kortny.skills.embedding import SKILL_EMBEDDING_KIND, skill_embedding_text
 from kortny.tasks import TaskService
 
 if TYPE_CHECKING:
@@ -61,7 +62,10 @@ DEFAULT_GRAPH_CONTEXT_MAX_CHARS = 1_500
 DEFAULT_GRAPH_CONTEXT_MAX_ITEMS = 12
 DEFAULT_GRAPH_CONTEXT_MAX_HOPS = 2
 DEFAULT_SKILLS_CONTEXT_MAX_CHARS = 4_000
-DEFAULT_SKILLS_CONTEXT_MAX_SKILLS = 30
+# HIG-239: tighten the ranked index from 30 → 15. The curated pack pushes the
+# enabled-skill count up; a smaller, sharper index keeps the L1 block focused
+# and within the 4k char budget. Omissions beyond K are still recorded.
+DEFAULT_SKILLS_CONTEXT_MAX_SKILLS = 15
 DEFAULT_CAPABILITIES_CONTEXT_MAX_CHARS = 1_200
 DEFAULT_SKILL_DIRECT_THRESHOLD = 0.60
 RELEVANCE_BUDGET_OMISSION_REASON = "relevance_budget"
@@ -501,6 +505,9 @@ class ContextAssembler:
             selected_skill_ids=[
                 str(skill.skill_id) for skill in package.selected_skills
             ],
+            skill_similarities={
+                slug: round(score, 4) for slug, score in package.skill_similarities
+            },
             acknowledgement_present=package.acknowledgement is not None,
             acknowledgement_message_ts=package.acknowledgement.message_ts
             if package.acknowledgement
@@ -1064,23 +1071,76 @@ class ContextAssembler:
         task: Task,
         enabled: Sequence[EnabledSkill],
     ) -> tuple[tuple[str, float], ...]:
-        """Rank enabled skills by semantic similarity to the task input."""
+        """Rank enabled skills by similarity to the task input.
 
-        if self.embedding_index is None or not enabled:
+        Semantic ranking is preferred (the embedded text now includes intent
+        tags + trigger phrases, mirroring tool-card embeddings). When no
+        embedding index is wired, or ranking fails, fall back to lexical token
+        overlap so a name/description match still surfaces — the ranker never
+        returns empty while enabled skills exist.
+        """
+
+        if not enabled:
             return ()
+        if self.embedding_index is None:
+            return self._lexical_rank_skills(task, enabled)
         items = [
-            (skill.slug, f"{skill.name}. {skill.description}") for skill in enabled
+            (
+                skill.slug,
+                skill_embedding_text(
+                    name=skill.name,
+                    description=skill.description,
+                    intent_tags=skill.intent_tags,
+                    trigger_phrases=skill.trigger_phrases,
+                ),
+            )
+            for skill in enabled
         ]
-        self.embedding_index.ensure("skill", items)
+        self.embedding_index.ensure(SKILL_EMBEDDING_KIND, items)
         ranked = self.embedding_index.rank(
-            "skill",
+            SKILL_EMBEDDING_KIND,
             task.input,
             [slug for slug, _ in items],
             top_k=DEFAULT_SKILLS_CONTEXT_MAX_SKILLS,
         )
         if ranked is None:
-            return ()
+            return self._lexical_rank_skills(task, enabled)
         return tuple(ranked)
+
+    @staticmethod
+    def _lexical_rank_skills(
+        task: Task,
+        enabled: Sequence[EnabledSkill],
+    ) -> tuple[tuple[str, float], ...]:
+        """Token-overlap fallback ranking over name + description + tags.
+
+        Mirrors the tool-RAG lexical fill: score each skill by the overlap
+        between task-input tokens and the skill's name/description/tags/trigger
+        tokens, normalized to [0, 1]. Order is best-first; ties keep slug order.
+        """
+
+        query = _lexical_tokens(task.input)
+        scored: list[tuple[str, float]] = []
+        for skill in sorted(enabled, key=lambda item: item.slug):
+            corpus_tokens = _lexical_tokens(
+                " ".join(
+                    (
+                        skill.slug,
+                        skill.name,
+                        skill.description,
+                        " ".join(skill.intent_tags),
+                        " ".join(skill.trigger_phrases),
+                    )
+                )
+            )
+            if not query or not corpus_tokens:
+                scored.append((skill.slug, 0.0))
+                continue
+            overlap = len(query & corpus_tokens)
+            score = min(1.0, overlap * 0.08)
+            scored.append((skill.slug, round(score, 4)))
+        scored.sort(key=lambda item: item[1], reverse=True)
+        return tuple(scored[:DEFAULT_SKILLS_CONTEXT_MAX_SKILLS])
 
     def _fetch_thread_transcript(
         self,
@@ -1691,6 +1751,16 @@ def _shorten(value: str, *, max_chars: int) -> str:
     if len(value) <= max_chars:
         return value
     return value[: max(0, max_chars - 3)].rstrip() + "..."
+
+
+def _lexical_tokens(text: str) -> set[str]:
+    """Alphanumeric token set for lexical overlap scoring (slug-aware)."""
+
+    return {
+        "".join(char for char in raw.casefold() if char.isalnum())
+        for raw in text.replace("/", " ").replace("-", " ").replace("_", " ").split()
+        if raw.strip()
+    } - {""}
 
 
 def _quote(value: str) -> str:

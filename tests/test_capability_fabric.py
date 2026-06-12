@@ -20,6 +20,7 @@ from kortny.agent.capabilities import (
     build_capability_overview,
 )
 from kortny.agent.context import (
+    DEFAULT_SKILLS_CONTEXT_MAX_SKILLS,
     ContextAssembler,
     ContextBudget,
     ContextPackage,
@@ -521,7 +522,9 @@ def test_skill_ranking_below_threshold_keeps_hint_unset(db_session: Session) -> 
     assert "Highly relevant skill" not in skills_message
 
 
-def test_no_embedding_index_preserves_legacy_skill_order(db_session: Session) -> None:
+def test_no_embedding_index_falls_back_to_lexical_ranking(
+    db_session: Session,
+) -> None:
     installation = create_installation(db_session)
     setup_two_skills(db_session, installation)
     task = create_task(
@@ -530,16 +533,18 @@ def test_no_embedding_index_preserves_legacy_skill_order(db_session: Session) ->
         input_text="check our issue tracker for urgent bugs",
     )
 
+    # HIG-239: without an embedding index the ranker falls back to lexical token
+    # overlap instead of returning empty / legacy order — the issue-tracker skill
+    # (name + description overlap) must surface on top.
     package = ContextAssembler(session=db_session).build_for_task(task)
-    legacy_slugs = [skill.slug for skill in package.selected_skills]
+    ranked_slugs = [skill.slug for skill in package.selected_skills]
 
-    assert package.skill_similarities == ()
-    assert package.execution_hint is None
-    assert package.matched_skill_slug is None
-    assert sorted(legacy_slugs) == ["issue-tracker-triage", "website-scrape-weekly"]
+    assert package.skill_similarities
+    assert ranked_slugs[0] == "issue-tracker-triage"
+    assert set(ranked_slugs) == {"issue-tracker-triage", "website-scrape-weekly"}
 
 
-def test_thirty_slot_skill_budget_is_filled_by_similarity(db_session: Session) -> None:
+def test_ranked_slot_budget_is_filled_by_similarity(db_session: Session) -> None:
     installation = create_installation(db_session)
     for index in range(31):
         create_enabled_skill(
@@ -567,7 +572,9 @@ def test_thirty_slot_skill_budget_is_filled_by_similarity(db_session: Session) -
         embedding_index=EmbeddingIndex(db_session, FakeEmbeddingBackend()),
     ).build_for_task(task)
 
-    assert len(package.selected_skills) == 30
+    # HIG-239: the ranked index is capped at 15 (down from 30); the highest-
+    # similarity skill still sorts to the top and overflow is recorded.
+    assert len(package.selected_skills) == DEFAULT_SKILLS_CONTEXT_MAX_SKILLS
     assert package.selected_skills[0].slug == "issue-tracker-triage"
     assert any(
         omission.kind == "skills" and omission.reason == "skills_context_max_skills"
@@ -612,7 +619,9 @@ def test_coordinator_records_skill_ranking_event(db_session: Session) -> None:
     assert 0.0 <= ranked[0]["similarity"] <= 1.0
 
 
-def test_no_skill_ranking_event_without_embedding_index(db_session: Session) -> None:
+def test_skill_ranking_event_uses_lexical_fallback_without_index(
+    db_session: Session,
+) -> None:
     installation = create_installation(db_session)
     setup_two_skills(db_session, installation)
     task = create_task(
@@ -628,12 +637,16 @@ def test_no_skill_ranking_event_without_embedding_index(db_session: Session) -> 
         context_assembler=ContextAssembler(session=db_session),
     ).run(task)
 
-    assert not any(
-        event.payload.get("message") == "skill_ranking"
+    # HIG-239: even without an embedding index, lexical fallback produces a
+    # ranking, so the skill_ranking event is recorded with the top match.
+    event = next(
+        event
         for event in db_session.scalars(
             select(TaskEvent).where(TaskEvent.task_id == task.id)
         )
+        if event.payload.get("message") == "skill_ranking"
     )
+    assert event.payload["ranked"][0]["slug"] == "issue-tracker-triage"
 
 
 def test_planner_payload_includes_matched_skills(db_session: Session) -> None:

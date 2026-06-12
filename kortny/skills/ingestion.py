@@ -27,11 +27,19 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from kortny.db.models import ProceduralSkill, ProceduralSkillVersion, SkillFile
+from kortny.embeddings import EmbeddingIndex
+from kortny.skills.embedding import SKILL_EMBEDDING_KIND, skill_embedding_text
 
 MAX_SKILL_ARCHIVE_BYTES = 16 * 1024 * 1024
 DEFAULT_SKILL_VERSION = "1.0.0"
 RESOURCE_KINDS = ("reference", "asset", "script")
 _RESOURCE_DIRS = {"references": "reference", "assets": "asset", "scripts": "script"}
+# Sibling provenance/license files harvested skills ship at the directory root
+# (not under references/). Captured into version metadata so the dashboard can
+# show provenance + license without re-reading the tree at render time.
+_PROVENANCE_FILENAMES = ("PROVENANCE.md", "PROVENANCE.txt")
+_LICENSE_FILENAMES = ("LICENSE.txt", "LICENSE", "LICENSE.md")
+_MAX_METADATA_FILE_CHARS = 8_000
 
 
 class SkillIngestionError(ValueError):
@@ -51,8 +59,14 @@ class IngestedSkill:
 class SkillIngestionService:
     """Parses SKILL.md content via ADK and upserts the skill registry."""
 
-    def __init__(self, session: Session) -> None:
+    def __init__(
+        self,
+        session: Session,
+        *,
+        embedding_index: EmbeddingIndex | None = None,
+    ) -> None:
         self.session = session
+        self.embedding_index = embedding_index
 
     def ingest_directory(
         self,
@@ -68,9 +82,11 @@ class SkillIngestionService:
 
         parsed = _load_skill_dir(Path(directory))
         binary_files = _collect_binary_files(Path(directory))
+        source_metadata = _collect_source_metadata(Path(directory))
         return self._persist(
             parsed,
             binary_files=binary_files,
+            source_metadata=source_metadata,
             owner_type=owner_type,
             owner_id=owner_id,
             provenance=provenance,
@@ -144,6 +160,7 @@ class SkillIngestionService:
         return self._persist(
             parsed,
             binary_files={},
+            source_metadata={},
             owner_type=owner_type,
             owner_id=owner_id,
             provenance=provenance,
@@ -156,6 +173,7 @@ class SkillIngestionService:
         parsed: Skill,
         *,
         binary_files: dict[str, bytes],
+        source_metadata: dict[str, str],
         owner_type: str,
         owner_id: str | None,
         provenance: str,
@@ -190,6 +208,8 @@ class SkillIngestionService:
 
         text_files = _resource_text_files(parsed)
         content_hash = _content_sha256(parsed, text_files, binary_files)
+        intent_tags = _intent_tags(parsed.frontmatter)
+        metadata_json = _version_metadata(parsed.frontmatter, source_metadata)
 
         latest = self.session.scalar(
             select(ProceduralSkillVersion)
@@ -200,6 +220,13 @@ class SkillIngestionService:
             .order_by(ProceduralSkillVersion.created_at.desc())
         )
         if latest is not None and latest.content_sha256 == content_hash:
+            # Content unchanged: keep the row, but backfill the selection signals
+            # (intent tags) and provenance/license metadata so older seeds gain
+            # the richer fields without a content bump, then re-embed the card.
+            latest.intent_tags = intent_tags
+            latest.metadata_json = metadata_json
+            self.session.flush()
+            self._embed_version(skill, latest)
             files = list(
                 self.session.scalars(
                     select(SkillFile).where(SkillFile.skill_version_id == latest.id)
@@ -227,18 +254,11 @@ class SkillIngestionService:
             name=parsed.frontmatter.metadata.get("display_name") or slug,
             description=parsed.frontmatter.description,
             instructions_md=parsed.instructions,
-            intent_tags=[],
+            intent_tags=intent_tags,
             response_modes=[],
             trigger_phrases=[],
             allowed_tools=allowed_tools,
-            metadata_json={
-                "format": "skill_md",
-                **{
-                    key: value
-                    for key, value in parsed.frontmatter.metadata.items()
-                    if isinstance(value, str | int | float | bool)
-                },
-            },
+            metadata_json=metadata_json,
             content_sha256=content_hash,
             created_by=created_by,
             published_at=datetime.now(UTC),
@@ -272,9 +292,34 @@ class SkillIngestionService:
             )
         self.session.add_all(files)
         self.session.flush()
+        self._embed_version(skill, version)
         return IngestedSkill(
             skill=skill, version=version, files=files, created_new_version=True
         )
+
+    def _embed_version(
+        self,
+        skill: ProceduralSkill,
+        version: ProceduralSkillVersion,
+    ) -> None:
+        """Embed this skill card now so retrieval works on the first task.
+
+        Failure-isolated by EmbeddingIndex.ensure; the sha gate makes this a
+        no-op when the embedded text is unchanged. The lazy per-task ranker
+        remains the backstop when no index is wired into ingestion.
+        """
+
+        if self.embedding_index is None:
+            return
+        text = skill_embedding_text(
+            name=version.name,
+            description=version.description,
+            intent_tags=[tag for tag in version.intent_tags if isinstance(tag, str)],
+            trigger_phrases=[
+                phrase for phrase in version.trigger_phrases if isinstance(phrase, str)
+            ],
+        )
+        self.embedding_index.ensure(SKILL_EMBEDDING_KIND, [(skill.slug, text)])
 
 
 def _parse_skill_markdown(content: str) -> tuple[Frontmatter, str]:
@@ -391,6 +436,100 @@ def _collect_binary_files(directory: Path) -> dict[str, bytes]:
             except UnicodeDecodeError:
                 binary[f"{sub}/{file_path.relative_to(base)}"] = raw
     return binary
+
+
+def _collect_source_metadata(directory: Path) -> dict[str, str]:
+    """Read sibling PROVENANCE/LICENSE files into a metadata mapping.
+
+    Harvested skills ship ``PROVENANCE.md`` (source repo URL + commit + what was
+    adapted) and ``LICENSE.txt`` at the directory root. Capturing them here lets
+    the dashboard show provenance + license without re-walking the tree.
+    """
+
+    metadata: dict[str, str] = {}
+    provenance = _read_first_existing(directory, _PROVENANCE_FILENAMES)
+    if provenance is not None:
+        metadata["provenance_md"] = provenance[:_MAX_METADATA_FILE_CHARS]
+    license_text = _read_first_existing(directory, _LICENSE_FILENAMES)
+    if license_text is not None:
+        metadata["license_text"] = license_text[:_MAX_METADATA_FILE_CHARS]
+        metadata["license_name"] = _license_name(license_text)
+    return metadata
+
+
+def _read_first_existing(directory: Path, names: tuple[str, ...]) -> str | None:
+    for name in names:
+        candidate = directory / name
+        if candidate.is_file():
+            try:
+                return candidate.read_text(encoding="utf-8").strip()
+            except UnicodeDecodeError:
+                return None
+    return None
+
+
+def _license_name(license_text: str) -> str:
+    """Best-effort SPDX-ish label from the first non-empty license line."""
+
+    head = " ".join(license_text[:600].split()).lower()
+    if "apache license" in head or "apache-2" in head:
+        return "Apache-2.0"
+    if "mit license" in head or "permission is hereby granted, free of charge" in head:
+        return "MIT"
+    if "gnu general public" in head:
+        return "GPL"
+    if "mozilla public license" in head:
+        return "MPL-2.0"
+    if "bsd" in head:
+        return "BSD"
+    for raw in license_text.splitlines():
+        line = raw.strip()
+        if line:
+            return line[:80]
+    return "See LICENSE"
+
+
+def _intent_tags(frontmatter: Frontmatter) -> list[str]:
+    """Parse the SKILL.md ``tags`` metadata into a normalized tag list.
+
+    Curated/community SKILL.md frontmatter carries tags either as a
+    comma-separated string (``tags: a, b, c``) or a YAML list. Both are
+    normalized to a deduped, order-preserving list of lowercase tags.
+    """
+
+    raw = frontmatter.metadata.get("tags")
+    candidates: list[str]
+    if isinstance(raw, str):
+        candidates = re.split(r"[,\n]", raw)
+    elif isinstance(raw, (list, tuple)):
+        candidates = [str(item) for item in raw]
+    else:
+        return []
+    seen: dict[str, None] = {}
+    for candidate in candidates:
+        tag = candidate.strip().lower()
+        if tag and tag not in seen:
+            seen[tag] = None
+    return list(seen)
+
+
+def _version_metadata(
+    frontmatter: Frontmatter,
+    source_metadata: dict[str, str],
+) -> dict[str, object]:
+    metadata: dict[str, object] = {
+        "format": "skill_md",
+        **{
+            key: value
+            for key, value in frontmatter.metadata.items()
+            if isinstance(value, str | int | float | bool)
+        },
+        **source_metadata,
+    }
+    license_field = (frontmatter.license or "").strip()
+    if license_field and "license_name" not in metadata:
+        metadata["license_name"] = license_field
+    return metadata
 
 
 def _resource_text_files(parsed: Skill) -> dict[str, str]:

@@ -147,6 +147,7 @@ from kortny.db.models import (
     WitnessOpportunityCandidate,
 )
 from kortny.db.session import make_session_factory
+from kortny.embeddings import EmbeddingIndex, create_embedding_backend
 from kortny.execution.preview import verify_preview_token
 from kortny.knowledge_graph.refresh import KnowledgeGraphRefreshService
 from kortny.llm.litellm_catalog import (
@@ -1193,7 +1194,9 @@ def register_routes(app: FastAPI) -> None:
         notice: Annotated[str | None, Query()] = None,
         notice_tone: Annotated[str, Query()] = "success",
     ) -> Response:
-        SkillRegistryService(session).ensure_curated_skills()
+        SkillRegistryService(
+            session, embedding_index=_embedding_index_for(session)
+        ).ensure_curated_skills()
         session.commit()
         installation_id = _dashboard_installation_id(session, principal)
         skills_dashboard = get_skills_dashboard(session, installation_id)
@@ -1316,6 +1319,7 @@ def register_routes(app: FastAPI) -> None:
                 data=data,
                 filename=skill_file.filename or "skill.zip",
                 by_user=actor,
+                embedding_index=_embedding_index_for(session),
             )
             enable_skill_for_scope(
                 session,
@@ -1358,6 +1362,7 @@ def register_routes(app: FastAPI) -> None:
                 name=_form_value(form, "name"),
                 description=_form_value(form, "description"),
                 by_user=actor,
+                embedding_index=_embedding_index_for(session),
             )
             enable_skill_for_scope(
                 session,
@@ -4540,6 +4545,22 @@ def _load_runtime_settings() -> tuple[Settings | None, str | None]:
         return load_settings(), None
     except SettingsError as exc:
         return None, str(exc)
+
+
+def _embedding_index_for(session: Session) -> EmbeddingIndex | None:
+    """Build an embedding index from runtime settings, or None if unavailable.
+
+    Lets curated seeding embed skill cards on ingest. Failure-isolated: any
+    missing config simply skips embedding (the lazy per-task ranker backstops).
+    """
+
+    settings, _error = _load_runtime_settings()
+    if settings is None:
+        return None
+    backend = create_embedding_backend(settings)
+    if backend is None:
+        return None
+    return EmbeddingIndex(session, backend)
 
 
 def _session_principal(request: Request) -> DashboardPrincipal | None:

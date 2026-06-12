@@ -43,6 +43,8 @@ class SkillCatalogEntry:
     has_scripts: bool
     enabled_scopes: tuple[SkillScopeChip, ...]
     invocations_30d: int
+    license_name: str | None = None
+    provenance_md: str | None = None
 
     @property
     def is_enabled(self) -> bool:
@@ -252,6 +254,9 @@ def _catalog_entry(
             )
             or 0
         )
+    metadata = version.metadata_json or {}
+    license_name = metadata.get("license_name")
+    provenance_md = metadata.get("provenance_md")
     return SkillCatalogEntry(
         skill_id=skill.id,
         slug=skill.slug,
@@ -265,6 +270,8 @@ def _catalog_entry(
         has_scripts="script" in file_kinds,
         enabled_scopes=chips,
         invocations_30d=invocations_30d,
+        license_name=license_name if isinstance(license_name, str) else None,
+        provenance_md=provenance_md if isinstance(provenance_md, str) else None,
     )
 
 

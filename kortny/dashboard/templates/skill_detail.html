@@ -26,6 +26,9 @@
         {% if detail.allowed_tools %}
           <span class="badge badge-neutral">tools: {{ detail.allowed_tools | join(', ') }}</span>
         {% endif %}
+        {% if detail.entry.license_name %}
+          <span class="badge badge-neutral" title="License">{{ detail.entry.license_name }}</span>
+        {% endif %}
       </div>
       <p class="skill-detail-description">{{ detail.entry.description }}</p>
       <h3>Instructions</h3>
@@ -114,6 +117,18 @@
           {% endfor %}
         </ul>
       </article>
+
+      {% if detail.entry.license_name or detail.entry.provenance_md %}
+        <article class="card">
+          <h3>Provenance &amp; license</h3>
+          {% if detail.entry.license_name %}
+            <p class="skill-side-note">License: <span class="badge badge-neutral">{{ detail.entry.license_name }}</span></p>
+          {% endif %}
+          {% if detail.entry.provenance_md %}
+            <pre class="skill-instructions">{{ detail.entry.provenance_md }}</pre>
+          {% endif %}
+        </article>
+      {% endif %}
 
       <article class="card">
         <h3>Recent invocations</h3>

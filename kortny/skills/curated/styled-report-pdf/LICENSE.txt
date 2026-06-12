@@ -1,0 +1,10 @@
+This skill is an original Kortny clean-room authorship.
+
+The concept of a styled-report-pdf skill is inspired by Anthropic's
+proprietary internal document skills (pdf / report authoring). No text or code
+was copied from that source — the standards it encodes (consistent house
+style, page-aware layout, cover blocks, page numbering) are unprotectable
+conventions. The SKILL.md and the script (render_pdf.py) were authored
+independently using WeasyPrint.
+
+This file and all files in this directory are subject to the Kortny project license.

@@ -1,0 +1,9 @@
+This skill is an original Kortny clean-room authorship.
+
+The concept of a chart-maker skill is inspired by Anthropic's proprietary
+internal document / visualization skills. No text or code was copied from that
+source — the standards it encodes (labeled axes, takeaway titles, no chart
+junk, no pie-chart abuse) are unprotectable conventions. The SKILL.md and the
+script (make_chart.py) were authored independently using matplotlib.
+
+This file and all files in this directory are subject to the Kortny project license.

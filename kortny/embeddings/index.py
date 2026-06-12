@@ -5,14 +5,17 @@ from __future__ import annotations
 import hashlib
 import logging
 from collections.abc import Sequence
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from sqlalchemy import CursorResult, delete, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from kortny.db.models import ToolEmbedding
-from kortny.embeddings.backends import EmbeddingBackend
+from kortny.embeddings.backends import EmbeddingBackend, create_embedding_backend
+
+if TYPE_CHECKING:
+    from kortny.config import Settings
 
 logger = logging.getLogger(__name__)
 
@@ -171,6 +174,22 @@ class EmbeddingIndex:
         self.session.execute(statement)
         self.session.flush()
         return len(changed)
+
+
+def embedding_index_from_settings(
+    session: Session, settings: Settings
+) -> EmbeddingIndex | None:
+    """Build an embedding index from runtime settings, or None if unavailable.
+
+    Lets curated/builtin seeding embed skill cards on ingest. Failure-isolated:
+    any missing/disabled config simply skips embedding (the lazy per-task ranker
+    backstops). Shared by the dashboard ``/skills`` view and startup seeding.
+    """
+
+    backend = create_embedding_backend(settings)
+    if backend is None:
+        return None
+    return EmbeddingIndex(session, backend)
 
 
 def _sha256(content: str) -> str:

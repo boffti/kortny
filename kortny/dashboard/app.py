@@ -147,7 +147,7 @@ from kortny.db.models import (
     WitnessOpportunityCandidate,
 )
 from kortny.db.session import make_session_factory
-from kortny.embeddings import EmbeddingIndex, create_embedding_backend
+from kortny.embeddings import EmbeddingIndex, embedding_index_from_settings
 from kortny.execution.preview import verify_preview_token
 from kortny.knowledge_graph.refresh import KnowledgeGraphRefreshService
 from kortny.llm.litellm_catalog import (
@@ -168,6 +168,7 @@ from kortny.llm.provider_config import (
 from kortny.observe.style_cards import reset_style_card, set_pinned_style
 from kortny.secrets import SecretEncryptionError, encrypt_secret_value
 from kortny.skills import SkillRegistryService
+from kortny.skills.bootstrap import seed_skills_at_startup
 from kortny.skills.ingestion import SkillIngestionError
 from kortny.witness import (
     DEFAULT_WITNESS_AUTOPILOT_MIN_CONFIDENCE,
@@ -256,6 +257,17 @@ def create_app(
         register_setup_catch_all(app)
     else:
         register_routes(app)
+
+        @app.on_event("startup")
+        def _seed_skills_on_startup() -> None:
+            # HIG-239: ensure a fresh install has the builtin + curated skill
+            # catalog without waiting for an admin to open /skills. Failure-
+            # isolated end to end; never blocks dashboard boot.
+            runtime_settings, _error = _load_runtime_settings()
+            if runtime_settings is None:
+                return
+            seed_skills_at_startup(resolved_session_factory, runtime_settings)
+
     return app
 
 
@@ -4550,17 +4562,15 @@ def _load_runtime_settings() -> tuple[Settings | None, str | None]:
 def _embedding_index_for(session: Session) -> EmbeddingIndex | None:
     """Build an embedding index from runtime settings, or None if unavailable.
 
-    Lets curated seeding embed skill cards on ingest. Failure-isolated: any
-    missing config simply skips embedding (the lazy per-task ranker backstops).
+    Thin dashboard wrapper over ``embedding_index_from_settings`` that resolves
+    the runtime settings first. Failure-isolated: any missing config simply
+    skips embedding (the lazy per-task ranker backstops).
     """
 
     settings, _error = _load_runtime_settings()
     if settings is None:
         return None
-    backend = create_embedding_backend(settings)
-    if backend is None:
-        return None
-    return EmbeddingIndex(session, backend)
+    return embedding_index_from_settings(session, settings)
 
 
 def _session_principal(request: Request) -> DashboardPrincipal | None:

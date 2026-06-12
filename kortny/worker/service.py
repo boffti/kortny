@@ -24,6 +24,7 @@ from kortny.memory import EpisodeService
 from kortny.observability import configure_tracing, start_span
 from kortny.queue import TaskQueue
 from kortny.queue.service import DEFAULT_LEASE_SECONDS
+from kortny.skills.bootstrap import seed_skills_at_startup
 from kortny.slack.outbox import SlackSideEffectOutbox
 from kortny.tasks import TaskCancelledError, TaskService
 from kortny.worker.agent_executor import AgentTaskExecutor, TaskExecutor
@@ -419,12 +420,17 @@ def main(argv: Sequence[str] | None = None) -> None:
         help="Seconds to sleep between idle polls",
     )
     args = parser.parse_args(argv)
-    configure_tracing(load_settings())
+    settings = load_settings()
+    configure_tracing(settings)
 
     worker = TaskWorker(
         worker_id=args.worker_id,
         poll_interval_seconds=args.poll_interval,
     )
+    # HIG-239: seed builtin + curated skills so a fresh install has skills
+    # before the first task runs (previously only the dashboard /skills view
+    # seeded). Failure-isolated; never blocks worker boot.
+    seed_skills_at_startup(worker.session_factory, settings)
     logger.info("worker started worker_id=%s once=%s", worker.worker_id, args.once)
     if args.once:
         result = worker.run_once()

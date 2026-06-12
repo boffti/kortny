@@ -111,6 +111,30 @@ class Settings(BaseSettings):
         validation_alias="KORTNY_SANDBOX_DEFAULT_IMAGE",
         min_length=1,
     )
+    # --- Sandbox container GC (HIG-200) ---------------------------------------
+    # Consumed by the sandbox-runner service; declared here so every
+    # env-var-backed knob has one authoritative home. The runner reads these
+    # from its own env loader, but they are mirrored here for discoverability
+    # and so config tooling/docs surface them.
+    sandbox_gc_enabled: bool = Field(
+        default=True,
+        validation_alias="KORTNY_SANDBOX_GC_ENABLED",
+    )
+    sandbox_gc_max_age_minutes: int = Field(
+        default=60,
+        validation_alias="KORTNY_SANDBOX_GC_MAX_AGE_MINUTES",
+        gt=0,
+    )
+    sandbox_gc_interval_seconds: int = Field(
+        default=600,
+        validation_alias="KORTNY_SANDBOX_GC_INTERVAL_SECONDS",
+        gt=0,
+    )
+    sandbox_gc_orphan_running_max_age_hours: int = Field(
+        default=24,
+        validation_alias="KORTNY_SANDBOX_GC_ORPHAN_RUNNING_MAX_AGE_HOURS",
+        gt=0,
+    )
     artifacts_dir: str | None = Field(
         default=None,
         validation_alias="KORTNY_ARTIFACTS_DIR",
@@ -309,6 +333,10 @@ class Settings(BaseSettings):
     consolidator_advisory_lock_key: int = Field(
         default=759340187,
         validation_alias="KORTNY_CONSOLIDATOR_ADVISORY_LOCK_KEY",
+    )
+    skills_seed_advisory_lock_key: int = Field(
+        default=759340188,
+        validation_alias="KORTNY_SKILLS_SEED_ADVISORY_LOCK_KEY",
     )
     memory_recency_half_life_days: float = Field(
         default=14.0,

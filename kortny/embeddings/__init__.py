@@ -5,7 +5,7 @@ from kortny.embeddings.backends import (
     FastembedBackend,
     create_embedding_backend,
 )
-from kortny.embeddings.index import EmbeddingIndex
+from kortny.embeddings.index import EmbeddingIndex, embedding_index_from_settings
 from kortny.embeddings.memory_texts import (
     EPISODE_EMBEDDING_KIND,
     FACT_EMBEDDING_KIND,
@@ -29,6 +29,7 @@ __all__ = [
     "FastembedBackend",
     "KG_ENTITY_EMBEDDING_KIND",
     "create_embedding_backend",
+    "embedding_index_from_settings",
     "episode_embedding_text",
     "fact_embedding_text",
     "kg_entity_embedding_text",

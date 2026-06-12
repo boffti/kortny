@@ -4202,7 +4202,7 @@ def test_dashboard_consolidation_page_renders_style_cards(
     response = test_client.get("/consolidation")
 
     assert response.status_code == 200
-    assert "Channel style cards" in response.text
+    assert "Channel Voice" in response.text
     assert "casual" in response.text
     assert "terse" in response.text
     assert "Quick informal replies." in response.text

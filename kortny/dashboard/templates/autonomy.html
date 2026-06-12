@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_page_intro.html" import page_intro %}
 
 {% block title %}Autonomy - Kortny Dashboard{% endblock %}
 
@@ -10,16 +11,18 @@
     </div>
   </section>
 
+  {{ page_intro("The autonomy ladder decides what Kortny may do without asking. Reads, sandboxed code, and local artifacts always run free. External creates and updates run automatically with an audit entry (the implicit tier). Deletes, bulk mutations, and outward-facing actions — publishing, emailing, deploying — always require explicit approval in Slack, regardless of level. A deterministic classifier (SQL verb parsing, HTTP semantics, bulk-signal detection — no LLM) assesses every call. The level set here shifts where the implicit tier sits: conservative gates every write, balanced runs the ladder, autonomous reserves prompts for the irreversible. The audit trail below records every auto-approved write with its risk reasoning.") }}
+
   {% if notice %}
     <div class="notice notice-{{ notice_tone }}" role="status">{{ notice }}</div>
   {% endif %}
 
   {% if autonomy.installation_id is none %}
-    <section class="card">
+    <section class="card detail-section">
       <p class="empty-state">No installation is available yet. Autonomy policies appear once Kortny is connected to a workspace.</p>
     </section>
   {% else %}
-    <section class="card" aria-label="Workspace autonomy default">
+    <section class="card detail-section" aria-label="Workspace autonomy default">
       <header>
         <h2>Workspace default</h2>
         <p>Applies to every channel without an override.
@@ -39,7 +42,7 @@
       </form>
     </section>
 
-    <section class="card" aria-label="Per-channel autonomy overrides">
+    <section class="card detail-section" aria-label="Per-channel autonomy overrides">
       <header>
         <h2>Channel overrides</h2>
         <p>A channel override beats the workspace default. Narrowest scope wins.</p>
@@ -47,7 +50,7 @@
 
       <form method="post" action="/autonomy/channel" class="inline-form">
         <input type="hidden" name="next" value="{{ autonomy_return_path }}">
-        <input type="text" name="channel_id" maxlength="64" placeholder="Channel ID (e.g. C0123ABC)" required>
+        <input class="input" type="text" name="channel_id" maxlength="64" placeholder="Channel ID (e.g. C0123ABC)" required>
         <select class="input" name="level" aria-label="Channel autonomy level">
           {% for level in autonomy.levels %}
             <option value="{{ level }}">{{ level }}</option>
@@ -57,7 +60,8 @@
       </form>
 
       {% if autonomy.channel_rows %}
-        <table class="data-table">
+        <div class="overflow-x-auto">
+        <table class="table">
           <thead>
             <tr>
               <th>Channel</th>
@@ -96,18 +100,20 @@
             {% endfor %}
           </tbody>
         </table>
+        </div>
       {% else %}
         <p class="empty-state">No channel overrides. Every channel uses the workspace default.</p>
       {% endif %}
     </section>
 
-    <section class="card" aria-label="Recent autonomy decisions">
+    <section class="card detail-section" aria-label="Recent autonomy decisions">
       <header>
         <h2>Audit trail</h2>
         <p>Recent auto-approved Tier-1 (external create/update) calls. Reads and explicit-approval prompts are not listed here.</p>
       </header>
       {% if autonomy.audit_rows %}
-        <table class="data-table">
+        <div class="overflow-x-auto">
+        <table class="table">
           <thead>
             <tr>
               <th>Time</th>
@@ -137,6 +143,7 @@
             {% endfor %}
           </tbody>
         </table>
+        </div>
       {% else %}
         <p class="empty-state">No auto-approved Tier-1 decisions recorded yet.</p>
       {% endif %}

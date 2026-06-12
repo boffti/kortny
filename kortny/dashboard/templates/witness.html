@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_page_intro.html" import page_intro %}
 
 {% block title %}Witness - Kortny Dashboard{% endblock %}
 
@@ -19,6 +20,8 @@
       </form>
     </div>
   </section>
+
+  {{ page_intro("Witness is the part of Kortny that acts unprompted. It reads fresh channel profiles (built by passive observation), extracts opportunity candidates — recurring work Kortny could take over, gaps it could fill — and decides whether to suggest them. Delivery is deliberately scarce: a receptivity score learned from your accepts and dismissals gates every candidate (staying silent is a logged decision), and budgets cap digests at one DM a day and channel posts at one a week. Accepting a recurring suggestion creates a real schedule with one confirmation. This page shows the candidate pipeline: what was noticed, what was suggested, what you decided, and what became an automation.") }}
 
   {% if notice %}
     <div class="notice notice-{{ notice_tone }}" role="status">{{ notice }}</div>

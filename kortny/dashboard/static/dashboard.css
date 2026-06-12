@@ -10161,3 +10161,201 @@ details[open] > summary::after {
     gap: 10px;
   }
 }
+
+/* Inline action-form row (autonomy / consolidation) */
+.inline-form {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0;
+  min-width: 0;
+}
+
+.inline-form .input {
+  min-width: 0;
+}
+
+/* Top-level forms placed directly in a card get padding;
+   in-cell forms (inside <td>) are unaffected. */
+.card > .inline-form {
+  border-top: 1px solid var(--border);
+  padding: 16px;
+}
+
+.card > header + .inline-form,
+.card > .inline-form:first-of-type {
+  border-top: 0;
+}
+
+
+/* Consolidation — run cards (replaces a 13-column table) */
+.run-list {
+  display: grid;
+  gap: 12px;
+  padding: 0 16px 16px;
+}
+
+.run-card {
+  background: var(--payload-bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+}
+
+.run-card-head {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.run-card-id {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  min-width: 0;
+}
+
+.run-card-id time {
+  color: var(--muted-foreground);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+}
+
+.run-card-cost {
+  color: var(--foreground);
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 800;
+}
+
+.run-stats {
+  background: var(--border);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  display: grid;
+  gap: 1px;
+  grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+  margin: 0;
+  overflow: hidden;
+}
+
+.run-stats div {
+  background: var(--card);
+  min-width: 0;
+  padding: 8px 10px;
+}
+
+.run-stats dt {
+  color: var(--muted-foreground);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.run-stats dd {
+  color: var(--foreground);
+  font-size: 15px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 750;
+  margin: 2px 0 0;
+}
+
+.run-errors {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+
+/* Channel Voice table — keep the channel column from being squished */
+.style-cards-table th:first-child,
+.style-cards-table td:first-child {
+  min-width: 150px;
+}
+
+.style-cards-table td:first-child .identity-name {
+  overflow-wrap: normal;
+  white-space: nowrap;
+}
+
+
+/* Generic muted-text utility */
+.muted {
+  color: var(--muted-foreground);
+}
+
+/* Schedules — system-drives section header + separation between lists */
+.schedule-section-header {
+  margin-bottom: 12px;
+}
+
+.schedule-section-title {
+  align-items: center;
+  color: var(--foreground);
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 15px;
+  font-weight: 700;
+  gap: 8px;
+  margin: 0 0 4px;
+}
+
+.schedule-section-note,
+.schedule-drive-purpose {
+  font-size: 13px;
+  line-height: 1.45;
+  margin: 0;
+}
+
+/* Stacked schedule lists (system drives above user schedules) need a gap */
+.schedule-list + .schedule-list,
+.schedule-list + .schedule-section-header {
+  margin-top: 20px;
+}
+
+/* Collapsible "About this page" explainer shown under each page heading */
+.page-intro {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  margin-bottom: 24px;
+  padding: 0;
+}
+
+.page-intro > summary {
+  border-radius: var(--radius);
+  color: var(--muted-foreground);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  list-style-position: inside;
+  padding: 12px 16px;
+}
+
+.page-intro > summary:hover {
+  color: var(--foreground);
+}
+
+.page-intro[open] > summary {
+  border-bottom: 1px solid var(--border);
+  border-radius: var(--radius) var(--radius) 0 0;
+  color: var(--foreground);
+}
+
+.page-intro > p {
+  color: var(--muted-foreground);
+  font-size: 13px;
+  line-height: 1.55;
+  max-width: 78ch;
+  padding: 14px 16px 16px;
+}
+

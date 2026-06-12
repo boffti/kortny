@@ -169,6 +169,97 @@ Witness is on by default and intentionally bounded: it only auto-starts non-inte
 | Bring-your-own MCP servers (Composio-free integration plane) | ⬜ Planned |
 | Network-enabled sandbox profile (pip/npm via egress allowlist) | ⬜ Planned |
 
+## 🧠 How Kortny thinks
+
+Kortny splits into two halves: the **request path** (you ask, it answers —
+seconds to minutes) and the **ambient stack** (it watches, learns, and acts
+unprompted — hours to weeks). The request path is the visible product; the
+ambient stack is what makes it a coworker instead of a chatbot. Four systems
+form one pipeline: **observe → remember → consolidate → act**.
+
+### Observe — the senses
+
+Messages in channels Kortny sits in (not addressed to it) land as
+observation events, gated by per-channel policy (observation on/off,
+proactivity level, retention). No LLM runs at ingest. Periodically a channel
+**profile** is assessed: Kortny's working impression of what the room is
+about — who's in it, what work recurs, what's struggling — with confidence
+and evidence.
+
+### Memory & graph — two stores, different trust
+
+- **Facts** are small, explicit, *user-confirmed* truths ("we use AMA
+  citation style"). They follow propose → Slack confirm → active; nothing
+  automated may ever invalidate one.
+- The **knowledge graph** is the machine-inferred web: entities (people,
+  projects, decisions, commitments) and edges, with three properties that
+  keep it honest:
+  - **Lifecycle** — entities are born `candidate`, earn `active`/`confirmed`
+    through corroboration, and decay to `stale`/`archived` when nothing
+    reinforces them.
+  - **Bi-temporal truth** — contradiction never deletes. The old belief gets
+    `invalid_at` stamped and a successor is created, so "what did we believe
+    on June 10" has a real answer and stale facts don't get confidently
+    repeated.
+  - **Provenance** — every entity carries evidence rows pointing at the
+    exact tasks/episodes/observations it came from. "Why do you think that?"
+    always has an answer.
+- **Episodes** are per-task experience summaries — the raw feedstock for
+  consolidation, retrieved into context by thread/channel/user proximity.
+
+### Consolidation — sleep
+
+If experience just piled up, memory would be an append-only junk drawer.
+The consolidator is Kortny's sleep cycle: it runs when there's enough new
+material and the workspace is quiet, and turns experience into knowledge
+through committed-independently passes — **promotion** (an LLM arbitrates
+each episode against existing knowledge: ADD / UPDATE / INVALIDATE / NOOP —
+most things are NOOP; chitchat doesn't become memory), candidate
+adjudication, duplicate merge, aging, fact reconciliation, retention
+hygiene, per-channel **style cards** (so Kortny sounds like the room), and
+embedding backfill. Every run is visible on the dashboard with per-pass
+counters and LLM cost.
+
+### Witness — the initiative
+
+The only piece that acts unprompted. It reads fresh channel profiles,
+extracts opportunity candidates ("this desk posts a manual trading summary
+every morning — I could automate that"), dedupes them into reinforcement,
+and gates delivery through a deterministic **receptivity score** built from
+your accept/dismiss history — staying silent is a scored, logged decision.
+Delivery is budgeted (digest DMs, ≤1 channel post/week). Accepting a
+recurring suggestion materializes a real schedule with one confirmation —
+a "yes" creates a standing behavior, not a one-time answer.
+
+### The flywheel
+
+```
+channel chatter ──► Observe (events → profiles)
+                          │
+       tasks ──► Episodes │
+                    │     │
+                    ▼     ▼
+              Consolidation: promote / merge / invalidate / age
+                    │
+                    ▼
+         Graph + Facts (bi-temporal, evidenced)
+              │                        │
+              ▼                        ▼
+   Context assembly (better answers)   Witness (better suggestions)
+                                           │ accept
+                                           ▼
+                                   Schedules (standing automations)
+                                           │
+                                           ▼
+                                  more tasks → more episodes → loop
+```
+
+Every drive in this loop is visible: the witness scan, memory
+consolidation, and catalog sync run as pausable **System schedules** on the
+dashboard, every graph entity shows its evidence, and every suggestion
+carries its reasons. The whole point of self-hosting an AI coworker is that
+none of this is a black box.
+
 ## 🛡 Security model
 
 Kortny executes model-written code and acts on your tools, so the guardrails are harness-owned, not model-owned. Full details in [SECURITY.md](./SECURITY.md).

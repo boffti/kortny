@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_page_intro.html" import page_intro %}
 
 {% block title %}Knowledge Graph - Kortny Dashboard{% endblock %}
 
@@ -16,6 +17,8 @@
       <a class="btn-ghost" href="/memory">View Memory</a>
     </div>
   </section>
+
+  {{ page_intro("The knowledge graph is Kortny's inferred memory: entities (people, projects, decisions, commitments) and the edges between them, distilled from tasks and observations by consolidation. Entities earn their place — born as candidates, promoted as evidence corroborates them, aged out when nothing reinforces them. Contradiction is recorded, not erased: superseded beliefs keep their validity window, so past answers stay explainable. Every entity links to the evidence it came from. If Kortny believes something, this page can show why.") }}
 
   {% if notice %}
     <div class="notice notice-{{ notice_tone }}" role="status">{{ notice }}</div>

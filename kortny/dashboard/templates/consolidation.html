@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_page_intro.html" import page_intro %}
 
 {% block title %}Consolidation - Kortny Dashboard{% endblock %}
 
@@ -9,6 +10,8 @@
       <p>Sleep-time memory runs: episode promotion, candidate adjudication, duplicate merge, aging, fact reconciliation, and hygiene.</p>
     </div>
   </section>
+
+  {{ page_intro("Consolidation is Kortny's sleep cycle. Raw experience — task episodes, channel observations — piles up during the day; when enough is new and the workspace goes quiet, a run distills it into durable knowledge. Each run executes independent passes: promotion (an LLM arbitrates every episode against existing knowledge — add, update, invalidate, or ignore; most things are ignored, chitchat doesn't become memory), candidate adjudication, duplicate merge, aging, fact reconciliation, retention hygiene, per-channel style cards, and embedding backfill. Contradictions never delete: the old belief is timestamped invalid and a successor is created. This page shows every run with per-pass counters and LLM cost — if memory changed, you can see exactly when and why.") }}
 
   <section class="summary-grid" aria-label="Consolidation overview">
     <div class="card metric-card">
@@ -25,75 +28,61 @@
     </div>
   </section>
 
-  <section class="card" aria-label="Recent consolidation runs">
+  <section class="card detail-section" aria-label="Recent consolidation runs">
     <header>
       <h2>Recent runs</h2>
       <p>Counters per run; failures inside a single pass are noted without failing the run.</p>
     </header>
     {% if consolidation.runs %}
-      <table class="data-table">
-        <thead>
-          <tr>
-            <th>Started</th>
-            <th>Status</th>
-            <th>Promoted</th>
-            <th>Updated</th>
-            <th>Merged</th>
-            <th>Invalidated</th>
-            <th>Archived</th>
-            <th>Purged obs.</th>
-            <th>Profiles</th>
-            <th>Style cards</th>
-            <th>Embedded</th>
-            <th>Conflicts</th>
-            <th>Cost</th>
-          </tr>
-        </thead>
-        <tbody>
-          {% for run in consolidation.runs %}
-            <tr>
-              <td>{{ run.started_at.strftime('%Y-%m-%d %H:%M') }}</td>
-              <td><span class="badge badge-{{ run.status_tone }}">{{ run.status }}</span></td>
-              <td>{{ run.promoted }}</td>
-              <td>{{ run.updated }}</td>
-              <td>{{ run.merged }}</td>
-              <td>{{ run.invalidated }}</td>
-              <td>{{ run.archived }}</td>
-              <td>{{ run.purged_observations }}</td>
-              <td>{{ run.profiles_refreshed }}</td>
-              <td>{{ run.style_cards_derived }}</td>
-              <td>{{ run.embedded }}</td>
-              <td>{{ run.conflict_count }}</td>
-              <td>{{ run.cost_label }}</td>
-            </tr>
+      <div class="run-list">
+        {% for run in consolidation.runs %}
+          <article class="run-card">
+            <div class="run-card-head">
+              <div class="run-card-id">
+                <span class="badge badge-{{ run.status_tone }}">{{ run.status }}</span>
+                <time datetime="{{ run.started_at.isoformat() }}">{{ run.started_at.strftime('%Y-%m-%d %H:%M') }}</time>
+              </div>
+              <span class="run-card-cost">{{ run.cost_label }}</span>
+            </div>
+            <dl class="run-stats">
+              <div><dt>Promoted</dt><dd>{{ run.promoted }}</dd></div>
+              <div><dt>Updated</dt><dd>{{ run.updated }}</dd></div>
+              <div><dt>Merged</dt><dd>{{ run.merged }}</dd></div>
+              <div><dt>Invalidated</dt><dd>{{ run.invalidated }}</dd></div>
+              <div><dt>Archived</dt><dd>{{ run.archived }}</dd></div>
+              <div><dt>Purged obs.</dt><dd>{{ run.purged_observations }}</dd></div>
+              <div><dt>Profiles</dt><dd>{{ run.profiles_refreshed }}</dd></div>
+              <div><dt>Style cards</dt><dd>{{ run.style_cards_derived }}</dd></div>
+              <div><dt>Embedded</dt><dd>{{ run.embedded }}</dd></div>
+              <div><dt>Conflicts</dt><dd>{{ run.conflict_count }}</dd></div>
+            </dl>
             {% if run.pass_errors %}
-              <tr>
-                <td colspan="13">
-                  {% for error in run.pass_errors %}
-                    <span class="badge badge-warning">{{ error }}</span>
-                  {% endfor %}
-                </td>
-              </tr>
+              <div class="run-errors">
+                {% for error in run.pass_errors %}
+                  <span class="badge badge-warning">{{ error }}</span>
+                {% endfor %}
+              </div>
             {% endif %}
-          {% endfor %}
-        </tbody>
-      </table>
+          </article>
+        {% endfor %}
+      </div>
     {% else %}
       <p class="empty-state">No consolidation runs yet. The consolidator service runs when enough new episodes and observations accumulate, with a nightly floor.</p>
     {% endif %}
   </section>
 
-  <section class="card" aria-label="Channel style cards">
+  <section class="card detail-section" aria-label="Channel voice">
     <header>
-      <h2>Channel style cards</h2>
-      <p>Learned per-channel register (formality, brevity, emoji and punctuation norms) the responder matches. Reset clears the derived card for re-derivation; a pinned style overrides the derived channel voice verbatim.</p>
+      <h2>Channel Voice</h2>
+      <p>The per-channel writing style Kortny learns and matches — formality, brevity, emoji and punctuation norms. Reset clears the learned voice for re-derivation; a pinned style overrides it verbatim.</p>
     </header>
     {% if consolidation.style_cards %}
-      <table class="data-table">
+      <div class="overflow-x-auto">
+      <table class="table style-cards-table">
         <thead>
           <tr>
             <th>Channel</th>
-            <th>Register</th>
+            <th>Tone</th>
             <th>Common phrases</th>
             <th>Notes</th>
             <th>Updated</th>
@@ -105,8 +94,8 @@
           {% for card in consolidation.style_cards %}
             <tr>
               <td>
-                {{ card.channel.name }}
-                {% if card.channel.secondary %}<span class="muted">{{ card.channel.secondary }}</span>{% endif %}
+                <span class="identity-name">{{ card.channel.name }}</span>
+                {% if card.channel.secondary %}<span class="identity-id">{{ card.channel.secondary }}</span>{% endif %}
               </td>
               <td>
                 {% if card.has_card %}
@@ -126,7 +115,7 @@
                 {% if dashboard_is_admin %}
                   <form method="post" action="/consolidation/style-cards/{{ card.profile_id }}/pin" class="inline-form">
                     <input type="hidden" name="next" value="/consolidation">
-                    <input type="text" name="pinned_style" value="{{ card.pinned_style or '' }}" maxlength="240" placeholder="Pinned style override">
+                    <input class="input" type="text" name="pinned_style" value="{{ card.pinned_style or '' }}" maxlength="240" placeholder="Pinned style override">
                     <button type="submit" class="btn-ghost">Save</button>
                   </form>
                 {% else %}
@@ -145,18 +134,20 @@
           {% endfor %}
         </tbody>
       </table>
+      </div>
     {% else %}
       <p class="empty-state">No active channel profiles yet. Style cards appear after the consolidator has profiled channels with enough recent observed messages.</p>
     {% endif %}
   </section>
 
-  <section class="card" aria-label="User-confirmed knowledge conflicts">
+  <section class="card detail-section" aria-label="User-confirmed knowledge conflicts">
     <header>
       <h2>Conflicts</h2>
       <p>Episodes that contradicted user-confirmed knowledge. Confirmed facts are never auto-invalidated; review these manually.</p>
     </header>
     {% if consolidation.conflicts %}
-      <table class="data-table">
+      <div class="overflow-x-auto">
+      <table class="table">
         <thead>
           <tr>
             <th>Run</th>
@@ -176,6 +167,7 @@
           {% endfor %}
         </tbody>
       </table>
+      </div>
     {% else %}
       <p class="empty-state">No conflicts flagged.</p>
     {% endif %}

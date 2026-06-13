@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import mimetypes
 import uuid
 from collections.abc import Mapping
@@ -15,6 +16,7 @@ from sqlalchemy.orm import Session
 
 from kortny.db.models import Artifact, Task, TaskEvent, TaskEventType
 from kortny.observability import set_span_attributes, start_span
+from kortny.slack.egress import scan_outbound_urls
 from kortny.slack.formatting import normalize_user_facing_text
 from kortny.slack.outbox import (
     SlackSideEffectOutbox,
@@ -22,6 +24,12 @@ from kortny.slack.outbox import (
     slack_message_key,
 )
 from kortny.tasks import TaskService
+
+logger = logging.getLogger(__name__)
+
+# HIG-169 P0.1: outbound posts never trigger Slack's unfurl preview fetch, the
+# exfiltration vector behind the Slack AI / Anthropic Slack MCP incidents.
+EGRESS_URL_FLAGGED_MESSAGE = "egress_url_flagged"
 
 
 class SlackPostingError(RuntimeError):
@@ -38,6 +46,8 @@ class SlackPostingClient(Protocol):
         text: str,
         thread_ts: str | None = None,
         blocks: list[dict[str, Any]] | None = None,
+        unfurl_links: bool = True,
+        unfurl_media: bool = True,
     ) -> Mapping[str, Any]:
         """Post a Slack message."""
 
@@ -83,10 +93,12 @@ class SlackPoster:
         session: Session,
         client: SlackPostingClient,
         task_service: TaskService | None = None,
+        egress_url_allowlist: frozenset[str] = frozenset(),
     ) -> None:
         self.session = session
         self.client = client
         self.task_service = task_service or TaskService(session)
+        self.egress_url_allowlist = egress_url_allowlist
 
     def post_message(
         self,
@@ -101,6 +113,7 @@ class SlackPoster:
         post_thread_ts = _post_thread_ts(thread)
         slack_text = normalize_user_facing_text(text)
         slack_blocks = _normalize_blocks(blocks)
+        self._flag_egress_urls(thread, slack_text, purpose=purpose)
         if thread.channel_id == "playground":
             import uuid
 
@@ -139,6 +152,8 @@ class SlackPoster:
                     text=slack_text,
                     thread_ts=post_thread_ts,
                     blocks=slack_blocks,
+                    unfurl_links=False,
+                    unfurl_media=False,
                 )
             else:
                 task = self._resolve_task(thread.task_id)
@@ -164,6 +179,8 @@ class SlackPoster:
                         text=slack_text,
                         thread_ts=post_thread_ts,
                         blocks=slack_blocks,
+                        unfurl_links=False,
+                        unfurl_media=False,
                     ),
                 )
                 response = result.response
@@ -405,6 +422,57 @@ class SlackPoster:
             )
             .order_by(Artifact.created_at.desc())
             .limit(1)
+        )
+
+    def _flag_egress_urls(
+        self,
+        thread: SlackThread,
+        slack_text: str,
+        *,
+        purpose: str,
+    ) -> None:
+        """Flag + log outbound URLs that look like exfiltration payloads.
+
+        Observability only — never blocks the post. The unfurl-off flags on the
+        actual ``chat_postMessage`` call are the real exfil fix; this records
+        which non-allowlisted hosts an outbound URL with a suspicious query
+        string is pointing at, so an operator can audit attempted exfiltration.
+        """
+
+        flagged = scan_outbound_urls(
+            slack_text,
+            allowlist=self.egress_url_allowlist,
+        )
+        if not flagged:
+            return
+        for entry in flagged:
+            logger.debug(
+                "egress url flagged host=%s url_chars=%s longest_value=%s "
+                "channel=%s purpose=%s",
+                entry.host,
+                len(entry.url),
+                entry.longest_value_len,
+                thread.channel_id,
+                purpose,
+            )
+        if thread.task_id is None:
+            return
+        self.task_service.append_event(
+            thread.task_id,
+            TaskEventType.log,
+            {
+                "message": EGRESS_URL_FLAGGED_MESSAGE,
+                "purpose": purpose,
+                "channel": thread.channel_id,
+                "flagged": [
+                    {
+                        "host": entry.host,
+                        "url_chars": len(entry.url),
+                        "longest_query_value_len": entry.longest_value_len,
+                    }
+                    for entry in flagged
+                ],
+            },
         )
 
     def _resolve_task(self, task_id: uuid.UUID) -> Task:

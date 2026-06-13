@@ -32,6 +32,7 @@ def test_mvp_schema_declares_all_core_tables() -> None:
         "skill_enablements",
         "mcp_servers",
         "mcp_server_tools",
+        "tool_pins",
         "tool_embeddings",
         "consolidation_runs",
         "episodes",

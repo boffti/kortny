@@ -610,6 +610,7 @@ class FakeSlackClient:
         text: str,
         thread_ts: str | None = None,
         blocks: list[dict[str, Any]] | None = None,
+        **_kwargs: object,
     ) -> dict[str, Any]:
         self.calls.append({"channel": channel, "text": text})
         return {"ok": True, "channel": channel, "ts": "1765400001.000001"}

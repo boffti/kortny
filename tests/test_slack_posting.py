@@ -39,6 +39,7 @@ class FakeSlackClient:
     def __init__(self) -> None:
         self.messages: list[dict[str, Any]] = []
         self.uploads: list[dict[str, Any]] = []
+        self.unfurl_flags: list[tuple[bool, bool]] = []
 
     def chat_postMessage(
         self,
@@ -47,6 +48,8 @@ class FakeSlackClient:
         text: str,
         thread_ts: str | None = None,
         blocks: list[dict[str, Any]] | None = None,
+        unfurl_links: bool = True,
+        unfurl_media: bool = True,
     ) -> dict[str, Any]:
         message: dict[str, Any] = {
             "channel": channel,
@@ -56,6 +59,7 @@ class FakeSlackClient:
         if blocks is not None:
             message["blocks"] = blocks
         self.messages.append(message)
+        self.unfurl_flags.append((unfurl_links, unfurl_media))
         return {"ok": True, "ts": f"1716400001.{len(self.messages):06d}"}
 
     def files_upload_v2(
@@ -96,6 +100,8 @@ class FakeSlackSdkResponseClient(FakeSlackClient):
         text: str,
         thread_ts: str | None = None,
         blocks: list[dict[str, Any]] | None = None,
+        unfurl_links: bool = True,
+        unfurl_media: bool = True,
     ) -> FakeSlackSdkResponse:
         message: dict[str, Any] = {
             "channel": channel,
@@ -105,6 +111,7 @@ class FakeSlackSdkResponseClient(FakeSlackClient):
         if blocks is not None:
             message["blocks"] = blocks
         self.messages.append(message)
+        self.unfurl_flags.append((unfurl_links, unfurl_media))
         return FakeSlackSdkResponse(
             {"ok": True, "ts": f"1716400001.{len(self.messages):06d}"}
         )
@@ -756,6 +763,94 @@ def cleanup_database(session: Session) -> None:
         Installation,
     ):
         session.execute(delete(model))
+
+
+# --- HIG-169 P0.1: egress unfurl-off + URL flagging --------------------------
+
+
+def test_post_message_disables_link_unfurling(db_session: Session) -> None:
+    # Unfurl-off is the exfiltration fix; it must be set on every outbound post.
+    task = create_task(db_session)
+    client = FakeSlackClient()
+    SlackPoster(session=db_session, client=client).post_message(
+        SlackThread.from_task(task),
+        "Here is the result.",
+    )
+    assert client.unfurl_flags == [(False, False)]
+
+
+def test_post_message_without_task_disables_unfurling(db_session: Session) -> None:
+    client = FakeSlackClient()
+    SlackPoster(session=db_session, client=client).post_message(
+        SlackThread(channel_id="C123", thread_ts="1716400000.000001"),
+        "No task here.",
+    )
+    assert client.unfurl_flags == [(False, False)]
+
+
+def test_post_message_flags_suspicious_egress_url(db_session: Session) -> None:
+    from kortny.slack.posting import EGRESS_URL_FLAGGED_MESSAGE
+
+    task = create_task(db_session)
+    client = FakeSlackClient()
+    payload = "x" * 100
+    SlackPoster(session=db_session, client=client).post_message(
+        SlackThread.from_task(task),
+        f"See https://evil.example.com/collect?data={payload}",
+    )
+    event = db_session.scalar(
+        select(TaskEvent).where(
+            TaskEvent.task_id == task.id,
+            TaskEvent.type == TaskEventType.log,
+            TaskEvent.payload["message"].as_string() == EGRESS_URL_FLAGGED_MESSAGE,
+        )
+    )
+    assert event is not None
+    flagged = event.payload["flagged"]
+    assert flagged[0]["host"] == "evil.example.com"
+
+
+def test_post_message_does_not_flag_plain_url(db_session: Session) -> None:
+    from kortny.slack.posting import EGRESS_URL_FLAGGED_MESSAGE
+
+    task = create_task(db_session)
+    client = FakeSlackClient()
+    SlackPoster(session=db_session, client=client).post_message(
+        SlackThread.from_task(task),
+        "Docs at https://example.com/page?id=42",
+    )
+    event = db_session.scalar(
+        select(TaskEvent).where(
+            TaskEvent.task_id == task.id,
+            TaskEvent.type == TaskEventType.log,
+            TaskEvent.payload["message"].as_string() == EGRESS_URL_FLAGGED_MESSAGE,
+        )
+    )
+    assert event is None
+
+
+def test_post_message_allowlisted_host_not_flagged(db_session: Session) -> None:
+    from kortny.slack.posting import EGRESS_URL_FLAGGED_MESSAGE
+
+    task = create_task(db_session)
+    client = FakeSlackClient()
+    payload = "y" * 100
+    SlackPoster(
+        session=db_session,
+        client=client,
+        egress_url_allowlist=frozenset({"trusted.example.com"}),
+    ).post_message(
+        SlackThread.from_task(task),
+        f"Internal https://trusted.example.com/x?d={payload}",
+    )
+    event = db_session.scalar(
+        select(TaskEvent).where(
+            TaskEvent.task_id == task.id,
+            TaskEvent.type == TaskEventType.log,
+            TaskEvent.payload["message"].as_string() == EGRESS_URL_FLAGGED_MESSAGE,
+        )
+    )
+    assert event is None
 
 
 def create_task(

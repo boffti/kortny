@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import time
+import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -41,6 +42,7 @@ from kortny.db.session import make_session_factory
 from kortny.embeddings import EmbeddingIndex, create_embedding_backend
 from kortny.tool_selection import tool_card_embedding_text
 from kortny.tools.composio_execute import composio_runtime_tool_name
+from kortny.tools.pinning import ToolPinService, compute_tool_fingerprint
 
 logger = logging.getLogger(__name__)
 
@@ -232,6 +234,15 @@ class ComposioCatalogSyncService:
                 )
             ).all()
         }
+        # HIG-169 P0.3: drift-check every tool on every refresh — NOT only the
+        # ones whose card_sha changed. card_sha omits inputSchema, so a
+        # silent inputSchema rug-pull would otherwise pass the card_sha gate
+        # unseen. The fingerprint includes inputSchema and pins independently.
+        self._pin_composio_tools(
+            installation_id=installation_id,
+            toolkit_slug=toolkit_slug,
+            tools=tools,
+        )
         rows: list[dict[str, object]] = []
         for tool in tools:
             side_effect = side_effect_for_tool(tool)
@@ -271,6 +282,54 @@ class ComposioCatalogSyncService:
         self.session.execute(statement)
         self.session.flush()
         return len(rows)
+
+    def _pin_composio_tools(
+        self,
+        *,
+        installation_id: object,
+        toolkit_slug: str,
+        tools: Sequence[ComposioTool],
+    ) -> None:
+        """Pin each Composio tool's full-schema fingerprint; flag drift.
+
+        Composio is a single admin-connected provider trusted at the provider
+        level, so the threat here is drift, not a rogue server: a toolkit
+        silently changing a tool's ``input_parameters`` after approval. Pinning
+        catches that. Failures never fail the sync.
+        """
+
+        if not isinstance(installation_id, uuid.UUID):
+            return
+        pin_service = ToolPinService(self.session)
+        for tool in tools:
+            try:
+                fingerprint = compute_tool_fingerprint(
+                    name=tool.name,
+                    description=tool.description or tool.name,
+                    input_schema=tool.input_parameters,
+                )
+                result = pin_service.check_and_pin(
+                    installation_id=installation_id,
+                    provider="composio",
+                    server_ref=toolkit_slug,
+                    tool_name=tool.slug,
+                    fingerprint=fingerprint,
+                )
+                if result.drifted:
+                    logger.warning(
+                        "composio_tool_schema_drift toolkit=%s tool=%s "
+                        "prior_fingerprint=%s new_fingerprint=%s",
+                        toolkit_slug,
+                        tool.slug,
+                        result.prior_fingerprint,
+                        result.fingerprint,
+                    )
+            except Exception:
+                logger.exception(
+                    "composio_tool_pin_failed toolkit=%s tool=%s",
+                    toolkit_slug,
+                    tool.slug,
+                )
 
     def _embed_cards(
         self,

@@ -409,6 +409,20 @@ class Settings(BaseSettings):
     mcp_tool_timeout_seconds: float = Field(
         default=60.0, validation_alias="KORTNY_MCP_TOOL_TIMEOUT_SECONDS"
     )
+    # --- Prompt-injection / tool-trust baseline (HIG-169 P0) ------------------
+    # Egress allowlist for outbound-post URL flagging. CSV of bare hostnames
+    # (e.g. "example.com,docs.kortny.ai"). Empty (default) flags nothing by
+    # name; the unfurl-off change at the posting boundary is the real exfil
+    # fix, the URL flagging is observability only.
+    egress_url_allowlist: str | None = Field(
+        default=None, validation_alias="KORTNY_EGRESS_URL_ALLOWLIST"
+    )
+    # Trifecta flow gate: once untrusted-origin content has entered a task's
+    # context, escalate approval for any subsequently-selected write/outward
+    # tool. Default on; deterministic, no LLM.
+    trifecta_gate_enabled: bool = Field(
+        default=True, validation_alias="KORTNY_TRIFECTA_GATE_ENABLED"
+    )
     brave_search_api_key: str | None = Field(
         default=None, validation_alias="BRAVE_SEARCH_API_KEY"
     )
@@ -479,6 +493,7 @@ class Settings(BaseSettings):
         "netlify_auth_token",
         "vercel_token",
         "vercel_team_id",
+        "egress_url_allowlist",
         mode="before",
     )
     @classmethod

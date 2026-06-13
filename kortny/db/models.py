@@ -2314,6 +2314,13 @@ class McpServer(Base):
     status: Mapped[str] = mapped_column(
         String, nullable=False, server_default="enabled"
     )
+    # HIG-169 P0.2: trust tier mirrors the skills ladder. ``readOnlyHint`` is
+    # attacker-asserted metadata, so a tool's read-only claim only clears its
+    # approval requirement when its server is trusted (and the tool is
+    # pinned-unchanged). Newly registered servers default to ``untrusted``.
+    trust_tier: Mapped[str] = mapped_column(
+        String, nullable=False, server_default="untrusted"
+    )
     last_discovery_at: Mapped[datetime | None] = mapped_column(TZ)
     last_discovery_error: Mapped[str | None] = mapped_column(Text)
     created_by: Mapped[str] = mapped_column(String, nullable=False)
@@ -2332,6 +2339,10 @@ class McpServer(Base):
         CheckConstraint(
             "status in ('enabled', 'disabled')",
             name="ck_mcp_servers_status",
+        ),
+        CheckConstraint(
+            "trust_tier in ('trusted', 'community', 'untrusted')",
+            name="ck_mcp_servers_trust_tier",
         ),
         CheckConstraint(
             "(transport = 'stdio' and command is not null) or "
@@ -2393,6 +2404,72 @@ class McpServerTool(Base):
             "idx_mcp_server_tools_enabled_lookup",
             "server_id",
             "enabled",
+        ),
+    )
+
+
+class ToolPin(Base):
+    """Pinned fingerprint of one external tool's schema (HIG-169 P0.3).
+
+    Defends against tool rug-pulls: a server (MCP) or toolkit (Composio) that
+    silently mutates a tool's ``inputSchema`` after first approval. The
+    fingerprint is the sha256 of the canonical JSON of the tool's
+    ``{name, description, inputSchema, ...}`` — crucially including the input
+    schema, which the existing ``card_sha`` / ``description_sha256`` columns do
+    NOT cover. ``status`` flips to ``drifted`` when the live fingerprint diverges
+    from the pinned one, which revokes the read-only approval bypass until an
+    admin re-pins. Pin-on-first-sight: the first registration is the admin's
+    implicit approval, consistent with the existing trust model.
+    """
+
+    __tablename__ = "tool_pins"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    installation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("installations.id", ondelete="CASCADE"), nullable=False
+    )
+    provider: Mapped[str] = mapped_column(String, nullable=False)
+    # MCP server id (as string) or Composio toolkit slug.
+    server_ref: Mapped[str] = mapped_column(String, nullable=False)
+    tool_name: Mapped[str] = mapped_column(String, nullable=False)
+    fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    prior_description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    prior_schema_json: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    status: Mapped[str] = mapped_column(String, nullable=False, server_default="active")
+    approved_by: Mapped[str | None] = mapped_column(String, nullable=True)
+    approved_at: Mapped[datetime | None] = mapped_column(TZ)
+    created_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "provider in ('mcp', 'composio')",
+            name="ck_tool_pins_provider",
+        ),
+        CheckConstraint(
+            "status in ('active', 'drifted')",
+            name="ck_tool_pins_status",
+        ),
+        UniqueConstraint(
+            "installation_id",
+            "provider",
+            "server_ref",
+            "tool_name",
+            name="uq_tool_pins_identity",
+        ),
+        Index(
+            "idx_tool_pins_lookup",
+            "installation_id",
+            "provider",
+            "server_ref",
         ),
     )
 

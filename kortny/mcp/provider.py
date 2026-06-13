@@ -17,7 +17,13 @@ from kortny.tools.mcp_execute import (
     McpExecuteTool,
     mcp_runtime_tool_name,
 )
+from kortny.tools.pinning import ToolPinService
 from kortny.tools.types import Tool
+
+# HIG-169 P0.2: MCP servers at these tiers are trusted enough for a tool's own
+# ``readOnlyHint`` to clear approval — but only when the tool is also pinned
+# unchanged (P0.3). Untrusted servers never get the read-only bypass.
+TRUSTED_MCP_TIERS = frozenset({"trusted"})
 
 logger = logging.getLogger(__name__)
 
@@ -58,9 +64,17 @@ class McpExternalToolProvider:
         return tuple(cards)
 
     def runtime_tools(self) -> tuple[Tool, ...]:
+        pin_service = ToolPinService(self.session)
         tools: list[Tool] = []
         for entry in self._load_catalog():
+            server_trusted = entry.server.trust_tier in TRUSTED_MCP_TIERS
             for tool in entry.tools:
+                pin_clean = pin_service.is_clean(
+                    installation_id=self.task.installation_id,
+                    provider="mcp",
+                    server_ref=str(entry.server.id),
+                    tool_name=tool.name,
+                )
                 tools.append(
                     McpExecuteTool(
                         session=self.session,
@@ -72,6 +86,7 @@ class McpExternalToolProvider:
                         name=mcp_runtime_tool_name(entry.server.name, tool.name),
                         session_manager=self._session_manager,
                         result_max_chars=self.result_max_chars,
+                        read_only_bypass_allowed=server_trusted and pin_clean,
                     )
                 )
         return tuple(tools)

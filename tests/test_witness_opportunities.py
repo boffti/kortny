@@ -1262,6 +1262,7 @@ class FakeWitnessSlackClient:
         text: str,
         thread_ts: str | None = None,
         blocks: list[dict] | None = None,
+        **_kwargs: object,
     ) -> dict[str, str | bool]:
         self.calls.append(
             {

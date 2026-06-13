@@ -30,9 +30,17 @@ class _McpToolDescriptor:
     for a ``tags`` collection. Exposing the MCP ``readOnlyHint`` as a tag here
     routes read-only-annotated MCP tools through the same approval path as
     Composio read tools without inventing a new approval mechanism.
+
+    HIG-169 P0.2/P0.3: ``readOnlyHint`` is attacker-asserted metadata. The
+    ``readonlyhint`` tag — the thing that clears the approval requirement — is
+    surfaced ONLY when the providing server is trusted AND the tool is pinned
+    unchanged (``read_only_bypass_allowed``). Otherwise the tag is withheld and
+    the tool falls back to side-effect-based gating even if it claims read-only.
+    The ``read_only_hint`` field still reflects the raw claim for risk shaping.
     """
 
     tags: tuple[str, ...]
+    read_only_hint: bool | None = None
 
 
 class McpExecuteTool:
@@ -50,6 +58,7 @@ class McpExecuteTool:
         name: str | None = None,
         session_manager: McpSessionManager | None = None,
         result_max_chars: int = DEFAULT_RESULT_MAX_CHARS,
+        read_only_bypass_allowed: bool = False,
     ) -> None:
         self.session = session
         self.task = task
@@ -59,12 +68,20 @@ class McpExecuteTool:
         self.timeout_seconds = timeout_seconds
         self.session_manager = session_manager
         self.result_max_chars = result_max_chars
+        self.read_only_bypass_allowed = read_only_bypass_allowed
         self.name = name or mcp_runtime_tool_name(server.name, tool.name)
         self.description = _description(server, tool)
         self.parameters = _parameters(tool)
-        # Surfaced for ToolApprovalPolicy._tool_is_explicitly_read_only.
+        # HIG-169 P0.2/P0.3: only surface the read-only signals the approval
+        # policy uses to CLEAR approval when the server is trusted AND the tool
+        # is pinned unchanged. Otherwise the tool's own read-only claim is not
+        # honored as an approval bypass — it falls back to side-effect gating.
+        bypass_read_only = bool(tool.read_only_hint) and read_only_bypass_allowed
+        # Surfaced for ToolApprovalPolicy._tool_is_explicitly_read_only and
+        # _external_tool_risk_shape (read_only_hint).
         self.tool = _McpToolDescriptor(
-            tags=("readonlyhint",) if tool.read_only_hint else ()
+            tags=("readonlyhint",) if bypass_read_only else (),
+            read_only_hint=True if bypass_read_only else None,
         )
 
     def invoke(self, args: JsonObject) -> ToolResult:

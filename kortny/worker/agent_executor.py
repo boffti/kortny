@@ -93,6 +93,7 @@ from kortny.slack.comments import (
     LLMArtifactCommentGenerator,
     generate_artifact_comment,
 )
+from kortny.slack.egress import parse_egress_allowlist
 from kortny.slack.humanizer import (
     ChannelStyleCardResolver,
     ChannelStyleResolver,
@@ -1037,6 +1038,7 @@ class AgentTaskExecutor:
                 session=session,
             ),
             skill_direct_threshold=settings.skill_direct_similarity_threshold,
+            trifecta_gate_enabled=settings.trifecta_gate_enabled,
         ).run(task)
 
     def _record_semantic_router_shadow(
@@ -2047,6 +2049,7 @@ class AgentTaskExecutor:
             session=session,
             client=client,
             task_service=task_service,
+            egress_url_allowlist=parse_egress_allowlist(settings.egress_url_allowlist),
         )
         thread = SlackThread.from_task(task)
         artifacts = list(

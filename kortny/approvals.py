@@ -407,6 +407,14 @@ def _external_tool_risk_shape(
 
     inner = getattr(tool, "tool", None)
 
+    # HIG-169 P0.2/P0.3: ``readOnlyHint`` is attacker-asserted metadata. When a
+    # tool explicitly signals its read-only claim must NOT be honored as an
+    # approval bypass (untrusted server, or drifted/unpinned schema), suppress
+    # every read-only signal — including the raw ``server_tool`` fallback — so
+    # the tool falls back to side-effect-based gating. Tools without the flag
+    # (native, Composio) keep the existing behavior.
+    bypass_allowed = getattr(tool, "read_only_bypass_allowed", True)
+
     # MCP read-only / destructive annotation hints take precedence when present.
     read_only_hint = getattr(inner, "read_only_hint", None)
     destructive_hint = getattr(inner, "destructive_hint", None)
@@ -420,7 +428,8 @@ def _external_tool_risk_shape(
 
     if destructive_hint is True or (verbs & _DESTRUCTIVE_VERBS):
         return "destructive", tuple(sorted(verbs)) or ("delete",)
-    if _tool_is_explicitly_read_only(tool) or read_only_hint is True:
+    read_only_claim = _tool_is_explicitly_read_only(tool) or read_only_hint is True
+    if read_only_claim and bypass_allowed:
         return "read", ()
     if verbs:
         return "write", tuple(sorted(verbs))

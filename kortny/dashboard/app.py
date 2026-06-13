@@ -93,6 +93,8 @@ from kortny.dashboard.mcp_actions import (
     add_mcp_server,
     parse_kv_textarea,
     remove_mcp_server,
+    repin_mcp_tool,
+    set_mcp_trust_tier,
     toggle_mcp_server,
     toggle_mcp_tool,
 )
@@ -1561,6 +1563,71 @@ def register_routes(app: FastAPI) -> None:
             next_path,
             f"MCP server '{server.name}' {label}.",
             tone="success" if server.status == "enabled" else "warning",
+        )
+
+    @app.post("/mcp/{server_id}/trust")
+    async def mcp_set_trust(
+        request: Request,
+        server_id: UUID,
+        principal: Annotated[DashboardPrincipal, Depends(require_admin)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> RedirectResponse:
+        form = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
+        next_path = _safe_next_path(form.get("next", ["/mcp"])[0])
+        trust_tier = form.get("trust_tier", [""])[0]
+        installation_id = _dashboard_installation_id(session, principal)
+        if installation_id is None:
+            return _redirect_with_notice(
+                next_path, "No workspace scope available.", tone="danger"
+            )
+        try:
+            server = set_mcp_trust_tier(
+                session,
+                installation_id=installation_id,
+                server_id=server_id,
+                trust_tier=trust_tier,
+            )
+            session.commit()
+        except McpServerError as exc:
+            session.rollback()
+            return _redirect_with_notice(next_path, str(exc), tone="danger")
+        return _redirect_with_notice(
+            next_path,
+            f"MCP server '{server.name}' trust tier set to {server.trust_tier}.",
+            tone="success" if server.trust_tier == "trusted" else "warning",
+        )
+
+    @app.post("/mcp/{server_id}/tools/{tool_id}/repin")
+    async def mcp_tool_repin(
+        request: Request,
+        server_id: UUID,
+        tool_id: UUID,
+        principal: Annotated[DashboardPrincipal, Depends(require_admin)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> RedirectResponse:
+        form = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
+        next_path = _safe_next_path(form.get("next", ["/mcp"])[0])
+        installation_id = _dashboard_installation_id(session, principal)
+        if installation_id is None:
+            return _redirect_with_notice(
+                next_path, "No workspace scope available.", tone="danger"
+            )
+        try:
+            tool = repin_mcp_tool(
+                session,
+                installation_id=installation_id,
+                server_id=server_id,
+                tool_id=tool_id,
+                approved_by=dashboard_actor(principal.display_name),
+            )
+            session.commit()
+        except McpServerError as exc:
+            session.rollback()
+            return _redirect_with_notice(next_path, str(exc), tone="danger")
+        return _redirect_with_notice(
+            next_path,
+            f"Re-pinned MCP tool '{tool.name}' as approved.",
+            tone="success",
         )
 
     @app.post("/mcp/{server_id}/discover")

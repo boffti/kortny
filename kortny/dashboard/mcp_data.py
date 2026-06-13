@@ -10,7 +10,7 @@ from decimal import Decimal
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from kortny.db.models import McpServer, McpServerTool
+from kortny.db.models import McpServer, McpServerTool, ToolPin
 
 _QUALITY_THRESHOLD = 0.5
 
@@ -26,6 +26,14 @@ class McpToolRow:
     # Description quality fields (HIG-215)
     description_quality_score: Decimal | None
     enriched_description: str | None
+    # Schema-pin status (HIG-169 P0.3): "active" (pinned unchanged),
+    # "drifted" (schema changed since approval — read-only bypass revoked),
+    # or "unpinned" (never pinned this installation).
+    pin_status: str = "unpinned"
+
+    @property
+    def drifted(self) -> bool:
+        return self.pin_status == "drifted"
 
     @property
     def quality_badge(self) -> str:
@@ -59,6 +67,7 @@ class McpServerRow:
     name: str
     transport: str
     status: str
+    trust_tier: str
     tool_count: int
     enabled_tool_count: int
     last_discovery_at: datetime | None
@@ -96,6 +105,7 @@ def get_mcp_dashboard(
 
     rows: list[McpServerRow] = []
     for server in servers:
+        pin_status = _pin_status_map(session, installation_id, server.id)
         tools = tuple(
             McpToolRow(
                 tool_id=t.id,
@@ -106,6 +116,7 @@ def get_mcp_dashboard(
                 enabled=t.enabled,
                 description_quality_score=t.description_quality_score,
                 enriched_description=t.enriched_description,
+                pin_status=pin_status.get(t.name, "unpinned"),
             )
             for t in session.scalars(
                 select(McpServerTool)
@@ -121,6 +132,7 @@ def get_mcp_dashboard(
                 name=server.name,
                 transport=server.transport,
                 status=server.status,
+                trust_tier=server.trust_tier,
                 tool_count=total,
                 enabled_tool_count=enabled,
                 last_discovery_at=server.last_discovery_at,
@@ -146,6 +158,7 @@ def get_mcp_server_row(
     server = session.get(McpServer, server_id)
     if server is None or server.installation_id != installation_id:
         return None
+    pin_status = _pin_status_map(session, installation_id, server.id)
     tools = tuple(
         McpToolRow(
             tool_id=t.id,
@@ -156,6 +169,7 @@ def get_mcp_server_row(
             enabled=t.enabled,
             description_quality_score=t.description_quality_score,
             enriched_description=t.enriched_description,
+            pin_status=pin_status.get(t.name, "unpinned"),
         )
         for t in session.scalars(
             select(McpServerTool)
@@ -170,6 +184,7 @@ def get_mcp_server_row(
         name=server.name,
         transport=server.transport,
         status=server.status,
+        trust_tier=server.trust_tier,
         tool_count=total,
         enabled_tool_count=enabled,
         last_discovery_at=server.last_discovery_at,
@@ -181,3 +196,20 @@ def get_mcp_server_row(
         url=server.url,
         tools=tools,
     )
+
+
+def _pin_status_map(
+    session: Session,
+    installation_id: uuid.UUID,
+    server_id: uuid.UUID,
+) -> dict[str, str]:
+    """Map ``tool_name -> pin status`` for one MCP server's pinned tools."""
+
+    rows = session.execute(
+        select(ToolPin.tool_name, ToolPin.status).where(
+            ToolPin.installation_id == installation_id,
+            ToolPin.provider == "mcp",
+            ToolPin.server_ref == str(server_id),
+        )
+    ).all()
+    return {tool_name: status for tool_name, status in rows}

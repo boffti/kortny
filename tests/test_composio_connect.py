@@ -375,6 +375,7 @@ class FakePostingSlackClient:
         text: str,
         thread_ts: str | None = None,
         blocks: list[dict[str, Any]] | None = None,
+        **_kwargs: object,
     ) -> dict[str, Any]:
         self.calls.append({"channel": channel, "text": text, "thread_ts": thread_ts})
         return {

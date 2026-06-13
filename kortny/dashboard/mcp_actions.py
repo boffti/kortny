@@ -18,6 +18,7 @@ from kortny.mcp.description_quality import (
     sha256_of_description,
 )
 from kortny.secrets import SecretEncryptionError, encrypt_secret_value
+from kortny.tools.pinning import ToolPinService, compute_tool_fingerprint
 
 logger = logging.getLogger(__name__)
 
@@ -175,6 +176,7 @@ def upsert_discovered_tools(
         session.flush()
         return 0
 
+    pin_service = ToolPinService(session)
     seen_names: set[str] = set()
     upserted = 0
     for tool in discovered:
@@ -216,8 +218,59 @@ def upsert_discovered_tools(
         # Quality scoring + optional enrichment
         _apply_description_quality(row, description, input_schema, llm=llm)
 
+        # HIG-169 P0.3: pin the tool's schema fingerprint on first sight; flag
+        # drift (and revoke the read-only bypass) when inputSchema/description
+        # changes after approval. Pinning failures never fail discovery.
+        try:
+            fingerprint = compute_tool_fingerprint(
+                name=tool_name,
+                description=description,
+                input_schema=input_schema if isinstance(input_schema, dict) else {},
+                annotations=_mcp_pin_annotations(read_only_hint, destructive_hint),
+            )
+            result = pin_service.check_and_pin(
+                installation_id=server.installation_id,
+                provider="mcp",
+                server_ref=str(server.id),
+                tool_name=tool_name,
+                fingerprint=fingerprint,
+            )
+            if result.drifted:
+                logger.warning(
+                    "mcp_tool_schema_drift server=%s tool=%s prior_fingerprint=%s "
+                    "new_fingerprint=%s",
+                    server.name,
+                    tool_name,
+                    result.prior_fingerprint,
+                    result.fingerprint,
+                )
+        except Exception:
+            logger.exception(
+                "mcp_tool_pin_failed",
+                extra={"server": server.name, "tool_name": tool_name},
+            )
+
     session.flush()
     return upserted
+
+
+def _mcp_pin_annotations(
+    read_only_hint: bool | None,
+    destructive_hint: bool | None,
+) -> dict[str, bool] | None:
+    """Fold the MCP annotation hints into the fingerprint.
+
+    A server flipping ``readOnlyHint`` true->false (or destructive false->true)
+    is itself a meaningful change in the tool's claimed behavior, so it should
+    register as drift even when name/description/schema are otherwise stable.
+    """
+
+    annotations: dict[str, bool] = {}
+    if read_only_hint is not None:
+        annotations["readOnlyHint"] = read_only_hint
+    if destructive_hint is not None:
+        annotations["destructiveHint"] = destructive_hint
+    return annotations or None
 
 
 # ---------------------------------------------------------------------------
@@ -272,6 +325,59 @@ def _apply_description_quality(
             "mcp_description_quality_failed",
             extra={"tool_name": row.name},
         )
+
+
+VALID_TRUST_TIERS = ("trusted", "community", "untrusted")
+
+
+def set_mcp_trust_tier(
+    session: Session,
+    *,
+    installation_id: uuid.UUID,
+    server_id: uuid.UUID,
+    trust_tier: str,
+) -> McpServer:
+    """Set an MCP server's trust tier (HIG-169 P0.2).
+
+    Only a ``trusted`` tier lets a tool's ``readOnlyHint`` clear approval, and
+    only when the tool is also pinned unchanged.
+    """
+
+    trust_tier = trust_tier.strip()
+    if trust_tier not in VALID_TRUST_TIERS:
+        raise McpServerError(
+            f"Trust tier must be one of: {', '.join(VALID_TRUST_TIERS)}."
+        )
+    server = _get_server(session, installation_id, server_id)
+    server.trust_tier = trust_tier
+    server.updated_at = datetime.now(UTC)
+    session.flush()
+    return server
+
+
+def repin_mcp_tool(
+    session: Session,
+    *,
+    installation_id: uuid.UUID,
+    server_id: uuid.UUID,
+    tool_id: uuid.UUID,
+    approved_by: str,
+) -> McpServerTool:
+    """Admin re-approval of a drifted MCP tool: reset its pin to ``active``."""
+
+    _get_server(session, installation_id, server_id)
+    tool = session.get(McpServerTool, tool_id)
+    if tool is None or tool.server_id != server_id:
+        raise McpServerError("Tool not found.")
+    ToolPinService(session).repin(
+        installation_id=installation_id,
+        provider="mcp",
+        server_ref=str(server_id),
+        tool_name=tool.name,
+        approved_by=approved_by,
+    )
+    session.flush()
+    return tool
 
 
 def toggle_mcp_tool(

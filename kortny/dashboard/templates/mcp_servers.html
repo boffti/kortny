@@ -57,6 +57,7 @@
                 <div class="mcp-server-badges">
                   {{ transport_badge(server.transport) }}
                   {{ status_badge(server.status) }}
+                  <span class="badge badge-{{ 'success' if server.trust_tier == 'trusted' else ('warning' if server.trust_tier == 'community' else 'neutral') }}" title="Trust tier — only 'trusted' servers let a tool's readOnlyHint clear approval (and only when pinned unchanged).">trust: {{ server.trust_tier }}</span>
                 </div>
               </div>
               <div class="mcp-server-actions">
@@ -69,6 +70,14 @@
                   <button class="btn-ghost" type="submit">
                     {{ 'Disable' if server.status == 'enabled' else 'Enable' }}
                   </button>
+                </form>
+                <form method="post" action="/mcp/{{ server.server_id }}/trust" class="mcp-trust-form">
+                  <input type="hidden" name="next" value="{{ mcp_return_path }}" />
+                  <select name="trust_tier" aria-label="Trust tier" onchange="this.form.submit()">
+                    {% for tier in ('untrusted', 'community', 'trusted') %}
+                      <option value="{{ tier }}" {{ 'selected' if server.trust_tier == tier else '' }}>{{ tier }}</option>
+                    {% endfor %}
+                  </select>
                 </form>
                 <form method="post" action="/mcp/{{ server.server_id }}/remove"
                       onsubmit="return confirm('Remove MCP server \'{{ server.name }}\'? This deletes all its tool records.');">
@@ -124,6 +133,7 @@
                       <th>Description</th>
                       <th>Quality</th>
                       <th>Side-effect</th>
+                      <th>Pin</th>
                       <th>Runtime name</th>
                       <th>Enabled</th>
                     </tr>
@@ -137,6 +147,20 @@
                           <span class="badge badge-{{ tool.quality_badge }}" title="Description quality score: {{ '%.2f'|format(tool.description_quality_score|float) if tool.description_quality_score is not none else 'unscored' }}">{{ tool.quality_label }}</span>
                         </td>
                         <td>{{ hint_chip(tool.read_only_hint, tool.destructive_hint) }}</td>
+                        <td>
+                          {% if tool.drifted %}
+                            <span class="badge badge-danger" title="Schema changed since approval — the read-only approval bypass is revoked until you re-pin.">drifted</span>
+                            <form method="post" action="/mcp/{{ server.server_id }}/tools/{{ tool.tool_id }}/repin"
+                                  onsubmit="return confirm('Re-pin \'{{ tool.name }}\' as approved? Only do this after reviewing the schema change.');">
+                              <input type="hidden" name="next" value="{{ mcp_return_path }}" />
+                              <button class="btn-ghost btn-ghost-sm" type="submit">Re-pin</button>
+                            </form>
+                          {% elif tool.pin_status == 'active' %}
+                            <span class="badge badge-success" title="Pinned — schema unchanged since approval.">pinned</span>
+                          {% else %}
+                            <span class="badge badge-neutral" title="Not yet pinned this workspace.">unpinned</span>
+                          {% endif %}
+                        </td>
                         <td><code class="mcp-runtime-name">mcp__{{ server.name }}__{{ tool.name }}</code></td>
                         <td>
                           <form method="post" action="/mcp/{{ server.server_id }}/tools/{{ tool.tool_id }}/toggle">

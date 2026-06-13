@@ -4552,6 +4552,7 @@ class FakeSlackClient:
         self.uploads: list[dict[str, Any]] = []
         self.reaction_adds: list[dict[str, Any]] = []
         self.reaction_removes: list[dict[str, Any]] = []
+        self.unfurl_flags: list[tuple[bool, bool]] = []
 
     def chat_postMessage(
         self,
@@ -4560,6 +4561,8 @@ class FakeSlackClient:
         text: str,
         thread_ts: str | None = None,
         blocks: list[dict[str, Any]] | None = None,
+        unfurl_links: bool = True,
+        unfurl_media: bool = True,
     ) -> dict[str, Any]:
         message: dict[str, Any] = {
             "channel": channel,
@@ -4569,6 +4572,7 @@ class FakeSlackClient:
         if blocks is not None:
             message["blocks"] = blocks
         self.messages.append(message)
+        self.unfurl_flags.append((unfurl_links, unfurl_media))
         return {"ok": True, "ts": f"1716400100.{len(self.messages):06d}"}
 
     def files_upload_v2(

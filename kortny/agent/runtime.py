@@ -60,6 +60,7 @@ class CustomAgentRuntime:
         capability_overview: CapabilityOverview | None = None,
         embedding_index: EmbeddingIndex | None = None,
         skill_direct_threshold: float = DEFAULT_SKILL_DIRECT_THRESHOLD,
+        trifecta_gate_enabled: bool = True,
     ) -> None:
         self.coordinator = AgentCoordinator(
             session=session,
@@ -83,6 +84,7 @@ class CustomAgentRuntime:
             capability_overview=capability_overview,
             embedding_index=embedding_index,
             skill_direct_threshold=skill_direct_threshold,
+            trifecta_gate_enabled=trifecta_gate_enabled,
         )
 
     def run(self, task: Task | uuid.UUID) -> AgentRunResult:

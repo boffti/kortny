@@ -298,6 +298,29 @@ class TestSkillIngestion:
         db_session.refresh(first.version)
         assert first.version.status == "deprecated"
 
+    def test_repeated_content_changes_never_collide_on_version(
+        self, db_session: Session, tmp_path: Path
+    ) -> None:
+        # Regression: content can change repeatedly while the frontmatter version
+        # stays put. The 1st change auto-bumps (declared == latest), but the 2nd
+        # has declared (1.2.0) != latest (1.2.1), which previously re-selected the
+        # already-taken 1.2.0 and aborted the whole seed on the unique
+        # (skill_id, version) constraint. Versions must stay unique across N
+        # changes without raising.
+        service = SkillIngestionService(db_session)
+        service.ingest_directory(FIXTURE_SKILL_DIR, owner_id="W1", **INGEST_KWARGS)
+
+        seen = {"1.2.0"}
+        for i in range(1, 4):
+            edited = tmp_path / f"demo-skill-{i}"
+            shutil.copytree(FIXTURE_SKILL_DIR, edited)
+            skill_md = edited / "SKILL.md"
+            skill_md.write_text(skill_md.read_text() + f"\n{i}. Revision {i}.\n")
+            result = service.ingest_directory(edited, owner_id="W1", **INGEST_KWARGS)
+            assert result.created_new_version
+            assert result.version.version not in seen, "version collided"
+            seen.add(result.version.version)
+
     def test_ingest_zip_with_nested_root(self, db_session: Session) -> None:
         service = SkillIngestionService(db_session)
         data = make_zip(FIXTURE_SKILL_DIR, prefix="some-upload-name/")

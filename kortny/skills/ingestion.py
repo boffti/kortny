@@ -245,6 +245,20 @@ class SkillIngestionService:
                 version_str = declared_version
             else:
                 version_str = _bump_patch(latest.version)
+        # Guarantee uniqueness on (skill_id, version): content can change while
+        # the frontmatter version stays put (or a prior auto-bump already took
+        # the declared string), so the chosen version may already exist. Bump
+        # the patch until it's free — otherwise the insert hits
+        # idx_procedural_skill_versions_unique and aborts the whole seed.
+        existing_versions = set(
+            self.session.scalars(
+                select(ProceduralSkillVersion.version).where(
+                    ProceduralSkillVersion.skill_id == skill.id
+                )
+            )
+        )
+        while version_str in existing_versions:
+            version_str = _bump_patch(version_str)
 
         allowed_tools = (parsed.frontmatter.allowed_tools or "").split()
         version = ProceduralSkillVersion(

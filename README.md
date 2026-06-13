@@ -164,9 +164,9 @@ Witness is on by default and intentionally bounded: it only auto-starts non-inte
 | PDF / document generation | ✅ Shipped |
 | Per-channel personality profiles (tone, verbosity, proactivity) | ✅ Shipped |
 | OTEL tracing (Phoenix local / Langfuse Cloud) | ✅ Shipped |
+| Bring-your-own MCP servers (Composio-free integration plane) | ✅ Shipped |
 | Google ADK agent runtime (`AGENT_RUNTIME=adk`) | 🟡 Beta |
 | Temporal durable workflow backend | 🟡 Experimental |
-| Bring-your-own MCP servers (Composio-free integration plane) | ⬜ Planned |
 | Network-enabled sandbox profile (pip/npm via egress allowlist) | ⬜ Planned |
 
 ## 🧠 How Kortny thinks
@@ -281,7 +281,7 @@ Kortny executes model-written code and acts on your tools, so the guardrails are
 | Sandbox execution & artifacts | |
 | Dashboard & traces | |
 
-There is no Kortny cloud in the data path — no telemetry, no phone-home. If you need a fully self-contained integration plane, the bring-your-own-MCP path is on the roadmap.
+There is no Kortny cloud in the data path — no telemetry, no phone-home. If you need a fully self-contained integration plane, register your own MCP servers (`KORTNY_MCP_ENABLED`, default on) and skip the Composio broker entirely.
 
 ## 📦 Production deployment
 
@@ -399,10 +399,8 @@ Kill switch: `KORTNY_SANDBOX_EXECUTION_ENABLED=false`.
 
 Planned, not yet shipped — sequenced toward a stable V1.1:
 
-- **Bring-your-own MCP servers** — fully self-contained integration plane, zero third-party broker.
 - **Network-enabled sandbox profile** — `pip`/`npm` installs through an egress proxy with a registry allowlist, unlocking full app scaffolding.
-- **Production deployment hardening** — published Docker image, hardened compose variant, CI.
-- **Richer document generation** — polished multi-page PDFs and decks.
+- **Richer document generation** — polished multi-page PDFs and decks (structured doc-spec → themed renderer with a render-critique-revise loop).
 
 Follow the [issues](https://github.com/boffti/kortny/issues) for the live backlog.
 

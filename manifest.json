@@ -2,7 +2,8 @@
     "display_information": {
         "name": "Kortny",
         "description": "Your AI coworker",
-        "background_color": "#10396e"
+        "background_color": "#10396e",
+        "long_description": "It works like a teammate, not a chatbot you visit. Mention Kortny in any channel, send it a DM, or open the assistant panel, and it picks up the task, does the work, and posts the result right back in the thread, with the research, drafts, documents, and follow-through handled along the way.\n\n*What Kortny does*\n\n• *Research and synthesis*: searches the web and your workspace, weighs sources, and writes up cited, decision-ready briefs.\n• *Polished documents*: produces print-quality PDF reports, slide decks, and spreadsheets with covers, charts, and proper page layout, not plain text dumps.\n• *Data and analysis*: runs real code in a secure sandbox to crunch numbers, build charts, and turn raw data into answers.\n• *Drafting and writing*: reports, recaps, release notes, internal comms, cold emails, and more, written in your team's voice.\n• *Works in your stack*: connects to the tools you already use (Linear, GitHub, Notion, Google, and many more) to read context and take action.\n• *Remembers*: learns your workspace facts, preferences, and history, so you never have to repeat yourself.\n• *Stays proactive*: watches channels with your permission, surfaces opportunities worth acting on, and runs recurring work on a schedule you set in plain English.\n\n*How to use it*\n\n• *Mention it*: `@Kortny summarize this thread and draft a follow-up`\n• *DM it*: for quick questions or private work.\n• *Open the assistant panel*: for longer, back-and-forth conversations while Kortny narrates what it is doing in real time.\n• *React to guide it*: ✅ to approve an action, 🚫 to skip, ❌ to cancel, 🔄 to retry.\n• *Ask it to remember*: say \"remember our company is Acme Capital\" and it sticks.\n• *Schedule it*: try \"every Monday at 9am, post a digest of last week's wins.\"\n\n*Built to be trusted*\n\n• *Autonomous by design*: Kortny acts on its own for everyday work and only pauses to ask before anything destructive or outward-facing.\n• *Sandboxed execution*: code and skills run in an isolated, network-free container, so compute stays safe.\n• *Vetted skills*: every capability is reviewed before it is installed and scoped to where you want it.\n• *Self-hosted*: Kortny runs on your own infrastructure, with your model keys and your data. Nothing leaves your control.\n\n*Get started*\n\nInvite Kortny to a channel and mention it with a task, or open the assistant panel and just ask. The more it works alongside you, the more it learns your team."
     },
     "features": {
         "app_home": {
@@ -10,12 +11,12 @@
             "messages_tab_enabled": false,
             "messages_tab_read_only_enabled": false
         },
-        "assistant_view": {
-            "assistant_description": "Kortny is your AI coworker — ask it to research, draft, analyze data, track decisions, and automate recurring work across your workspace."
-        },
         "bot_user": {
             "display_name": "Kortny",
             "always_online": true
+        },
+        "assistant_view": {
+            "assistant_description": "Kortny is your AI coworker inside Slack. Ask it to research, draft documents, analyze data, track decisions, and automate recurring work, all without leaving your channels."
         }
     },
     "oauth_config": {

@@ -9,6 +9,9 @@ runs the **published GHCR images** with no source mount, restart policies,
 resource limits, secure cookies, and a startup guard that refuses to boot with
 placeholder secrets.
 
+> Maintainers: for versioning, cutting releases, upgrades, migrations, and
+> rollback, see **[RELEASING.md](./RELEASING.md)**.
+
 ## One-line install (fastest)
 
 On a fresh Linux server (Ubuntu/Debian/EC2/DigitalOcean/Hetzner):

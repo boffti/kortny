@@ -101,7 +101,23 @@ For a full `<!DOCTYPE html>` document (full-document mode), omit `--title` /
 `--subtitle` / `--kicker` — they are already in the document's cover section.
 The script injects the theme CSS into `<head>` automatically.
 
-### 4. Upload
+### 4. Read the PAGINATION REPORT and balance the pages
+
+You cannot tell how content paginates until you render it. After every render
+the script prints a `PAGINATION REPORT` with each page's fill level. **If it
+lists WARNINGS (under-filled pages), revise the content and re-render** — do
+not ship an unbalanced document:
+
+- **Under-filled body page / sparse last page** → merge a short section into the
+  previous one, expand thin content, condense so a near-empty trailing page
+  disappears, or move/remove a manual `.section-divider` (each divider forces a
+  fresh page, so a short section after one leaves whitespace).
+- **A component split awkwardly** → keep it together or move it.
+- Re-run the render and re-check. Aim for body pages above ~50%. Stop when the
+  report says `OK` or after 3 passes. Cover/divider pages read as full and are
+  fine. (Pass `--no-analyze` only for throwaway drafts.)
+
+### 5. Upload
 
 Upload `report.pdf` to the Slack thread. Add a one-line summary of the
 report's key finding. Offer a slide version (`deck-builder`) or the underlying

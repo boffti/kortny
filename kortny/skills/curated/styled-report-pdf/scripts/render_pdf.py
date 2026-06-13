@@ -873,6 +873,124 @@ def render(
 
 
 # ---------------------------------------------------------------------------
+# PAGINATION ANALYSIS — deterministic "measure" step of render->measure->revise
+# ---------------------------------------------------------------------------
+# You cannot know how content paginates at authoring time — only the renderer
+# does. So after rendering we measure the actual pages and report imbalance so
+# the agent can revise the content (not the CSS) and re-render. Pure geometry,
+# no LLM. Dark cover/divider pages read as ~full (full-page background) so they
+# never false-flag as under-filled.
+
+_LOW_FILL = 0.70  # body page whose content ends above this height fraction is sparse
+_MM_TO_PT = 72.0 / 25.4
+# Must match the @page margins in BASE_CSS (24mm top, 22mm bottom).
+_TOP_MARGIN_PT = 24 * _MM_TO_PT
+_BOTTOM_MARGIN_PT = 22 * _MM_TO_PT
+
+
+def _page_fill_ratio(page: "object") -> float:
+    """Fraction of the BODY content band (between the page margins) used top→down.
+
+    The meaningful "is the page under-filled" signal is how far down the content
+    band the content reaches: a page whose body stops at 40% leaves 60% trailing
+    whitespace. We measure only content inside the margins — the running
+    header/footer margin boxes (page number etc.) sit in the margins and would
+    otherwise make every page read as ~full. An area/ink metric also over-counts
+    (a full-width rule marks a whole band). Dark cover/divider pages carry a
+    full-page background drawing that fills the band → read as full (~1.0).
+    """
+    ph = page.rect.height
+    pw = page.rect.width
+    content_top = _TOP_MARGIN_PT
+    content_bottom = ph - _BOTTOM_MARGIN_PT
+    content_h = content_bottom - content_top
+    if content_h <= 0:
+        return 0.0
+
+    drawings = []
+    for drawing in page.get_drawings():
+        dr = drawing.get("rect")
+        if dr is not None:
+            drawings.append((float(dr.x0), float(dr.y0), float(dr.x1), float(dr.y1)))
+
+    # A true full-bleed design page (dark cover / section divider): a wide fill
+    # that reaches the physical page edges (past the margins). Such pages are
+    # intentionally sparse — treat as full so they never false-flag.
+    for x0, y0, x1, y1 in drawings:
+        if y1 >= ph - 3 and y0 <= 3 and (x1 - x0) >= pw * 0.8:
+            return 1.0
+
+    deepest = content_top
+    boxes: list[tuple[float, float]] = []
+    for block in page.get_text("blocks"):
+        boxes.append((float(block[1]), float(block[3])))
+    for x0, y0, x1, y1 in drawings:
+        # Skip background bands (the paper/content fill spans ~the whole content
+        # height) — they aren't content and would peg every page at 100%.
+        if (y1 - y0) >= 0.9 * content_h:
+            continue
+        boxes.append((y0, y1))
+    try:
+        for img in page.get_image_info():
+            bb = img["bbox"]
+            boxes.append((float(bb[1]), float(bb[3])))
+    except Exception:
+        pass
+    for y0, y1 in boxes:
+        # Only body content counts — skip header/footer margin boxes.
+        if y0 >= content_bottom or y1 <= content_top:
+            continue
+        deepest = max(deepest, min(y1, content_bottom))
+    return max(0.0, min(1.0, (deepest - content_top) / content_h))
+
+
+def analyze_pagination(pdf_path: Path) -> str:
+    """Return a deterministic pagination report for the rendered PDF.
+
+    The agent reads this and, if pages are unbalanced, revises the CONTENT
+    (merge a short tail section, condense, move/remove a break, resize a
+    component) and re-renders — up to a few passes. Never raises.
+    """
+    try:
+        import fitz  # pymupdf
+    except Exception:
+        return (
+            "PAGINATION REPORT: unavailable (pymupdf missing) — skip the "
+            "balance check."
+        )
+    try:
+        doc = fitz.open(str(pdf_path))
+        fills = [_page_fill_ratio(doc[i]) for i in range(doc.page_count)]
+    except Exception as exc:  # pragma: no cover - defensive
+        return f"PAGINATION REPORT: analysis failed ({exc})."
+
+    n = len(fills)
+    lines = [f"PAGINATION REPORT — {n} page(s)"]
+    for i, f in enumerate(fills, 1):
+        lines.append(f"  page {i}: {int(round(f * 100)):3d}% filled")
+    warnings = [
+        f"page {i}{' (last page)' if i == n else ''} is only "
+        f"{int(round(f * 100))}% full — under-filled."
+        for i, f in enumerate(fills, 1)
+        if f < _LOW_FILL
+    ]
+    if warnings:
+        lines.append("WARNINGS:")
+        lines.extend(f"  - {w}" for w in warnings)
+        lines.append(
+            "REVISE (content, not CSS): balance the pages — merge a short tail "
+            "section into the previous one, condense prose, move or remove a "
+            "page break, or resize a component (e.g. a 4-up stat grid -> 2-up). "
+            "Re-render and re-check. Aim for body pages > ~50% full; max 3 "
+            "passes. Intentionally sparse cover/divider pages read as full and "
+            "are fine."
+        )
+    else:
+        lines.append("OK: pages are reasonably balanced — no changes needed.")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -910,6 +1028,12 @@ def main(argv: list[str] | None = None) -> int:
             "minimal (internal/SaaS docs), editorial-feature (data stories/trends)."
         ),
     )
+    parser.add_argument(
+        "--no-analyze",
+        dest="analyze",
+        action="store_false",
+        help="Skip the post-render pagination report (printed by default).",
+    )
     args = parser.parse_args(argv)
 
     markup = sys.stdin.read() if args.html_stdin else Path(args.html).read_text()
@@ -924,6 +1048,8 @@ def main(argv: list[str] | None = None) -> int:
         style=args.style,
     )
     print(f"wrote pdf: {out} ({out.stat().st_size:,} bytes)")
+    if args.analyze:
+        print(analyze_pagination(out))
     return 0
 
 

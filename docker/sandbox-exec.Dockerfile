@@ -13,7 +13,8 @@
 # Keep this list aligned with the skill PROVENANCE.md dependency notes:
 #   spreadsheet-builder -> openpyxl
 #   deck-builder        -> python-pptx
-#   styled-report-pdf   -> weasyprint (+ pango/cairo/gdk-pixbuf system libs)
+#   styled-report-pdf   -> weasyprint (+ pango/cairo/gdk-pixbuf system libs);
+#                          pymupdf for the post-render pagination analysis loop
 #   chart-maker         -> matplotlib (+ pandas)
 #   (article-extractor/youtube-transcript -> trafilatura / yt-dlp)
 #   (slack-gif-creator  -> Pillow + ffmpeg)
@@ -45,6 +46,7 @@ RUN uv pip install --system --no-cache \
         openpyxl>=3.1 \
         python-pptx>=1.0 \
         weasyprint>=69 \
+        pymupdf>=1.24 \
         pandas>=2.2 \
         matplotlib>=3.9 \
         plotly>=5.22 \

@@ -491,6 +491,7 @@ Contributions are welcome: native tools, docs, bug reports, and integrations. St
 
 Found a security issue? Please use [private vulnerability reporting](./SECURITY.md), not a public issue.
 
+<!-- Re-enable once the repo has ~100+ stars (a flat near-zero line reads worse than no chart).
 ## ⭐ Star History
 
 <picture>
@@ -498,6 +499,7 @@ Found a security issue? Please use [private vulnerability reporting](./SECURITY.
   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=boffti/kortny&type=Date" />
   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=boffti/kortny&type=Date" />
 </picture>
+-->
 
 ## 👥 Contributors
 

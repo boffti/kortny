@@ -47,6 +47,8 @@ from kortny.db.models import (
 from kortny.db.models import LLMProvider as DbLLMProvider
 from kortny.embeddings import EmbeddingBackend, EmbeddingIndex, create_embedding_backend
 from kortny.execution import task_workspace
+from kortny.intent import LLMIntentClassifier
+from kortny.intent.models import IntentRequest, IntentSurface
 from kortny.knowledge_graph import (
     KG_CHANNEL_PROFILE_PROJECTED_MESSAGE,
     KG_RUNTIME_CONTEXT_REINFORCED_MESSAGE,
@@ -790,6 +792,97 @@ class AgentTaskExecutor:
             return self.thread_transcript_provider
         return SlackThreadTranscriptProvider(WebClient(token=settings.slack_bot_token))
 
+    def _ensure_intent_decision(
+        self,
+        *,
+        settings: Settings,
+        session: Session,
+        task: Task,
+        task_service: TaskService,
+    ) -> None:
+        """Classify intent for surfaces that bypassed ingress classification.
+
+        The assistant pane creates tasks directly (``slack/assistant.py``) without
+        running the intent classifier, so they reach the worker with no intent
+        decision and ``_resolve_unified_depth`` falls back to ``standard_tool_task``
+        — a research-backed report then dies at the 10-turn cap. Run the *real*
+        cheap-tier LLM classifier here (same one every other surface uses; it
+        layers the deterministic depth override on top) so depth, tier, and tool
+        hints come from genuine classification rather than a regex guess.
+
+        Best-effort and idempotent: an existing decision short-circuits (retries
+        don't re-classify), and any failure leaves the standard-depth default
+        intact — never fails the task.
+        """
+
+        payload = (
+            task.identity_payload if isinstance(task.identity_payload, dict) else {}
+        )
+        if payload.get("source_surface") != "assistant":
+            return
+        if _latest_intent_decision(session, task) is not None:
+            return
+
+        model_route = ModelRouter(settings).route_for_tier(
+            ModelRouteTier.cheap_fast,
+            reason="intent_classification",
+        )
+        try:
+            selection = self._select_runtime_model(
+                settings=settings,
+                session=session,
+                task=task,
+                model_route=model_route,
+            )
+            classifier = LLMIntentClassifier(
+                llm=LLMService(
+                    session=session,
+                    provider=create_provider_for_selection(
+                        settings=settings,
+                        selection=selection,
+                    ),
+                    provider_name=selection.provider_name,
+                    task_service=task_service,
+                    model_route=selection.model_route,
+                )
+            )
+            decision = classifier.classify(
+                task_id=task.id,
+                request=IntentRequest(
+                    text=task.input,
+                    surface=IntentSurface.dm,
+                ),
+            )
+        except Exception as exc:
+            log_observation(
+                logger,
+                "intent_classification_failed",
+                task=task,
+                source="assistant_worker",
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+            return
+
+        task_service.append_event(
+            task,
+            TaskEventType.log,
+            {
+                "message": "intent_classification_completed",
+                "source": "assistant_worker",
+                "decision": decision.model_dump(mode="json"),
+            },
+        )
+        log_observation(
+            logger,
+            "intent_classification_completed",
+            task=task,
+            source="assistant_worker",
+            classification=decision.classification.value,
+            response_depth=decision.response_depth,
+            depth_source=decision.depth_source,
+        )
+
     def _run_agent_runtime(
         self,
         *,
@@ -799,6 +892,12 @@ class AgentTaskExecutor:
         task_service: TaskService,
         working_dir: Path,
     ) -> AgentRunResult:
+        self._ensure_intent_decision(
+            settings=settings,
+            session=session,
+            task=task,
+            task_service=task_service,
+        )
         depth = _resolve_unified_depth(session, task)
         task_service.append_event(task, TaskEventType.log, depth.to_payload())
         log_observation(

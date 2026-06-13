@@ -52,6 +52,11 @@ from kortny.db.models import (
     WitnessOpportunityCandidate,
 )
 from kortny.db.session import make_engine, make_session_factory, normalize_database_url
+from kortny.intent.models import (
+    IntentClassification,
+    IntentDecision,
+    ModelTier,
+)
 from kortny.knowledge_graph import (
     KG_CHANNEL_PROFILE_PROJECTED_MESSAGE,
     KG_CHANNEL_REFRESH_HISTORY_LOADED_MESSAGE,
@@ -995,6 +1000,152 @@ def test_agent_executor_records_unified_depth_decision_for_deep_workflow(
         and payload.get("actual_path") == "adk"
         for payload in route_events
     )
+
+
+def _intent_settings() -> Settings:
+    return Settings.model_validate(
+        {
+            "SLACK_BOT_TOKEN": "xoxb-test",
+            "SLACK_APP_TOKEN": "xapp-test",
+            "SLACK_SIGNING_SECRET": "signing-secret",
+            "LLM_PROVIDER": SettingsLLMProvider.openrouter,
+            "LLM_API_KEY": "openrouter-key",
+            "LLM_MODEL": "anthropic/sonnet-default",
+            "LLM_CHEAP_MODEL": "deepseek/deepseek-v4-flash",
+            "POSTGRES_URL": "postgresql://kortny:kortny@localhost/kortny",
+        }
+    )
+
+
+def _fake_deep_workflow_decision() -> IntentDecision:
+    return IntentDecision(
+        addressed_to_kortny=True,
+        classification=IntentClassification.task_request,
+        confidence=0.9,
+        should_create_task=True,
+        should_ack_with_reaction=False,
+        needs_channel_context=False,
+        needs_thread_context=False,
+        needs_file_context=False,
+        model_tier=ModelTier.standard,
+        reason="Detailed report request — research + render workflow.",
+        response_depth="deep_workflow",
+        depth_source="deterministic_override",
+    )
+
+
+class _RecordingIntentClassifier:
+    """Captures classify() requests so tests can assert if/when it ran."""
+
+    requests: list[Any] = []
+
+    def __init__(self, **_kwargs: Any) -> None:
+        pass
+
+    def classify(self, *, task_id: Any, request: Any) -> IntentDecision:
+        _RecordingIntentClassifier.requests.append(request)
+        return _fake_deep_workflow_decision()
+
+
+def test_ensure_intent_decision_classifies_assistant_task_without_decision(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = create_task(db_session, event_id="EvAssistantNoDecision")
+    task.input = "Create a detailed PDF report about GTA 6"
+    task.identity_payload = {"source_surface": "assistant"}
+    db_session.commit()
+    task_service = TaskService(db_session)
+
+    _RecordingIntentClassifier.requests = []
+    monkeypatch.setattr(
+        "kortny.worker.agent_executor.LLMIntentClassifier",
+        _RecordingIntentClassifier,
+    )
+    settings = _intent_settings()
+
+    AgentTaskExecutor(settings=settings)._ensure_intent_decision(
+        settings=settings,
+        session=db_session,
+        task=task,
+        task_service=task_service,
+    )
+
+    assert len(_RecordingIntentClassifier.requests) == 1
+    assert _RecordingIntentClassifier.requests[0].text == (
+        "Create a detailed PDF report about GTA 6"
+    )
+    # The persisted event drives _resolve_unified_depth -> deep_workflow (16 turns).
+    decision_events = [
+        event.payload
+        for event in task_events(db_session, task)
+        if event.payload.get("message") == "intent_classification_completed"
+    ]
+    assert len(decision_events) == 1
+    assert decision_events[0]["source"] == "assistant_worker"
+    assert decision_events[0]["decision"]["response_depth"] == "deep_workflow"
+
+
+def test_ensure_intent_decision_is_idempotent_when_decision_exists(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = create_task(db_session, event_id="EvAssistantHasDecision")
+    task.input = "Create a detailed PDF report about GTA 6"
+    task.identity_payload = {"source_surface": "assistant"}
+    db_session.commit()
+    task_service = TaskService(db_session)
+    task_service.append_event(
+        task,
+        TaskEventType.log,
+        {
+            "message": "intent_classification_completed",
+            "decision": _fake_deep_workflow_decision().model_dump(mode="json"),
+        },
+    )
+
+    _RecordingIntentClassifier.requests = []
+    monkeypatch.setattr(
+        "kortny.worker.agent_executor.LLMIntentClassifier",
+        _RecordingIntentClassifier,
+    )
+    settings = _intent_settings()
+
+    AgentTaskExecutor(settings=settings)._ensure_intent_decision(
+        settings=settings,
+        session=db_session,
+        task=task,
+        task_service=task_service,
+    )
+
+    assert _RecordingIntentClassifier.requests == []
+
+
+def test_ensure_intent_decision_skips_non_assistant_tasks(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = create_task(db_session, event_id="EvChannelTask")
+    task.input = "Create a detailed PDF report about GTA 6"
+    task.identity_payload = {"source_surface": "app_mention"}
+    db_session.commit()
+    task_service = TaskService(db_session)
+
+    _RecordingIntentClassifier.requests = []
+    monkeypatch.setattr(
+        "kortny.worker.agent_executor.LLMIntentClassifier",
+        _RecordingIntentClassifier,
+    )
+    settings = _intent_settings()
+
+    AgentTaskExecutor(settings=settings)._ensure_intent_decision(
+        settings=settings,
+        session=db_session,
+        task=task,
+        task_service=task_service,
+    )
+
+    assert _RecordingIntentClassifier.requests == []
 
 
 def test_agent_executor_answers_schedule_state_question_with_fast_path(
